@@ -1,0 +1,46 @@
+module Chess
+
+using Printf
+
+include("types.jl")
+include("attacks.jl")
+include("fen.jl")
+include("movegen.jl")
+include("perft.jl")
+
+function __init__()
+    _init_attacks!()
+    _init_castling_masks!()
+end
+
+export
+    # types
+    Board, Move, MoveList, Color, PieceKind, Piece,
+    White, Black, NoPiece, Pawn, Knight, Bishop, Rook, Queen, King,
+    NULL_MOVE,
+    # flags
+    MF_QUIET, MF_DPUSH, MF_KS_CAST, MF_QS_CAST,
+    MF_CAPTURE, MF_EP, MF_PROMO, MF_PROMO_N, MF_PROMO_B, MF_PROMO_R, MF_PROMO_Q,
+    MF_PRCAP_N, MF_PRCAP_B, MF_PRCAP_R, MF_PRCAP_Q,
+    # square helpers
+    sq, file_of, rank_of, sq_bb, sq_name,
+    A1, B1, C1, D1, E1, F1, G1, H1,
+    A8, B8, C8, D8, E8, F8, G8, H8,
+    # bitboard helpers
+    bb, lsb, BitIter, count_bits,
+    # board ops
+    all_occ, other,
+    # fen
+    board_from_fen, board_to_fen, display_board, STARTPOS,
+    move_from_uci, move_to_uci,
+    # move query
+    from_sq, to_sq, flags, is_capture, is_promo, is_castle, is_ep, promo_kind,
+    # movegen
+    generate_moves!, make_move!, unmake_move!, king_in_check, count_legal_moves,
+    # attacks
+    attackers_to, sq_attacked_by,
+    rook_attacks, bishop_attacks, queen_attacks, knight_attacks, king_attacks, pawn_attacks,
+    # perft
+    perft, perft_divide, run_perft_suite, PERFT_SUITE
+
+end
