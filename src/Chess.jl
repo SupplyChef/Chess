@@ -27,7 +27,7 @@ export
     A1, B1, C1, D1, E1, F1, G1, H1,
     A8, B8, C8, D8, E8, F8, G8, H8,
     # bitboard helpers
-    bb, lsb, BitIter, count_bits,
+    BB, bb, lsb, BitIter, count_bits,
     # board ops
     all_occ, other,
     # fen
