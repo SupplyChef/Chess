@@ -1,9 +1,15 @@
 # play_lichess.jl — Connect the Chess engine to the Lichess Bot API.
-# Run: julia --project src/play_lichess.jl
+#
+# Usage (from Julia REPL with the project active):
+#   using Chess
+#   include("src/play_lichess.jl")
+#
+# Or run as a script:
+#   julia --project src/play_lichess.jl
+#
 # Requires: LICHESS_TOKEN env var (OAuth token for a Lichess Bot account).
 # Optional: LICHESS_BOT_NAME env var (default "BaymaxMate").
 
-using Chess
 using HTTP
 using JSON3
 
