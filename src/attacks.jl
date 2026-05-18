@@ -127,7 +127,7 @@ end
 
 @inline function sq_attacked_by(b::Board, sq::Square, attacker::Color, occ::BB)::Bool
     a = attacker
-    sq_bb(sq) & (
+    (
         knight_attacks(sq) & bb(b, a, Knight) |
         king_attacks(sq)   & bb(b, a, King)   |
         rook_attacks(sq, occ)   & (bb(b, a, Rook)   | bb(b, a, Queen)) |
