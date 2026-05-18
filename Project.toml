@@ -1,9 +1,15 @@
 name = "Chess"
 uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
-authors = ["Chess Bot"]
 version = "0.1.0"
+authors = ["Chess Bot"]
 
 [deps]
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [compat]
+Printf = "1.11.0"
+Random = "1.11.0"
+Test = "1.11.0"
 julia = "1.9"
