@@ -83,11 +83,12 @@ end
 
 # ── Search state ──────────────────────────────────────────────────────────────
 mutable struct SearchInfo
-    tt        ::Vector{TTEntry}
-    killers   ::Matrix{Move}   # killers[1:2, ply]
-    nodes     ::Int64
-    stop      ::Bool
-    time_limit::Float64        # wall-clock cutoff (seconds, from time())
+    tt         ::Vector{TTEntry}
+    killers    ::Matrix{Move}   # killers[1:2, ply]
+    nodes      ::Int64
+    stop       ::Bool
+    time_start ::Float64        # wall-clock start (seconds, from time())
+    time_limit ::Float64        # wall-clock cutoff (seconds, from time())
 end
 
 function SearchInfo()
@@ -96,6 +97,7 @@ function SearchInfo()
         fill(NULL_MOVE, 2, MAX_PLY),
         Int64(0),
         false,
+        0.0,
         0.0,
     )
 end
@@ -107,6 +109,28 @@ struct SearchResult
     depth::Int            # depth of completed iteration
     nodes::Int64
     eval ::EvalBreakdown  # static eval of the root position
+    pv   ::Vector{Move}   # principal variation extracted from TT
+end
+
+# Walk the TT from the root to extract the principal variation.
+# Applies moves to b and unwinds them — b is restored on return.
+function _extract_pv(b::Board, tt::Vector{TTEntry}, root_move::Move, max_len::Int)::Vector{Move}
+    pv    = Move[]
+    undos = UndoInfo[]
+    seen  = Set{UInt64}()
+    m     = root_move
+    while m != NULL_MOVE && length(pv) < max_len
+        b.hash in seen && break
+        push!(seen, b.hash)
+        push!(pv, m)
+        push!(undos, make_move!(b, m))
+        tte = _tt_get(tt, b.hash)
+        m   = (tte.key == b.hash && tte.flag == TT_EXACT) ? tte.move : NULL_MOVE
+    end
+    for i in length(pv):-1:1
+        unmake_move!(b, pv[i], undos[i])
+    end
+    pv
 end
 
 # ── Quiescence search ─────────────────────────────────────────────────────────
@@ -266,12 +290,13 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo())::Sea
     generate_moves!(ml, b)
     if length(ml) == 0
         score = king_in_check(b, b.side) ? -(MATE_SCORE - 1) : 0
-        return SearchResult(NULL_MOVE, score, 0, Int64(0), evaluate(b))
+        return SearchResult(NULL_MOVE, score, 0, Int64(0), evaluate(b), Move[])
     end
 
     si.stop       = false
     si.nodes      = 0
-    si.time_limit = time() + time_ms / 1000.0
+    si.time_start = time()
+    si.time_limit = si.time_start + time_ms / 1000.0
     fill!(si.killers, NULL_MOVE)
 
     best_move  = NULL_MOVE
@@ -287,8 +312,16 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo())::Sea
         best_score = score
         best_depth = depth
 
+        elapsed_ms = round(Int, (time() - si.time_start) * 1_000)
+        nps        = elapsed_ms > 0 ? si.nodes * 1_000 ÷ elapsed_ms : 0
+        pv_moves   = _extract_pv(b, si.tt, best_move, 8)
+        pv_str     = join(move_to_uci.(pv_moves), " ")
+        @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  pv %s\n",
+                depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, pv_str)
+
         abs(score) >= MATE_SCORE - MAX_PLY && break  # mate found
     end
 
-    SearchResult(best_move, best_score, best_depth, si.nodes, evaluate(b))
+    pv = _extract_pv(b, si.tt, best_move, 10)
+    SearchResult(best_move, best_score, best_depth, si.nodes, evaluate(b), pv)
 end
