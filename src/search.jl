@@ -61,17 +61,30 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
     0
 end
 
-# Returns a sorted (score, move) vector for the given position and ply.
-function _order_moves(ml::MoveList, b::Board,
-                      hash_move::Move, killers::Matrix{Move}, ply::Int)
-    n = length(ml)
-    buf = Vector{Tuple{Int,Move}}(undef, n)
-    for i in 1:n
-        mv = ml[i]
-        buf[i] = (_move_score(mv, b, hash_move, killers, ply), mv)
+# Fill ml.scores with move ordering scores (no allocation).
+function _score_moves!(ml::MoveList, b::Board,
+                       hash_move::Move, killers::Matrix{Move}, ply::Int)
+    for i in 1:length(ml)
+        ml.scores[i] = _move_score(ml[i], b, hash_move, killers, ply)
     end
-    sort!(buf; by = first, rev = true)
-    buf
+end
+
+# Partial selection sort: swap the best move in [idx..n] into position idx.
+# Modifies ml.moves and ml.scores in-place; returns the chosen move.
+@inline function _pick_move!(ml::MoveList, idx::Int)::Move
+    best_i = idx
+    best_s = ml.scores[idx]
+    for i in idx+1:length(ml)
+        if ml.scores[i] > best_s
+            best_s = ml.scores[i]
+            best_i = i
+        end
+    end
+    if best_i != idx
+        ml.moves[idx],  ml.moves[best_i]  = ml.moves[best_i],  ml.moves[idx]
+        ml.scores[idx], ml.scores[best_i] = ml.scores[best_i], ml.scores[idx]
+    end
+    ml.moves[idx]
 end
 
 function _update_killers!(killers::Matrix{Move}, ply::Int, m::Move)
@@ -82,19 +95,23 @@ function _update_killers!(killers::Matrix{Move}, ply::Int, m::Move)
 end
 
 # ── Search state ──────────────────────────────────────────────────────────────
+const MOVE_STACK_SIZE = MAX_PLY + 64   # regular depth + qsearch budget
+
 mutable struct SearchInfo
     tt         ::Vector{TTEntry}
-    killers    ::Matrix{Move}   # killers[1:2, ply]
+    killers    ::Matrix{Move}            # killers[1:2, ply]
+    move_stack ::Vector{MoveList}        # pre-allocated, one per ply — no per-node alloc
     nodes      ::Int64
     stop       ::Bool
-    time_start ::Float64        # wall-clock start (seconds, from time())
-    time_limit ::Float64        # wall-clock cutoff (seconds, from time())
+    time_start ::Float64                 # wall-clock start (seconds, from time())
+    time_limit ::Float64                 # wall-clock cutoff (seconds, from time())
 end
 
 function SearchInfo()
     SearchInfo(
         fill(TT_EMPTY, TT_SIZE),
         fill(NULL_MOVE, 2, MAX_PLY),
+        [MoveList() for _ in 1:MOVE_STACK_SIZE],
         Int64(0),
         false,
         0.0,
@@ -145,17 +162,21 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
         alpha = max(alpha, stand_pat)
     end
 
-    ml = MoveList()
+    ml = si.move_stack[min(ply, MOVE_STACK_SIZE)]
     generate_moves!(ml, b)
 
     length(ml) == 0 && return in_check ? -(MATE_SCORE - ply) : 0
 
+    _score_moves!(ml, b, NULL_MOVE, si.killers, ply)
+
     best = in_check ? -(MATE_SCORE - ply) : alpha
-    for m in ml
+    for i in 1:length(ml)
+        m  = _pick_move!(ml, i)
         fl = flags(m)
-        # When not in check, only search captures, e.p., and promotions.
+        # After ordering, captures/promos score highest; quiet moves score 0.
+        # Once we reach a quiet move, all remaining are quiet too — break.
         if !in_check && (fl & MF_CAPTURE) == 0 && fl != MF_EP && (fl & MF_PROMO) == 0
-            continue
+            break
         end
 
         undo  = make_move!(b, m)
@@ -200,18 +221,21 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # At horizon: drop into quiescence search.
     depth <= 0 && return _quiesce(b, alpha, beta, ply, si)
 
-    ml = MoveList()
+    ml = si.move_stack[min(ply, MOVE_STACK_SIZE)]
     generate_moves!(ml, b)
 
     if length(ml) == 0
         return king_in_check(b, b.side) ? -(MATE_SCORE - ply) : 0
     end
 
+    _score_moves!(ml, b, hash_move, si.killers, ply)
+
     orig_alpha = alpha
     best_score = -(MATE_SCORE + 1)
     best_move  = NULL_MOVE
 
-    for (_, m) in _order_moves(ml, b, hash_move, si.killers, ply)
+    for i in 1:length(ml)
+        m = _pick_move!(ml, i)
         undo  = make_move!(b, m)
         score = -_negamax(b, depth - 1, -beta, -alpha, ply + 1, si)
         unmake_move!(b, m, undo)
@@ -252,13 +276,15 @@ function _search_root(b::Board, depth::Int, si::SearchInfo)::Tuple{Int,Move}
     tte       = _tt_get(si.tt, b.hash)
     hash_move = tte.key == b.hash ? tte.move : NULL_MOVE
 
-    ml = MoveList()
+    ml = si.move_stack[1]
     generate_moves!(ml, b)
     if length(ml) == 0
         return (king_in_check(b, b.side) ? -(MATE_SCORE - 1) : 0, NULL_MOVE)
     end
 
-    for (_, m) in _order_moves(ml, b, hash_move, si.killers, 1)
+    _score_moves!(ml, b, hash_move, si.killers, 1)
+    for i in 1:length(ml)
+        m = _pick_move!(ml, i)
         undo  = make_move!(b, m)
         score = -_negamax(b, depth - 1, -beta, -alpha, 2, si)
         unmake_move!(b, m, undo)
@@ -286,7 +312,7 @@ Pass a pre-allocated `SearchInfo` to reuse the transposition table across moves.
 """
 function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo())::SearchResult
     # Handle checkmate / stalemate before touching the TT or time management.
-    ml = MoveList()
+    ml = si.move_stack[1]
     generate_moves!(ml, b)
     if length(ml) == 0
         score = king_in_check(b, b.side) ? -(MATE_SCORE - 1) : 0

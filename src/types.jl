@@ -146,12 +146,12 @@ Base.length(it::BitIter) = count_ones(it.bb)
 Base.eltype(::Type{BitIter}) = Square
 
 # ── Move list ──────────────────────────────────────────────────────────────────
-# Pre-allocated on the stack to avoid GC pressure during search.
 const MAX_MOVES = 256
 struct MoveList
-    moves::Vector{Move}
-    count::Base.RefValue{Int}
-    MoveList() = new(Vector{Move}(undef, MAX_MOVES), Ref(0))
+    moves ::Vector{Move}
+    scores::Vector{Int}        # parallel score array for in-place ordering
+    count ::Base.RefValue{Int}
+    MoveList() = new(Vector{Move}(undef, MAX_MOVES), Vector{Int}(undef, MAX_MOVES), Ref(0))
 end
 
 @inline Base.length(ml::MoveList) = ml.count[]
