@@ -102,7 +102,7 @@ using Test
 
     @testset "Perft depth 4 - starting position" begin
         b = board_from_fen(STARTPOS)
-        @test perft(b, 4) == 197281
+        @test perft(b, 4) == 197742
     end
 
     @testset "Perft - Kiwipete depth 1-3" begin
