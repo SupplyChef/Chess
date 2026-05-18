@@ -85,6 +85,29 @@ using Test
         end
     end
 
+    @testset "Zobrist hash - consistent with compute_hash" begin
+        for fen in [
+            STARTPOS,
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        ]
+            b = board_from_fen(fen)
+            @test b.hash == compute_hash(b)
+
+            # Hash must be restored perfectly by unmake.
+            ml = MoveList()
+            generate_moves!(ml, b)
+            h0 = b.hash
+            for m in ml
+                undo = make_move!(b, m)
+                # After make: hash should equal compute_hash.
+                @test b.hash == compute_hash(b)
+                unmake_move!(b, m, undo)
+                @test b.hash == h0
+            end
+        end
+    end
+
     @testset "Perft depth 1 - starting position" begin
         b = board_from_fen(STARTPOS)
         @test perft(b, 1) == 20
@@ -178,6 +201,77 @@ using Test
         generate_moves!(ml, b)
         promos = filter(m -> is_promo(m), collect(ml))
         @test length(promos) == 4   # Q, R, B, N
+    end
+
+    # ── Evaluation ────────────────────────────────────────────────────────────
+
+    @testset "Evaluation - starting position is near zero" begin
+        b = board_from_fen(STARTPOS)
+        e = evaluate(b)
+        @test e.material == 0           # perfectly balanced
+        @test abs(total(e)) < 50        # PST + small tempo only
+    end
+
+    @testset "Evaluation - material advantage detected" begin
+        # White has an extra queen.
+        b = board_from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+        e = evaluate(b)
+        @test e.material == 900
+        @test total(e) > 800
+    end
+
+    @testset "Evaluation - passed pawn bonus" begin
+        # White pawn on e6, no black pawns on d-f files → passed.
+        b = board_from_fen("4k3/8/4P3/8/8/8/8/4K3 w - - 0 1")
+        e = evaluate(b)
+        @test e.pawn_structure > 0      # white passed pawn bonus
+    end
+
+    @testset "Evaluation - doubled pawn penalty" begin
+        # White has two pawns on the e-file.
+        b = board_from_fen("4k3/8/4P3/4P3/8/8/8/4K3 w - - 0 1")
+        e = evaluate(b)
+        @test e.pawn_structure < 0      # doubled-pawn penalty outweighs any bonus here
+    end
+
+    # ── Search ────────────────────────────────────────────────────────────────
+
+    @testset "Search - finds free capture" begin
+        # White rook can take the undefended black queen on d5 freely.
+        b = board_from_fen("7k/8/8/3q4/8/8/8/3R3K w - - 0 1")
+        r = search_move(b, 5_000)
+        @test move_to_uci(r.move) == "d1d5"
+    end
+
+    @testset "Search - avoids losing piece" begin
+        # White knight on e4 is attacked by the black pawn on d5; the knight must move.
+        b = board_from_fen("4k3/8/8/3p4/4N3/8/8/4K3 w - - 0 1")
+        r = search_move(b, 5_000)
+        @test from_sq(r.move) == sq(4, 3)   # knight on e4 moves away
+    end
+
+    @testset "Search - finds mate in 1" begin
+        # Position after 1.e4 e5 2.Bc4 Nc6 3.Qh5 Nf6??; white plays Qxf7#.
+        b = board_from_fen("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4")
+        r = search_move(b, 5_000)
+        @test move_to_uci(r.move) == "h5f7"
+    end
+
+    @testset "Search - stalemate returns 0" begin
+        # Black is stalemated; search_move must return NULL_MOVE with score 0.
+        b = board_from_fen("k7/8/1Q6/8/8/8/8/7K b - - 0 1")
+        r = search_move(b, 1_000)
+        @test r.score == 0
+        @test r.move == NULL_MOVE
+    end
+
+    @testset "Search - SearchInfo reuse keeps TT" begin
+        b  = board_from_fen(STARTPOS)
+        si = SearchInfo()
+        r1 = search_move(b, 500; si)
+        r2 = search_move(b, 500; si)
+        # Second search with warm TT should find at least the same or better move.
+        @test r2.depth >= r1.depth
     end
 
 end

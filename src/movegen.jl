@@ -10,6 +10,7 @@ struct UndoInfo
     castling::UInt8
     halfmove::Int
     captured_sq::Int    # differs from to_sq for en-passant
+    hash::UInt64
 end
 
 function make_move!(b::Board, m::Move)::UndoInfo
@@ -22,40 +23,57 @@ function make_move!(b::Board, m::Move)::UndoInfo
     ep_sq_save    = b.ep_square
     cast_save     = b.castling
     hm_save       = b.halfmove
+    hash_save     = b.hash
+
+    # XOR out mutable state before changes
+    b.hash ⊻= ZOBRIST_CAST[b.castling + 1]
+    ep_sq_save != -1 && (b.hash ⊻= zob_ep(ep_sq_save))
 
     _remove_piece!(b, us, moving_kind, fr)
+    b.hash ⊻= zob_piece(us, moving_kind, fr)
 
     if fl == MF_EP
         captured_sq   = to + (us == White ? -8 : 8)
         captured_kind = Pawn
         _remove_piece!(b, them, Pawn, captured_sq)
+        b.hash ⊻= zob_piece(them, Pawn, captured_sq)
     elseif (fl & MF_CAPTURE) != 0
         captured_kind = b.piece_on[to+1].kind
         _remove_piece!(b, them, captured_kind, to)
+        b.hash ⊻= zob_piece(them, captured_kind, to)
     end
 
     place_kind = (fl & MF_PROMO) != 0 ? promo_kind(m) : moving_kind
     _add_piece!(b, us, place_kind, to)
+    b.hash ⊻= zob_piece(us, place_kind, to)
 
     if fl == MF_KS_CAST
         rf, rt = us == White ? (H1, F1) : (H8, F8)
         _remove_piece!(b, us, Rook, rf); _add_piece!(b, us, Rook, rt)
+        b.hash ⊻= zob_piece(us, Rook, rf) ⊻ zob_piece(us, Rook, rt)
     elseif fl == MF_QS_CAST
         rf, rt = us == White ? (A1, D1) : (A8, D8)
         _remove_piece!(b, us, Rook, rf); _add_piece!(b, us, Rook, rt)
+        b.hash ⊻= zob_piece(us, Rook, rf) ⊻ zob_piece(us, Rook, rt)
     end
 
     b.castling  &= _castling_mask(fr) & _castling_mask(to)
     b.ep_square  = fl == MF_DPUSH ? fr + (us == White ? 8 : -8) : -1
     b.halfmove   = (moving_kind == Pawn || captured_kind != NoPiece) ? 0 : b.halfmove + 1
 
+    # XOR in updated mutable state
+    b.hash ⊻= ZOBRIST_CAST[b.castling + 1]
+    b.ep_square != -1 && (b.hash ⊻= zob_ep(b.ep_square))
+    b.hash ⊻= ZOBRIST_SIDE[]
+
     if us == Black; b.fullmove += 1; end
     b.side = them
 
-    UndoInfo(captured_kind, ep_sq_save, cast_save, hm_save, captured_sq)
+    UndoInfo(captured_kind, ep_sq_save, cast_save, hm_save, captured_sq, hash_save)
 end
 
 function unmake_move!(b::Board, m::Move, undo::UndoInfo)
+    b.hash      = undo.hash
     b.side      = other(b.side)
     us = b.side; them = other(us)
     fr = from_sq(m); to = to_sq(m); fl = flags(m)

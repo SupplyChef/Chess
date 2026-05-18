@@ -4,13 +4,17 @@ using Printf
 
 include("types.jl")
 include("attacks.jl")
+include("zobrist.jl")
 include("fen.jl")
 include("movegen.jl")
+include("eval.jl")
+include("search.jl")
 include("perft.jl")
 
 function __init__()
     _init_attacks!()
     _init_castling_masks!()
+    _init_zobrist!()
 end
 
 export
@@ -40,6 +44,12 @@ export
     # attacks
     attackers_to, sq_attacked_by,
     rook_attacks, bishop_attacks, queen_attacks, knight_attacks, king_attacks, pawn_attacks,
+    # zobrist
+    compute_hash,
+    # eval
+    EvalBreakdown, evaluate, total, explain, PIECE_VALUE,
+    # search
+    SearchInfo, SearchResult, search_move, MATE_SCORE,
     # perft
     perft, perft_divide, run_perft_suite, PERFT_SUITE
 

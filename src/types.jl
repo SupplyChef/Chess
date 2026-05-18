@@ -90,6 +90,7 @@ mutable struct Board
     castling::UInt8       # bits: 1=WK 2=WQ 4=BK 8=BQ
     halfmove::Int         # for 50-move rule
     fullmove::Int
+    hash::UInt64          # Zobrist hash, maintained incrementally
 
     function Board()
         new(
@@ -101,6 +102,7 @@ mutable struct Board
             0x0,
             0,
             1,
+            UInt64(0),
         )
     end
 end
