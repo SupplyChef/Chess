@@ -155,7 +155,7 @@ struct MoveList
 end
 
 @inline Base.length(ml::MoveList) = ml.count[]
-@inline function push!(ml::MoveList, m::Move)
+@inline function Base.push!(ml::MoveList, m::Move)
     ml.count[] += 1
     ml.moves[ml.count[]] = m
 end
