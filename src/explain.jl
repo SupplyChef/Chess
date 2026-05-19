@@ -51,24 +51,12 @@ function _pv_material_swing(pv::Vector{Move}, b::Board)::Int
     net
 end
 
-# Plain-English position assessment from the bot's perspective.
-function _eval_phrase(cp::Int)::String
-    if     cp >=  300; "I have a decisive advantage"
-    elseif cp >=  100; "I'm clearly better"
-    elseif cp >=   50; "I'm slightly better"
-    elseif cp >=  -49; "it's roughly equal"
-    elseif cp >= -100; "you're slightly better"
-    elseif cp >= -300; "you have a clear advantage"
-    else;              "you have a decisive advantage"
-    end
-end
-
 # After making move m, return the most valuable enemy piece our moved piece now
 # attacks (excluding the king). Returns (NoPiece, -1) if nothing is attacked.
 # Modifies b temporarily; restored on return.
 function _attacked_enemy(b::Board, m::Move)::Tuple{PieceKind, Int}
     undo    = make_move!(b, m)
-    us      = other(b.side)   # b.side is now opponent
+    us      = other(b.side)
     them    = b.side
     dst     = to_sq(m)
     occ     = all_occ(b)
@@ -94,30 +82,41 @@ function _attacked_enemy(b::Board, m::Move)::Tuple{PieceKind, Int}
     (best_k, best_sq)
 end
 
+# Returns true if any piece of `defender` attacks `sq` (i.e. the piece on sq is defended).
+# Call with the board already in the position where the check is relevant.
+function _is_defended(b::Board, sq::Int, defender::Color)::Bool
+    occ = all_occ(b)
+    (pawn_attacks(sq, other(defender))  & bb(b, defender, Pawn))                          != 0 && return true
+    (knight_attacks(sq)                 & bb(b, defender, Knight))                         != 0 && return true
+    (bishop_attacks(sq, occ)            & (bb(b, defender, Bishop) | bb(b, defender, Queen))) != 0 && return true
+    (rook_attacks(sq, occ)              & (bb(b, defender, Rook)   | bb(b, defender, Queen))) != 0 && return true
+    (king_attacks(sq)                   & bb(b, defender, King))                            != 0 && return true
+    false
+end
+
 """
     explain_move(result, b, my_color) → String
 
 Build a Lichess-chat explanation for the bot's move.
-- Tactical: shown when AB score confirms a real material change (≥60 cp swing).
-- Positional: names the concrete chess objective (open file, outpost, attack, …).
+- Tactical: shown when the AB score confirms a real material change (≥60 cp swing).
+- Positional: names the concrete chess objective.
 `b` must be the board *before* the move was played.
 """
 function explain_move(result::SearchResult, b::Board, my_color::Color)::String
     our_cp  = result.score
     our_san = _approx_san(result.move, b)
-    ep      = _eval_phrase(our_cp)
     s(x)    = x >= 0 ? "+$(x)" : "$(x)"
     score_note = "($(s(our_cp))cp, depth $(result.depth))"
 
     isempty(result.pv) &&
-        return "I played $our_san. $(uppercasefirst(ep)) $score_note."
+        return "I played $our_san. $score_note."
 
     swing = _pv_material_swing(result.pv, b)
 
     genuinely_winning = swing >=  90 && our_cp >=  60
     genuinely_losing  = swing <= -90 && our_cp <= -60
 
-    # ── Tactical branch: we win or lose material along the PV ────────────────────
+    # ── Tactical branch ───────────────────────────────────────────────────────────
     if genuinely_winning || genuinely_losing
         winning = genuinely_winning
         what    = abs(swing) >= 800 ? "the queen" : abs(swing) >= 450 ? "the rook" :
@@ -138,20 +137,20 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
         unmake_move!(b, result.move, undo)
 
         if winning
-            return "I played $our_san, winning $what.$cont $(uppercasefirst(ep)) $score_note."
+            return "I played $our_san, winning $what.$cont $score_note."
         else
-            return "I played $our_san — losing $what, but it's the best I can do.$cont $(uppercasefirst(ep)) $score_note."
+            return "I played $our_san — losing $what, but it's the best I can do.$cont $score_note."
         end
     end
 
-    # ── Positional branch ────────────────────────────────────────────────────────
+    # ── Positional branch ─────────────────────────────────────────────────────────
     fl     = flags(result.move)
     sgn    = my_color == White ? 1 : -1
     e      = result.eval
     our_fr = from_sq(result.move)
     our_k  = b.piece_on[our_fr+1].kind
 
-    # Detect attack on enemy piece (before advancing board).
+    # Detect attack on enemy piece before advancing the board.
     atk_k, atk_sq = _attacked_enemy(b, result.move)
     attacking = atk_k != NoPiece
 
@@ -163,6 +162,20 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
     undo = make_move!(b, result.move)
     e2   = evaluate(b)
     dst  = to_sq(result.move)
+
+    # An attack is worth mentioning only if we would win material (we attack something
+    # more valuable than what we risk) OR the piece has no defender (free capture threat).
+    # Attacks on defended equal/lesser-value pieces are noise, not the real reason.
+    attack_worth_noting = false
+    if attacking
+        our_val = PIECE_VALUE[Int(our_k)+1]
+        atk_val = PIECE_VALUE[Int(atk_k)+1]
+        if atk_val > our_val
+            attack_worth_noting = true   # would win material even in a trade
+        else
+            attack_worth_noting = !_is_defended(b, atk_sq, other(my_color))
+        end
+    end
 
     # Rook on open / semi-open file.
     rook_file_str = ""
@@ -177,9 +190,9 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
         end
     end
 
-    # Knight outpost: no enemy pawn can ever chase it away from dst.
-    # Only label it an outpost when the knight has entered the opponent's half.
-    in_opp_half = my_color == White ? rank_of(dst) >= 4 : rank_of(dst) <= 3
+    # Knight outpost: no enemy pawn can ever chase it off dst.
+    # Label it only when the knight has entered the opponent's half of the board.
+    in_opp_half    = my_color == White ? rank_of(dst) >= 4 : rank_of(dst) <= 3
     knight_outpost = our_k == Knight && in_opp_half &&
                      (pawn_attacks(dst, my_color) & bb(b, other(my_color), Pawn)) == 0
 
@@ -187,14 +200,12 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
     creates_passed = our_k == Pawn && !is_capture(result.move) && !is_ep(result.move) &&
                      _is_passed(dst, my_color, bb(b, other(my_color), Pawn))
 
-    # Capture that opens our own file (pawn captures away from its file).
+    # Pawn capture that clears our own file for a rook.
     opens_own_file = false
     open_file_char = ' '
     if our_k == Pawn && (is_capture(result.move) || is_ep(result.move))
         src_f = file_of(our_fr)
-        my_pawns_after = bb(b, my_color, Pawn)
-        # After the capture our pawn moved to dst_f; check if src_f is now open.
-        if (my_pawns_after & FILE_MASK[src_f+1]) == 0
+        if (bb(b, my_color, Pawn) & FILE_MASK[src_f+1]) == 0
             opens_own_file = true
             open_file_char = Char('a' + src_f)
         end
@@ -202,13 +213,12 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
 
     # ── Build continuation sentence (board is advanced here) ─────────────────────
     plan = if fl == MF_KS_CAST || fl == MF_QS_CAST
-        ""   # self-explanatory, no line needed
+        ""
     elseif length(result.pv) >= 2
         pv2     = result.pv[2]
         pv2_san = _approx_san(pv2, b)
-        if attacking
+        if attack_worth_noting
             if to_sq(pv2) == dst && (is_capture(pv2) || is_ep(pv2))
-                # Opponent recaptures our piece.
                 if length(result.pv) >= 3
                     undo2    = make_move!(b, pv2)
                     our_next = _approx_san(result.pv[3], b)
@@ -218,7 +228,6 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
                     " If you take with $pv2_san, I recapture."
                 end
             elseif from_sq(pv2) == atk_sq
-                # Opponent retreats the attacked piece.
                 pk_name = _piece_name(atk_k)
                 " This forces your $pk_name to $pv2_san."
             else
@@ -256,7 +265,7 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
         "castles kingside — king to safety behind the pawn shield"
     elseif fl == MF_QS_CAST
         "castles queenside — king to safety, rook enters the game"
-    elseif attacking
+    elseif attack_worth_noting
         "attacks your $(_piece_name(atk_k)) on $(sq_name(atk_sq))"
     elseif !isempty(rook_file_str)
         rook_file_str
@@ -269,7 +278,6 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
     elseif is_dev
         "develops my $(_piece_name(our_k))"
     else
-        # Eval-delta fallback: translate the largest numerical swing into English.
         parts = Tuple{Int,String}[]
         Δact  >=  8 && push!(parts, (Δact,      "improves my piece activity"))
         Δpawn >=  8 && push!(parts, (Δpawn,      "strengthens my pawn structure"))
@@ -281,7 +289,7 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
         "$(parts[1][2]) and $(parts[2][2])"
     end
 
-    "I played $our_san — $concept.$plan $(uppercasefirst(ep)) $score_note."
+    "I played $our_san — $concept.$plan $score_note."
 end
 
 """
