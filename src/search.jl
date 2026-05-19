@@ -23,16 +23,16 @@ end
 const TT_EMPTY = TTEntry(UInt64(0), Int32(0), Int16(-1), TT_EXACT, NULL_MOVE)
 
 @inline function _tt_get(tt::Vector{TTEntry}, hash::UInt64)::TTEntry
-    tt[(hash & (TT_SIZE - 1)) + 1]
+    @inbounds tt[(hash & (TT_SIZE - 1)) + 1]
 end
 
 @inline function _tt_put!(tt::Vector{TTEntry}, hash::UInt64,
                            depth::Int, score::Int, flag::UInt8, move::Move)
     idx = (hash & (TT_SIZE - 1)) + 1
-    e   = tt[idx]
+    @inbounds e = tt[idx]
     # Replace if: same position (update), empty slot, or new search is deeper.
     if e.key == hash || e.key == 0 || e.depth <= depth
-        tt[idx] = TTEntry(hash, Int32(score), Int16(depth), flag, move)
+        @inbounds tt[idx] = TTEntry(hash, Int32(score), Int16(depth), flag, move)
     end
 end
 
@@ -54,8 +54,8 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
     (fl & MF_PROMO) != 0 && return 90_000
 
     if 1 <= ply <= MAX_PLY
-        killers[1, ply] == m && return 80_000
-        killers[2, ply] == m && return 70_000
+        @inbounds killers[1, ply] == m && return 80_000
+        @inbounds killers[2, ply] == m && return 70_000
     end
 
     0
@@ -64,7 +64,7 @@ end
 # Fill ml.scores with move ordering scores (no allocation).
 function _score_moves!(ml::MoveList, b::Board,
                        hash_move::Move, killers::Matrix{Move}, ply::Int)
-    for i in 1:length(ml)
+    @inbounds for i in 1:length(ml)
         ml.scores[i] = _move_score(ml[i], b, hash_move, killers, ply)
     end
 end
@@ -73,18 +73,18 @@ end
 # Modifies ml.moves and ml.scores in-place; returns the chosen move.
 @inline function _pick_move!(ml::MoveList, idx::Int)::Move
     best_i = idx
-    best_s = ml.scores[idx]
-    for i in idx+1:length(ml)
+    @inbounds best_s = ml.scores[idx]
+    @inbounds for i in idx+1:length(ml)
         if ml.scores[i] > best_s
             best_s = ml.scores[i]
             best_i = i
         end
     end
     if best_i != idx
-        ml.moves[idx],  ml.moves[best_i]  = ml.moves[best_i],  ml.moves[idx]
-        ml.scores[idx], ml.scores[best_i] = ml.scores[best_i], ml.scores[idx]
+        @inbounds ml.moves[idx],  ml.moves[best_i]  = ml.moves[best_i],  ml.moves[idx]
+        @inbounds ml.scores[idx], ml.scores[best_i] = ml.scores[best_i], ml.scores[idx]
     end
-    ml.moves[idx]
+    @inbounds ml.moves[idx]
 end
 
 function _update_killers!(killers::Matrix{Move}, ply::Int, m::Move)
@@ -97,6 +97,7 @@ end
 # ── Search state ──────────────────────────────────────────────────────────────
 const MOVE_STACK_SIZE   = MAX_PLY + 64   # regular depth + qsearch budget
 const TRICKINESS_WEIGHT = 0.10           # conservative weight; tune up if play feels too timid
+const ASPIRATION_DELTA  = 50             # initial aspiration window half-width (centipawns)
 
 mutable struct SearchInfo
     tt         ::Vector{TTEntry}
@@ -325,9 +326,8 @@ function _trickiness_score(b::Board, m::Move, si::SearchInfo)::Int
 end
 
 # ── Root search (tracks best move + all root scores) ──────────────────────────
-function _search_root(b::Board, depth::Int, si::SearchInfo)::Tuple{Int,Move}
-    alpha      = -MATE_SCORE
-    beta       =  MATE_SCORE
+function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
+                      si::SearchInfo)::Tuple{Int,Move}
     best_score = -MATE_SCORE
     best_move  = NULL_MOVE
 
@@ -391,14 +391,40 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo(), verb
     completed_roots = Tuple{Int,Move}[]   # root_moves from last complete iteration
     pv_candidates   = Set{Move}()         # moves that were AB-best at some iteration
 
+    prev_score = 0
     for depth in 1:MAX_PLY
-        score, move = _search_root(b, depth, si)
+        # Use a full window for the first three depths or when a mate is on the board —
+        # aspiration only pays off when the score is a reliable centipawn estimate.
+        if depth <= 3 || abs(prev_score) >= MATE_SCORE - MAX_PLY
+            score, move = _search_root(b, depth, -MATE_SCORE, MATE_SCORE, si)
+        else
+            # Narrow aspiration window; widen exponentially on fail-low/high.
+            δ = ASPIRATION_DELTA
+            α = max(-MATE_SCORE, prev_score - δ)
+            β = min( MATE_SCORE, prev_score + δ)
+            while true
+                score, move = _search_root(b, depth, α, β, si)
+                si.stop && break
+                if score <= α          # fail-low: widen bottom
+                    β  = (α + β) ÷ 2
+                    α  = max(-MATE_SCORE, score - δ)
+                    δ *= 3
+                elseif score >= β      # fail-high: widen top
+                    β  = min(MATE_SCORE, score + δ)
+                    δ *= 3
+                else
+                    break              # score inside window — done
+                end
+                δ > 2 * MATE_SCORE && break  # full-window fallback safety
+            end
+        end
 
         si.stop && break   # time ran out mid-search; discard partial result
 
         best_move  = move
         best_score = score
         best_depth = depth
+        prev_score = score
         push!(pv_candidates, move)
         resize!(completed_roots, length(si.root_moves))
         copyto!(completed_roots, si.root_moves)

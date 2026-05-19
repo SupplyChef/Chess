@@ -156,13 +156,14 @@ end
 
 @inline Base.length(ml::MoveList) = ml.count[]
 @inline function Base.push!(ml::MoveList, m::Move)
-    ml.count[] += 1
-    ml.moves[ml.count[]] = m
+    n = ml.count[] + 1
+    ml.count[] = n
+    @inbounds ml.moves[n] = m
 end
-@inline Base.getindex(ml::MoveList, i::Int) = ml.moves[i]
+@inline Base.getindex(ml::MoveList, i::Int) = @inbounds ml.moves[i]
 @inline function reset!(ml::MoveList)
     ml.count[] = 0
 end
 @inline function Base.iterate(ml::MoveList, i::Int = 1)
-    i > ml.count[] ? nothing : (ml.moves[i], i + 1)
+    i > ml.count[] ? nothing : (@inbounds (ml.moves[i], i + 1))
 end

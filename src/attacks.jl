@@ -96,20 +96,20 @@ end
 end
 
 @inline function rook_attacks(s::Square, occ::BB)::BB
-    _slider_attacks(s, occ, FILE_MASK[file_of(s)+1]) |
-    _slider_attacks(s, occ, RANK_MASK[rank_of(s)+1])
+    @inbounds _slider_attacks(s, occ, FILE_MASK[file_of(s)+1]) |
+              _slider_attacks(s, occ, RANK_MASK[rank_of(s)+1])
 end
 
 @inline function bishop_attacks(s::Square, occ::BB)::BB
-    _slider_attacks(s, occ, DIAG_MASK[s+1]) |
-    _slider_attacks(s, occ, ADIAG_MASK[s+1])
+    @inbounds _slider_attacks(s, occ, DIAG_MASK[s+1]) |
+              _slider_attacks(s, occ, ADIAG_MASK[s+1])
 end
 
 @inline queen_attacks(s::Square, occ::BB)::BB = rook_attacks(s, occ) | bishop_attacks(s, occ)
 
-@inline knight_attacks(s::Square)::BB = KNIGHT_ATTACKS[s+1]
-@inline king_attacks(s::Square)::BB   = KING_ATTACKS[s+1]
-@inline pawn_attacks(s::Square, c::Color)::BB = PAWN_ATTACKS[s+1, Int(c)+1]
+@inline knight_attacks(s::Square)::BB = @inbounds KNIGHT_ATTACKS[s+1]
+@inline king_attacks(s::Square)::BB   = @inbounds KING_ATTACKS[s+1]
+@inline pawn_attacks(s::Square, c::Color)::BB = @inbounds PAWN_ATTACKS[s+1, Int(c)+1]
 
 # ── Attackers-to-square (used for legality + check detection) ─────────────────
 function attackers_to(b::Board, sq::Square, occ::BB)::BB
