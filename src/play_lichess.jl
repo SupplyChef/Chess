@@ -26,6 +26,7 @@ const BOARDS          = Dict{String, Board}()
 const COLORS          = Dict{String, Color}()
 const POSITION_COUNTS = Dict{String, Dict{UInt64, Int}}()
 const SEARCH_INFOS    = Dict{String, SearchInfo}()
+const INCREMENTS      = Dict{String, Int}()   # increment in ms per game
 const ACTIVE_GAMES    = Set{String}()
 
 # ── Lichess API helpers ────────────────────────────────────────────────────────
@@ -98,12 +99,20 @@ function apply_moves!(board::Board, moves_str::AbstractString,
     played
 end
 
-# How many milliseconds to think. 10% of remaining time, capped at 25 s;
-# at least 1 s. Extra generous in the first 8 half-moves.
-function time_for_move(remaining_ms::Int, n_moves_played::Int)::Int
-    base = max(remaining_ms ÷ 10, 1_000)
-    n_moves_played < 8 && (base = max(base, 10_000))
-    min(base, 25_000)
+# How many milliseconds to think.
+# Divides the remaining clock over estimated moves left, plus most of the increment.
+# Hard cap: never burn more than 50% of remaining clock in one move.
+function time_for_move(remaining_ms::Int, increment_ms::Int, n_moves_played::Int)::Int
+    n_our_moves = n_moves_played ÷ 2
+    moves_left  = max(50 - n_our_moves, 8)
+
+    opt_ms = remaining_ms ÷ moves_left + increment_ms * 8 ÷ 10
+
+    # Leave at least 1 s on the clock; never exceed half the remaining time.
+    max_ms = min(remaining_ms ÷ 2, remaining_ms - 1_000)
+    max_ms = max(max_ms, 100)
+
+    clamp(opt_ms, 100, max_ms)
 end
 
 # ── Evaluation explanation ─────────────────────────────────────────────────────
@@ -130,15 +139,18 @@ end
 # ── Core game logic ────────────────────────────────────────────────────────────
 
 function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms::Int)
-    board = BOARDS[game_id]
-    color = COLORS[game_id]
-    si    = SEARCH_INFOS[game_id]
+    board        = BOARDS[game_id]
+    color        = COLORS[game_id]
+    si           = SEARCH_INFOS[game_id]
+    increment_ms = get(INCREMENTS, game_id, 0)
 
     board.side == color || return   # not our turn
 
-    time_ms = time_for_move(remaining_ms, length(moves_played))
-    println("Thinking $(time_ms)ms ($(remaining_ms)ms left, $(length(moves_played)) half-moves played)…")
+    time_ms = time_for_move(remaining_ms, increment_ms, length(moves_played))
+    println("Thinking $(time_ms)ms ($(remaining_ms)ms left, inc=$(increment_ms)ms, " *
+            "$(length(moves_played)) half-moves played)…")
 
+    t0     = time()
     result = search_move(board, time_ms; si)
 
     if result.move == NULL_MOVE
@@ -146,8 +158,12 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
         return
     end
 
-    uci = move_to_uci(result.move)
-    println("Playing $uci  score=$(result.score)cp  depth=$(result.depth)  nodes=$(result.nodes)")
+    elapsed_ms = round(Int, (time() - t0) * 1_000)
+    nps        = elapsed_ms > 0 ? result.nodes * 1_000 ÷ elapsed_ms : 0
+    pv_str     = join(move_to_uci.(result.pv), " ")
+    uci        = move_to_uci(result.move)
+    println("Playing $uci  d=$(result.depth)  score=$(result.score)cp  " *
+            "nodes=$(result.nodes)  nps=$(nps ÷ 1_000)k  time=$(elapsed_ms)ms  pv=$pv_str")
 
     play_move(game_id, uci)
 
@@ -185,6 +201,7 @@ function play_game(game_id::String)
                         BOARDS[game_id]          = board_from_fen(STARTPOS)
                         POSITION_COUNTS[game_id] = Dict{UInt64,Int}(BOARDS[game_id].hash => 1)
                         SEARCH_INFOS[game_id]    = SearchInfo()
+                        INCREMENTS[game_id]      = Int(get(event.clock, :increment, 0))
 
                         moves_str = String(event.state.moves)
                         played    = apply_moves!(BOARDS[game_id], moves_str, POSITION_COUNTS[game_id])
@@ -229,6 +246,7 @@ function play_game(game_id::String)
     delete!(COLORS, game_id)
     delete!(POSITION_COUNTS, game_id)
     delete!(SEARCH_INFOS, game_id)
+    delete!(INCREMENTS, game_id)
     delete!(ACTIVE_GAMES, game_id)
     println("Game $game_id finished.")
 end
