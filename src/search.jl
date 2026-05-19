@@ -389,6 +389,7 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo(), verb
     best_score      = 0
     best_depth      = 0
     completed_roots = Tuple{Int,Move}[]   # root_moves from last complete iteration
+    pv_candidates   = Set{Move}()         # moves that were AB-best at some iteration
 
     for depth in 1:MAX_PLY
         score, move = _search_root(b, depth, si)
@@ -398,6 +399,7 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo(), verb
         best_move  = move
         best_score = score
         best_depth = depth
+        push!(pv_candidates, move)
         resize!(completed_roots, length(si.root_moves))
         copyto!(completed_roots, si.root_moves)
 
@@ -412,7 +414,10 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo(), verb
     end
 
     # Trickiness: re-score candidates within 30cp of best with a shallow reply search.
-    # Prefer moves where the correct reply is non-obvious (high naturalness gap).
+    # Only consider moves that were the AB-best at some iteration — those have been
+    # searched as the principal variation and have known continuations in the TT.
+    # Moves that were never the PV best (like a speculative exchange) must not be
+    # selected here; we'd be playing a move whose line was never deeply analyzed.
     if best_depth >= 4 && length(completed_roots) >= 2
         sort!(completed_roots; by = first, rev = true)
         threshold = completed_roots[1][1] - 30   # only candidates within 30cp of best
@@ -423,6 +428,7 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo(), verb
         trick_move = best_move
         for (ab_score, m) in completed_roots[1:top_n]
             ab_score < threshold && break
+            m ∉ pv_candidates && continue   # skip moves never on the PV
             trick = _trickiness_score(b, m, si)
             adj   = ab_score + round(Int, TRICKINESS_WEIGHT * trick)
             if adj > best_adj
