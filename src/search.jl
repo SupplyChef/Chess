@@ -427,26 +427,28 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         undo        = make_move!(b, m)
         gives_check = king_in_check(b, b.side)   # did this move give check?
 
-        # ── Late Move Reductions ──────────────────────────────────────────────
-        # After the first 3 moves (which were searched at full depth), reduce
-        # the depth for subsequent quiet non-checking moves.  The intuition:
-        # good moves appear near the front of the sorted list; late moves are
-        # usually bad and don't need precise evaluation.  If a reduced search
-        # turns out to beat alpha we re-search at full depth to get an accurate
-        # score — LMR only trades work for unsound moves.
-        #
-        # Extra reduction for very late moves (index > 8): those are almost
-        # certainly noise and can tolerate a 2-ply reduction.
+        # ── Extensions and Late Move Reductions ──────────────────────────────
+        # Check extension: moves that give check are searched one ply deeper.
+        # Checking moves lead to forced sequences (the opponent must evade), so
+        # the resulting subtree is narrow and cheap to explore.  Extending ensures
+        # we don't miss a forced mate that LMR would otherwise reduce away.
+        extension = gives_check ? 1 : 0
+
+        # LMR: after the first 3 moves, reduce quiet non-checking moves.
+        # Good moves appear early in the sorted list; late moves are usually
+        # noise and tolerate reduced depth.  If the reduced search beats alpha
+        # we re-search at full depth — LMR only saves work on unsound moves.
+        # Extra reduction for very late moves (index > 8).
         reduction = 0
         if depth >= 3 && i > 3 && !is_capture && !is_promo && !gives_check && !in_check
             reduction = i > 8 ? 2 : 1
         end
 
-        score = -_negamax(b, depth - 1 - reduction, -beta, -alpha, ply + 1, si, false)
+        score = -_negamax(b, depth - 1 + extension - reduction, -beta, -alpha, ply + 1, si, false)
 
-        # Re-search at full depth if the reduced search beat alpha unexpectedly.
+        # Re-search at full (+ extension) depth if the reduced search beat alpha.
         if reduction > 0 && score > alpha && !si.stop
-            score = -_negamax(b, depth - 1, -beta, -alpha, ply + 1, si, false)
+            score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false)
         end
 
         unmake_move!(b, m, undo)
