@@ -127,7 +127,7 @@ function _coaching_async(game_id::String, moves_played::Vector{Move})
             prev_str = join(move_to_uci.(moves_played[1:end-1]), " ")
             apply_moves!(b_coach, prev_str, c_coach)
             opp_move = moves_played[end]
-            r_coach  = search_move(b_coach, 1_500; si = SearchInfo())
+            r_coach  = search_move(b_coach, 1_500; si = SearchInfo(), verbose = false)
             msg = explain_opponent_move(b_coach, opp_move, r_coach)
             isempty(msg) || post_chat(game_id, msg; room = "player")
         catch e
@@ -144,11 +144,9 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
 
     board.side == color || return   # not our turn
 
-    # Coaching: explain the opponent's last move (runs on our clock, async).
     opp_just_moved = length(moves_played) >= 1 &&
         ((color == White && length(moves_played) % 2 == 0) ||
          (color == Black && length(moves_played) % 2 == 1))
-    opp_just_moved && _coaching_async(game_id, moves_played)
 
     time_ms = time_for_move(remaining_ms, increment_ms, length(moves_played))
     println("Thinking $(time_ms)ms ($(remaining_ms)ms left, inc=$(increment_ms)ms, " *
@@ -175,6 +173,10 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
     msg = explain_move(result, board, color)
     @async post_chat(game_id, msg; room = "player")
     @async post_chat(game_id, msg; room = "spectator")
+
+    # Coaching: explain the opponent's last move. Runs after our move is submitted
+    # so it doesn't compete with the main search or interleave info output.
+    opp_just_moved && _coaching_async(game_id, moves_played)
 
     # Advance our local board to stay in sync.
     make_move!(board, result.move)

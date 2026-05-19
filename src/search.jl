@@ -370,7 +370,7 @@ end
 Find the best move in position `b` within `time_ms` milliseconds.
 Pass a pre-allocated `SearchInfo` to reuse the transposition table across moves.
 """
-function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo())::SearchResult
+function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo(), verbose::Bool = true)::SearchResult
     # Handle checkmate / stalemate before touching the TT or time management.
     ml = si.move_stack[1]
     generate_moves!(ml, b)
@@ -405,8 +405,8 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo())::Sea
         nps        = elapsed_ms > 0 ? si.nodes * 1_000 ÷ elapsed_ms : 0
         pv_moves   = _extract_pv(b, si.tt, best_move, 8)
         pv_str     = join(move_to_uci.(pv_moves), " ")
-        @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  pv %s\n",
-                depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, pv_str)
+        verbose && @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  pv %s\n",
+                           depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, pv_str)
 
         abs(score) >= MATE_SCORE - MAX_PLY && break  # mate found
     end
