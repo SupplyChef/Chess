@@ -70,8 +70,9 @@ end
 # good moves and should be searched first.
 const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
 
-@inline function _move_score(m::Move, b::Board,
-                              hash_move::Move, killers::Matrix{Move}, ply::Int)::Int
+@inline function _move_score(m::Move, b::Board, hash_move::Move,
+                              killers::Matrix{Move}, history::Matrix{Int32},
+                              ply::Int)::Int
     m == hash_move && return 1_000_000
 
     fl = flags(m)
@@ -94,14 +95,20 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
         @inbounds killers[2, ply] == m && return 70_000
     end
 
+    # History heuristic: quiet moves that previously caused cutoffs score
+    # between 1 and 60_000 — above generic quiet moves but below killers.
+    fs = from_sq(m); ts = to_sq(m)
+    @inbounds h = Int(history[fs+1, ts+1])
+    h > 0 && return min(h, 60_000)
+
     0
 end
 
 # Fill ml.scores with move ordering scores (parallel to ml.moves).
-function _score_moves!(ml::MoveList, b::Board,
-                       hash_move::Move, killers::Matrix{Move}, ply::Int)
+function _score_moves!(ml::MoveList, b::Board, hash_move::Move,
+                       killers::Matrix{Move}, history::Matrix{Int32}, ply::Int)
     @inbounds for i in 1:length(ml)
-        ml.scores[i] = _move_score(ml[i], b, hash_move, killers, ply)
+        ml.scores[i] = _move_score(ml[i], b, hash_move, killers, history, ply)
     end
 end
 
@@ -135,14 +142,33 @@ function _update_killers!(killers::Matrix{Move}, ply::Int, m::Move)
     killers[1, ply] = m
 end
 
+# Update the history table when a quiet move causes a beta cutoff.
+# The depth² bonus rewards deep cutoffs more: a move that refutes at depth 6
+# is far stronger evidence of goodness than one that refutes at depth 1.
+# Values are capped at 10_000 to prevent Int32 overflow after many searches.
+@inline function _update_history!(history::Matrix{Int32}, m::Move, depth::Int)
+    fs = from_sq(m); ts = to_sq(m)
+    @inbounds history[fs+1, ts+1] = min(history[fs+1, ts+1] + Int32(depth * depth), Int32(10_000))
+end
+
 # ── Search state ──────────────────────────────────────────────────────────────
 const MOVE_STACK_SIZE   = MAX_PLY + 64   # regular depth + qsearch budget
 const TRICKINESS_WEIGHT = 0.10           # conservative weight; tune up if play feels too timid
 const ASPIRATION_DELTA  = 75             # initial aspiration window half-width (centipawns)
 
+# Futility margins (centipawns) indexed by depth.  At depth d, if static eval
+# plus this margin is still below alpha, quiet moves cannot improve the position
+# and are skipped.  Roughly: 1 pawn at depth 1, 2 pawns at depth 2.
+const FUTILITY_MARGIN = (0, 150, 300)
+
 mutable struct SearchInfo
     tt          ::Vector{TTEntry}
     killers     ::Matrix{Move}
+    # History heuristic: records how often each (from→to) quiet move caused a beta
+    # cutoff, weighted by depth².  High-history moves get tried before low-history
+    # ones, improving move ordering beyond what killers alone can achieve.
+    # Indexed [from_sq+1, to_sq+1]; values capped at 10_000 to prevent overflow.
+    history     ::Matrix{Int32}
     move_stack  ::Vector{MoveList}        # pre-allocated, one per ply
     root_moves  ::Vector{Tuple{Int,Move}} # (score, move) from last complete iteration
     nodes       ::Int64
@@ -165,6 +191,7 @@ function SearchInfo()
     SearchInfo(
         fill(TT_EMPTY, TT_SIZE),
         fill(NULL_MOVE, 2, MAX_PLY),
+        zeros(Int32, 64, 64),
         [MoveList() for _ in 1:MOVE_STACK_SIZE],
         Tuple{Int,Move}[],
         Int64(0),
@@ -245,7 +272,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     # return alpha (= stand_pat).  In check with no evasions: checkmate.
     length(ml) == 0 && return in_check ? -(MATE_SCORE - ply) : alpha
 
-    _score_moves!(ml, b, NULL_MOVE, si.killers, ply)
+    _score_moves!(ml, b, NULL_MOVE, si.killers, si.history, ply)
 
     best = in_check ? -(MATE_SCORE - ply) : alpha
     for i in 1:length(ml)
@@ -275,7 +302,7 @@ end
 # A beta cutoff occurs when we find a move that scores >= beta — the opponent
 # won't reach this node because they have something better, so we stop searching.
 function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
-                  ply::Int, si::SearchInfo)::Int
+                  ply::Int, si::SearchInfo, is_null::Bool)::Int
     # Periodic time check (every 1024 nodes to keep overhead low).
     si.nodes += 1
     if (si.nodes & 0x3FF) == 0 && time() >= si.time_limit
@@ -328,27 +355,100 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # eval, to avoid the "horizon effect" of missing captures on the next move.
     depth <= 0 && return _quiesce(b, alpha, beta, ply, si)
 
+    in_check = king_in_check(b, b.side)
+
+    # ── Null move pruning ─────────────────────────────────────────────────────
+    # If we're not in check and we have non-pawn material, try passing our turn.
+    # If even then the opponent can't beat beta, the position is good enough to
+    # prune: a real move can only do better.  The "zugzwang guard" (non-pawn
+    # material check) avoids false pruning in K+P endgames where passing really
+    # is catastrophic.
+    #
+    # We use a null-window around beta (–β, –β+1) and a reduced depth R so
+    # the null search is very fast.  R = 3 at depth ≥ 6, R = 2 otherwise.
+    if !is_null && !in_check && depth >= 3 &&
+       (bb(b, b.side, Knight) | bb(b, b.side, Bishop) |
+        bb(b, b.side, Rook)   | bb(b, b.side, Queen)) != BB(0)
+        R       = depth >= 6 ? 3 : 2
+        ep_save = b.ep_square
+        push!(si.path, b.hash)          # record current hash before passing the turn
+        b.side  = other(b.side)
+        b.hash ⊻= ZOBRIST_SIDE[]
+        if ep_save != -1
+            b.hash     ⊻= zob_ep(ep_save)
+            b.ep_square = -1
+        end
+        null_score = -_negamax(b, depth - R - 1, -beta, -beta + 1, ply + 1, si, true)
+        b.side = other(b.side)
+        b.hash ⊻= ZOBRIST_SIDE[]
+        if ep_save != -1
+            b.ep_square = ep_save
+            b.hash     ⊻= zob_ep(ep_save)
+        end
+        pop!(si.path)
+        !si.stop && null_score >= beta && return beta
+    end
+
+    # ── Futility pruning ──────────────────────────────────────────────────────
+    # At depth 1 and 2, if static eval + a margin (1–2 pawns) is still below
+    # alpha, quiet moves are unlikely to improve alpha — prune them.
+    # Captures and promotions bypass this check: they can swing material
+    # dramatically and must always be searched.
+    futility_ok = !in_check && depth <= 2 &&
+        (b.side == White ? 1 : -1) * total(evaluate(b)) +
+        FUTILITY_MARGIN[depth + 1] < alpha
+
     ml = si.move_stack[min(ply, MOVE_STACK_SIZE)]
     generate_moves!(ml, b)
 
     # No legal moves: checkmate (king in check) or stalemate (not in check).
     if length(ml) == 0
-        return king_in_check(b, b.side) ? -(MATE_SCORE - ply) : 0
+        return in_check ? -(MATE_SCORE - ply) : 0
     end
 
-    _score_moves!(ml, b, hash_move, si.killers, ply)
+    _score_moves!(ml, b, hash_move, si.killers, si.history, ply)
 
     orig_alpha = alpha
     best_score = -(MATE_SCORE + 1)
     best_move  = NULL_MOVE
 
     for i in 1:length(ml)
-        m = _pick_move!(ml, i)
-        # Push the current hash before making the move so the child's repetition
-        # check can find this position in the path.
+        m  = _pick_move!(ml, i)
+        fl = flags(m)
+        is_capture = (fl & MF_CAPTURE) != 0 || fl == MF_EP
+        is_promo   = (fl & MF_PROMO)   != 0
+
+        # Futility: skip quiet moves when we're too far below alpha to recover.
+        if futility_ok && !is_capture && !is_promo
+            continue
+        end
+
         push!(si.path, b.hash)
-        undo  = make_move!(b, m)
-        score = -_negamax(b, depth - 1, -beta, -alpha, ply + 1, si)
+        undo        = make_move!(b, m)
+        gives_check = king_in_check(b, b.side)   # did this move give check?
+
+        # ── Late Move Reductions ──────────────────────────────────────────────
+        # After the first 3 moves (which were searched at full depth), reduce
+        # the depth for subsequent quiet non-checking moves.  The intuition:
+        # good moves appear near the front of the sorted list; late moves are
+        # usually bad and don't need precise evaluation.  If a reduced search
+        # turns out to beat alpha we re-search at full depth to get an accurate
+        # score — LMR only trades work for unsound moves.
+        #
+        # Extra reduction for very late moves (index > 8): those are almost
+        # certainly noise and can tolerate a 2-ply reduction.
+        reduction = 0
+        if depth >= 3 && i > 3 && !is_capture && !is_promo && !gives_check && !in_check
+            reduction = i > 8 ? 2 : 1
+        end
+
+        score = -_negamax(b, depth - 1 - reduction, -beta, -alpha, ply + 1, si, false)
+
+        # Re-search at full depth if the reduced search beat alpha unexpectedly.
+        if reduction > 0 && score > alpha && !si.stop
+            score = -_negamax(b, depth - 1, -beta, -alpha, ply + 1, si, false)
+        end
+
         unmake_move!(b, m, undo)
         pop!(si.path)
 
@@ -360,11 +460,12 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             if score > alpha
                 alpha = score
                 if alpha >= beta
-                    # Beta cutoff: record quiet moves that cause cutoffs as killers
-                    # so they get tried early in sibling nodes.
-                    fl = flags(m)
-                    (fl & MF_CAPTURE) == 0 && fl != MF_EP &&
+                    # Beta cutoff: record this quiet move in killers and history
+                    # so it gets tried early in sibling and future nodes.
+                    if !is_capture && !is_promo
                         _update_killers!(si.killers, ply, m)
+                        _update_history!(si.history, m, depth)
+                    end
                     break
                 end
             end
@@ -416,7 +517,7 @@ function _trickiness_score(b::Board, m::Move, si::SearchInfo)::Int
 
     tte       = _tt_get(si.tt, b.hash)
     hash_move = tte.key == b.hash ? tte.move : NULL_MOVE
-    _score_moves!(ml, b, hash_move, si.killers, 2)
+    _score_moves!(ml, b, hash_move, si.killers, si.history, 2)
 
     best_score  = -(MATE_SCORE + 1)
     second_best = -(MATE_SCORE + 1)
@@ -425,7 +526,7 @@ function _trickiness_score(b::Board, m::Move, si::SearchInfo)::Int
     for i in 1:n
         reply = _pick_move!(ml, i)   # i is the reply's rank in MVV-LVA order
         undo2 = make_move!(b, reply)
-        score = -_negamax(b, 2, -MATE_SCORE, MATE_SCORE, 3, si)
+        score = -_negamax(b, 2, -MATE_SCORE, MATE_SCORE, 3, si, false)
         unmake_move!(b, reply, undo2)
         si.stop && break
         if score > best_score
@@ -463,12 +564,12 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
     end
 
     empty!(si.root_moves)
-    _score_moves!(ml, b, hash_move, si.killers, 1)
+    _score_moves!(ml, b, hash_move, si.killers, si.history, 1)
     for i in 1:length(ml)
         m = _pick_move!(ml, i)
         push!(si.path, b.hash)
         undo  = make_move!(b, m)
-        score = -_negamax(b, depth - 1, -beta, -alpha, 2, si)
+        score = -_negamax(b, depth - 1, -beta, -alpha, 2, si, false)
         unmake_move!(b, m, undo)
         pop!(si.path)
 
@@ -517,6 +618,7 @@ function search_move(b::Board, time_ms::Int;
     si.prior_counts = prior_counts
     empty!(si.path)
     fill!(si.killers, NULL_MOVE)
+    fill!(si.history, Int32(0))
 
     best_move       = NULL_MOVE
     best_score      = 0

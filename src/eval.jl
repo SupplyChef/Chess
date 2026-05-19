@@ -282,6 +282,35 @@ function _eval_piece_activity(b::Board)::Int
         count_bits(bb(b, c, Bishop)) >= 2 && (score += (c == White ? 1 : -1) * 30)
     end
 
+    # Mobility: reward pieces that have many legal destinations.
+    # A "good" bishop on an open diagonal is fundamentally different from a "bad"
+    # bishop locked behind its own pawns — PSTs cannot capture this because the
+    # same square can have very different mobility depending on pawn structure.
+    # We exclude own pieces from the target squares (landing on them is illegal)
+    # but include enemy pieces (captures are valid destinations).
+    #
+    # Weights reflect diminishing returns per piece type:
+    #   Knight: +4 cp/sq — range is small (max 8), so each reachable square matters
+    #   Bishop: +3 cp/sq — long-range but diagonal-color-locked
+    #   Rook:   +2 cp/sq — already rewarded by open-file/7th-rank bonuses
+    #   Queen:  +1 cp/sq — already has the highest base value
+    for c in (White, Black)
+        sign    = c == White ? 1 : -1
+        our_occ = b.occ[Int(c)+1]
+        for s in BitIter(bb(b, c, Knight))
+            score += sign * count_bits(knight_attacks(s) & ~our_occ) * 4
+        end
+        for s in BitIter(bb(b, c, Bishop))
+            score += sign * count_bits(bishop_attacks(s, occ) & ~our_occ) * 3
+        end
+        for s in BitIter(bb(b, c, Rook))
+            score += sign * count_bits(rook_attacks(s, occ) & ~our_occ) * 2
+        end
+        for s in BitIter(bb(b, c, Queen))
+            score += sign * count_bits(queen_attacks(s, occ) & ~our_occ) * 1
+        end
+    end
+
     # Center control: +3cp per piece that attacks any of d4/d5/e4/e5.
     # PSTs reward pieces that occupy the center squares, but a bishop on a2
     # pointing at d5 also exerts meaningful control.  Using the actual attack
