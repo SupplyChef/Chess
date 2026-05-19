@@ -1,4 +1,4 @@
-# Move explanation: tactical (concrete line) vs positional (concept deltas).
+# Move explanation: tactical (concrete line) vs positional (concept + chess reasoning).
 # Coaching mode compares the opponent's actual move to the engine's choice.
 
 function _san_sym(k::PieceKind)::String
@@ -19,6 +19,11 @@ function _approx_san(m::Move, b::Board)::String
         return pfx * (cap ? "x" : "") * dst * sfx
     end
     _san_sym(k) * (cap ? "x" : "") * dst
+end
+
+function _piece_name(k::PieceKind)::String
+    k == Pawn   ? "pawn"   : k == Knight ? "knight" : k == Bishop ? "bishop" :
+    k == Rook   ? "rook"   : k == Queen  ? "queen"  : "piece"
 end
 
 # Format up to max_moves PV moves in approximate SAN. Modifies b temporarily.
@@ -71,17 +76,47 @@ function _eval_phrase(cp::Int)::String
     end
 end
 
+# After making move m, return the most valuable enemy piece our moved piece now
+# attacks (excluding the king). Returns (NoPiece, -1) if nothing is attacked.
+# Modifies b temporarily; restored on return.
+function _attacked_enemy(b::Board, m::Move)::Tuple{PieceKind, Int}
+    undo    = make_move!(b, m)
+    us      = other(b.side)   # b.side is now opponent
+    them    = b.side
+    dst     = to_sq(m)
+    occ     = all_occ(b)
+    theirs  = b.occ[Int(them)+1]
+
+    atk = let k = b.piece_on[dst+1].kind
+        k == Pawn   ? pawn_attacks(dst, us)      :
+        k == Knight ? knight_attacks(dst)         :
+        k == Bishop ? bishop_attacks(dst, occ)    :
+        k == Rook   ? rook_attacks(dst, occ)      :
+        k == Queen  ? queen_attacks(dst, occ)     : BB(0)
+    end
+
+    best_k = NoPiece; best_sq = -1; best_val = 0
+    for s in BitIter(atk & theirs)
+        pk = b.piece_on[s+1].kind
+        v  = PIECE_VALUE[Int(pk)+1]
+        if pk != King && v > best_val
+            best_val = v; best_k = pk; best_sq = s
+        end
+    end
+    unmake_move!(b, m, undo)
+    (best_k, best_sq)
+end
+
 """
     explain_move(result, b, my_color) → String
 
 Build a Lichess-chat explanation for the bot's move.
 - Tactical: shown only when the AB score confirms a real material change (≥60cp).
-- Positional: describes the main concept and planned continuation.
+- Positional: explains the chess reason (attack, development, structure) + planned line.
 `b` must be the board *before* the move was played.
 """
 function explain_move(result::SearchResult, b::Board, my_color::Color)::String
-    # Use the search score (effect of our move already priced in), not static eval.
-    our_cp  = result.score           # from root player's (bot's) perspective
+    our_cp  = result.score
     our_san = _approx_san(result.move, b)
     ep      = _eval_phrase(our_cp)
     s(x)    = x >= 0 ? "+$(x)" : "$(x)"
@@ -92,9 +127,6 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
 
     swing = _pv_material_swing(result.pv, b)
 
-    # Only call a move "tactical" when BOTH the material swing AND the search score
-    # confirm the gain/loss. A swing without score confirmation means the material
-    # is quickly recovered (exchange, compensation, etc.).
     genuinely_winning = swing >=  90 && our_cp >=  60
     genuinely_losing  = swing <= -90 && our_cp <= -60
 
@@ -103,7 +135,6 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
         what    = abs(swing) >= 800 ? "the queen" : abs(swing) >= 450 ? "the rook" :
                   abs(swing) >= 270 ? "a piece" : "a pawn"
 
-        # Show opponent's best reply and our follow-up.
         undo = make_move!(b, result.move)
         cont = if length(result.pv) >= 3
             opp_san  = _approx_san(result.pv[2], b)
@@ -112,8 +143,7 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
             unmake_move!(b, result.pv[2], undo2)
             " After $opp_san, I continue with $our_next."
         elseif length(result.pv) >= 2
-            opp_san = _approx_san(result.pv[2], b)
-            " Your best reply is $opp_san."
+            " Your best reply is $(_approx_san(result.pv[2], b))."
         else
             ""
         end
@@ -124,48 +154,94 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
         else
             return "I played $our_san — losing $what, but it's the best I can do.$cont $(uppercasefirst(ep)) $score_note."
         end
-    else
-        # Positional: describe the main concept, then give the planned continuation.
-        sgn  = my_color == White ? 1 : -1
-        e    = result.eval
-        undo = make_move!(b, result.move)
-        e2   = evaluate(b)
-
-        # Show opponent's expected reply and our follow-up (pv[2] and pv[3]).
-        plan = if length(result.pv) >= 3
-            opp_san  = _approx_san(result.pv[2], b)
-            undo2    = make_move!(b, result.pv[2])
-            our_next = _approx_san(result.pv[3], b)
-            unmake_move!(b, result.pv[2], undo2)
-            " If you play $opp_san, I'm planning $our_next."
-        elseif length(result.pv) >= 2
-            opp_san = _approx_san(result.pv[2], b)
-            " I expect $opp_san from you next."
-        else
-            ""
-        end
-        unmake_move!(b, result.move, undo)
-
-        Δact  = sgn * (e2.piece_activity - e.piece_activity)
-        Δpawn = sgn * (e2.pawn_structure - e.pawn_structure)
-        Δking = sgn * (e2.king_safety    - e.king_safety)
-
-        # Build a list of the most significant concepts. Skip noisy small deltas.
-        # Only show king safety when it's a clear improvement (e.g., castling).
-        # Avoid "targets your king" — negative Δking just means our pawn shield shifted.
-        concepts = Tuple{Int,String}[]
-        Δact  >=  8 && push!(concepts, (Δact,       "activates my pieces"))
-        Δpawn >=  8 && push!(concepts, (Δpawn,       "strengthens my pawns"))
-        Δpawn <= -8 && push!(concepts, (abs(Δpawn),  "creates a structural weakness"))
-        Δking >= 12 && push!(concepts, (Δking,       "improves my king safety"))
-        sort!(concepts; by = first, rev = true)
-
-        concept = isempty(concepts) ? "a developing move" :
-                  length(concepts) == 1 ? concepts[1][2] :
-                  "$(concepts[1][2]) and $(concepts[2][2])"
-
-        return "I played $our_san — $concept.$plan $(uppercasefirst(ep)) $score_note."
     end
+
+    # ── Positional branch ────────────────────────────────────────────────────────
+    sgn    = my_color == White ? 1 : -1
+    e      = result.eval
+    our_fr = from_sq(result.move)
+    our_k  = b.piece_on[our_fr+1].kind   # kind before the move
+
+    # 1. Does our move attack an enemy piece?
+    atk_k, atk_sq = _attacked_enemy(b, result.move)
+    attacking = atk_k != NoPiece
+
+    # 2. Is this a first development of a minor piece from the back rank?
+    is_dev = (our_k == Knight || our_k == Bishop) &&
+             (my_color == White ? rank_of(our_fr) == 0 : rank_of(our_fr) == 7)
+
+    # Make the move to evaluate position and read the continuation.
+    undo = make_move!(b, result.move)
+    e2   = evaluate(b)
+
+    # Build the continuation sentence, framed around the attack if one exists.
+    plan = if length(result.pv) >= 2
+        pv2     = result.pv[2]
+        pv2_san = _approx_san(pv2, b)
+        if attacking
+            pk_name = _piece_name(atk_k)
+            if to_sq(pv2) == to_sq(result.move) && (is_capture(pv2) || is_ep(pv2))
+                # Opponent captures our moving piece.
+                if length(result.pv) >= 3
+                    undo2    = make_move!(b, pv2)
+                    our_next = _approx_san(result.pv[3], b)
+                    unmake_move!(b, pv2, undo2)
+                    " If you take with $pv2_san, I recapture with $our_next."
+                else
+                    " If you take with $pv2_san, I recapture."
+                end
+            elseif from_sq(pv2) == atk_sq
+                # Opponent retreats the attacked piece.
+                " This forces your $pk_name to $pv2_san."
+            else
+                # Other response — show normally.
+                if length(result.pv) >= 3
+                    undo2    = make_move!(b, pv2)
+                    our_next = _approx_san(result.pv[3], b)
+                    unmake_move!(b, pv2, undo2)
+                    " If you play $pv2_san, I'm planning $our_next."
+                else
+                    " I expect $pv2_san from you next."
+                end
+            end
+        else
+            if length(result.pv) >= 3
+                undo2    = make_move!(b, pv2)
+                our_next = _approx_san(result.pv[3], b)
+                unmake_move!(b, pv2, undo2)
+                " If you play $pv2_san, I'm planning $our_next."
+            else
+                " I expect $pv2_san from you next."
+            end
+        end
+    else
+        ""
+    end
+    unmake_move!(b, result.move, undo)
+
+    # Build the main concept label.
+    Δact  = sgn * (e2.piece_activity - e.piece_activity)
+    Δpawn = sgn * (e2.pawn_structure - e.pawn_structure)
+    Δking = sgn * (e2.king_safety    - e.king_safety)
+
+    concept = if attacking
+        pk_name = _piece_name(atk_k)
+        "attacks your $pk_name on $(sq_name(atk_sq))"
+    elseif is_dev
+        "develops my $(_piece_name(our_k))"
+    else
+        parts = Tuple{Int,String}[]
+        Δact  >=  8 && push!(parts, (Δact,      "activates my pieces"))
+        Δpawn >=  8 && push!(parts, (Δpawn,      "strengthens my pawns"))
+        Δpawn <= -8 && push!(parts, (abs(Δpawn), "creates a structural weakness"))
+        Δking >= 12 && push!(parts, (Δking,      "improves my king safety"))
+        sort!(parts; by = first, rev = true)
+        isempty(parts) ? "a solid move" :
+        length(parts) == 1 ? parts[1][2] :
+        "$(parts[1][2]) and $(parts[2][2])"
+    end
+
+    "I played $our_san — $concept.$plan $(uppercasefirst(ep)) $score_note."
 end
 
 """
@@ -185,7 +261,6 @@ function explain_opponent_move(b_before::Board, opp_move::Move,
     opp_move == engine_result.move &&
         return "Good move! $opp_san is exactly what I'd play in your position."
 
-    # Show the engine's preferred move and, if available, the follow-up reply.
     undo      = make_move!(b_before, engine_result.move)
     reply_str = length(engine_result.pv) >= 2 ?
                 ", after which I'd play $(_approx_san(engine_result.pv[2], b_before))" : ""
