@@ -74,19 +74,30 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
     isempty(result.pv) &&
         return "$(s(bot_cp))cp ($outlook) [d=$(result.depth)]"
 
-    swing  = _pv_material_swing(result.pv, b)
-    pv_str = _format_pv_line(result.pv, b)
+    swing = _pv_material_swing(result.pv, b)
 
     if abs(swing) >= 90
-        winning = sgn * swing > 0
+        # swing is from the perspective of the side making pv[1] (us), so no sgn needed.
+        winning = swing > 0
         verb    = winning ? "winning" : "losing"
         what    = abs(swing) >= 800 ? "a queen" : abs(swing) >= 450 ? "a rook" :
                   abs(swing) >= 270 ? "a piece" : "a pawn"
-        return "$(s(bot_cp))cp ($verb $what): $pv_str [d=$(result.depth)]"
+        # Show the continuation after our move (skip pv[1] which is already known).
+        cont_str = if length(result.pv) >= 2
+            undo = make_move!(b, result.move)
+            cs   = _format_pv_line(result.pv[2:end], b)
+            unmake_move!(b, result.move, undo)
+            cs
+        else
+            ""
+        end
+        detail = isempty(cont_str) ? "" : ": $cont_str"
+        return "$(s(bot_cp))cp ($verb $what$detail) [d=$(result.depth)]"
     else
         # Positional: compute eval delta after our move.
-        undo = make_move!(b, result.move)
-        e2   = evaluate(b)
+        undo   = make_move!(b, result.move)
+        e2     = evaluate(b)
+        pv_str = _format_pv_line(result.pv[2:end], b)
         unmake_move!(b, result.move, undo)
 
         Δact  = sgn * (e2.piece_activity - e.piece_activity)
@@ -99,7 +110,8 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
         abs(Δking) >= 5 && push!(parts, "king $(s(Δking))")
 
         desc = isempty(parts) ? outlook : join(parts, ", ")
-        return "$(s(bot_cp))cp ($desc): $pv_str [d=$(result.depth)]"
+        suffix = isempty(pv_str) ? "" : ": $pv_str"
+        return "$(s(bot_cp))cp ($desc$suffix) [d=$(result.depth)]"
     end
 end
 
