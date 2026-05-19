@@ -77,8 +77,8 @@ const PST_KING_MG = Int16[
     -30,-40,-40,-50,-50,-40,-40,-30,
     -30,-40,-40,-50,-50,-40,-40,-30,
     -20,-30,-30,-40,-40,-30,-30,-20,
-    -10,-20,-20,-20,-20,-20,-20,-10,
-     20, 20,  0,  0,  0,  0, 20, 20,
+    -10,-20,-20,-25,-25,-20,-20,-10,
+    -20,-20,-20,-25,-25,-20,-20,-20,   # rank 2: was +20 for corners — king must NOT walk here in MG
      20, 30, 10,  0,  0, 10, 30, 20,
 ]
 
@@ -207,20 +207,42 @@ end
 function _eval_king_safety(b::Board)::Int
     score = 0
     for c in (White, Black)
-        sign = c == White ? 1 : -1
-        ks   = lsb(bb(b, c, King))
-        kf   = file_of(ks); kr = rank_of(ks)
+        sign  = c == White ? 1 : -1
+        ks    = lsb(bb(b, c, King))
+        kf    = file_of(ks); kr = rank_of(ks)
         pawns = bb(b, c, Pawn)
 
         # Pawn shield only relevant when king is castled (queenside a-c or kingside f-h)
         (kf <= 2 || kf >= 5) || continue
 
-        shield_rank = c == White ? kr + 1 : kr - 1
-        (0 <= shield_rank <= 7) || continue
+        fwd = c == White ? 1 : -1
+
+        # Close shield (1 rank ahead): +20 each — pushing g4/h4 costs 20cp per pawn
+        r1 = kr + fwd
+        if 0 <= r1 <= 7
+            for df in -1:1
+                sf = kf + df
+                0 <= sf <= 7 || continue
+                (pawns & sq_bb(sq(sf, r1))) != 0 && (score += sign * 20)
+            end
+        end
+
+        # Far shield (2 ranks ahead): +8 each — h3 still counts but less than h2
+        r2 = kr + 2*fwd
+        if 0 <= r2 <= 7
+            for df in -1:1
+                sf = kf + df
+                0 <= sf <= 7 || continue
+                (pawns & sq_bb(sq(sf, r2))) != 0 && (score += sign * 8)
+            end
+        end
+
+        # Semi-open file penalty: no friendly pawn anywhere on a file beside/under king
+        # Open files near the castled king are invasion routes for rooks/queens.
         for df in -1:1
             sf = kf + df
             0 <= sf <= 7 || continue
-            (pawns & sq_bb(sq(sf, shield_rank))) != 0 && (score += sign * 10)
+            (pawns & FILE_MASK[sf+1]) == 0 && (score -= sign * 18)
         end
     end
     score
