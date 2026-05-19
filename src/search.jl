@@ -163,7 +163,10 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     end
 
     ml = si.move_stack[min(ply, MOVE_STACK_SIZE)]
-    generate_moves!(ml, b)
+    # In check: must consider all evasions. Otherwise: captures + promos only.
+    # generate_captures! filters ~5 moves instead of ~30, skipping _filter_legal!
+    # overhead for the quiet moves qsearch would ignore anyway.
+    in_check ? generate_moves!(ml, b) : generate_captures!(ml, b)
 
     length(ml) == 0 && return in_check ? -(MATE_SCORE - ply) : 0
 
@@ -171,13 +174,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
 
     best = in_check ? -(MATE_SCORE - ply) : alpha
     for i in 1:length(ml)
-        m  = _pick_move!(ml, i)
-        fl = flags(m)
-        # After ordering, captures/promos score highest; quiet moves score 0.
-        # Once we reach a quiet move, all remaining are quiet too — break.
-        if !in_check && (fl & MF_CAPTURE) == 0 && fl != MF_EP && (fl & MF_PROMO) == 0
-            break
-        end
+        m = _pick_move!(ml, i)
 
         undo  = make_move!(b, m)
         score = -_quiesce(b, -beta, -alpha, ply + 1, si)

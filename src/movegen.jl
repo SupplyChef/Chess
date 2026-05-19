@@ -331,3 +331,73 @@ function count_legal_moves(b::Board)::Int
     generate_moves!(ml, b)
     length(ml)
 end
+
+# ─── Capture + promotion generator (for quiescence search) ────────────────────
+# Generates only pseudo-legal captures, en-passant, and promotions, then
+# filters for legality. Avoids paying to legality-check ~25 quiet moves that
+# quiescence search would skip anyway.
+
+function _gen_pawn_captures_promos!(ml, b, us, their_occ, empty)
+    pawns = bb(b, us, Pawn)
+    ep    = b.ep_square
+
+    if us == White
+        for to in BitIter((pawns << 8) & empty & RANK_MASK[8])
+            _add_promos!(ml, to - 8, to, false)
+        end
+        cap_l = (pawns & ~FILE_MASK[1]) << 7 & their_occ
+        cap_r = (pawns & ~FILE_MASK[8]) << 9 & their_occ
+        for to in BitIter(cap_l & ~RANK_MASK[8]); push!(ml, Move(to - 7, to, MF_CAPTURE)); end
+        for to in BitIter(cap_r & ~RANK_MASK[8]); push!(ml, Move(to - 9, to, MF_CAPTURE)); end
+        for to in BitIter(cap_l &  RANK_MASK[8]); _add_promos!(ml, to - 7, to, true); end
+        for to in BitIter(cap_r &  RANK_MASK[8]); _add_promos!(ml, to - 9, to, true); end
+        if ep != -1
+            ep_bb = sq_bb(ep)
+            (pawns & ~FILE_MASK[1]) << 7 & ep_bb != 0 && push!(ml, Move(ep - 7, ep, MF_EP))
+            (pawns & ~FILE_MASK[8]) << 9 & ep_bb != 0 && push!(ml, Move(ep - 9, ep, MF_EP))
+        end
+    else
+        for to in BitIter((pawns >> 8) & empty & RANK_MASK[1])
+            _add_promos!(ml, to + 8, to, false)
+        end
+        cap_l = (pawns & ~FILE_MASK[8]) >> 7 & their_occ
+        cap_r = (pawns & ~FILE_MASK[1]) >> 9 & their_occ
+        for to in BitIter(cap_l & ~RANK_MASK[1]); push!(ml, Move(to + 7, to, MF_CAPTURE)); end
+        for to in BitIter(cap_r & ~RANK_MASK[1]); push!(ml, Move(to + 9, to, MF_CAPTURE)); end
+        for to in BitIter(cap_l &  RANK_MASK[1]); _add_promos!(ml, to + 7, to, true); end
+        for to in BitIter(cap_r &  RANK_MASK[1]); _add_promos!(ml, to + 9, to, true); end
+        if ep != -1
+            ep_bb = sq_bb(ep)
+            (pawns & ~FILE_MASK[8]) >> 7 & ep_bb != 0 && push!(ml, Move(ep + 7, ep, MF_EP))
+            (pawns & ~FILE_MASK[1]) >> 9 & ep_bb != 0 && push!(ml, Move(ep + 9, ep, MF_EP))
+        end
+    end
+end
+
+function generate_captures!(ml::MoveList, b::Board)
+    us = b.side; them = other(us)
+    occ       = all_occ(b)
+    our_occ   = b.occ[Int(us)+1]
+    their_occ = b.occ[Int(them)+1]
+
+    reset!(ml)
+
+    _gen_pawn_captures_promos!(ml, b, us, their_occ, ~occ)
+
+    for fr in BitIter(bb(b, us, Knight))
+        for to in BitIter(knight_attacks(fr) & their_occ); push!(ml, Move(fr, to, MF_CAPTURE)); end
+    end
+    for fr in BitIter(bb(b, us, Bishop))
+        for to in BitIter(bishop_attacks(fr, occ) & their_occ); push!(ml, Move(fr, to, MF_CAPTURE)); end
+    end
+    for fr in BitIter(bb(b, us, Rook))
+        for to in BitIter(rook_attacks(fr, occ) & their_occ); push!(ml, Move(fr, to, MF_CAPTURE)); end
+    end
+    for fr in BitIter(bb(b, us, Queen))
+        for to in BitIter(queen_attacks(fr, occ) & their_occ); push!(ml, Move(fr, to, MF_CAPTURE)); end
+    end
+    ks = lsb(bb(b, us, King))
+    for to in BitIter(king_attacks(ks) & their_occ); push!(ml, Move(ks, to, MF_CAPTURE)); end
+
+    _filter_legal!(ml, b)
+end
