@@ -40,7 +40,7 @@ export
     # move query
     from_sq, to_sq, flags, is_capture, is_promo, is_castle, is_ep, promo_kind,
     # movegen
-    generate_moves!, make_move!, unmake_move!, king_in_check, count_legal_moves,
+    generate_moves!, generate_captures!, make_move!, unmake_move!, king_in_check, count_legal_moves,
     # attacks
     attackers_to, sq_attacked_by,
     rook_attacks, bishop_attacks, queen_attacks, knight_attacks, king_attacks, pawn_attacks,
