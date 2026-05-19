@@ -147,6 +147,41 @@ const PASSED_BONUS_B = (0, 80, 60, 40, 20, 10,  0, 0)
 @inline _passed_bonus(s::Square, c::Color)::Int =
     c == White ? PASSED_BONUS_W[rank_of(s)+1] : PASSED_BONUS_B[rank_of(s)+1]
 
+# ── Insufficient-material draw detection ──────────────────────────────────────
+# FIDE rules: the game is drawn when neither side has enough material to force
+# checkmate by any sequence of legal moves.  The recognised cases are:
+#   K vs K
+#   K+N vs K  (a lone knight cannot force mate)
+#   K+B vs K  (a lone bishop cannot force mate)
+#   K+B vs K+B with both bishops on the same colour
+# We do NOT declare K+N+N vs K a draw even though it is theoretically drawn:
+# it can deliver checkmate with a badly-placed opponent king, so the engine
+# should still try rather than accept a "free" draw.
+function _is_insufficient_material(b::Board)::Bool
+    # Any pawn, rook, or queen means checkmate is always potentially forceable.
+    (bb(b, White, Pawn)  | bb(b, Black, Pawn)  |
+     bb(b, White, Rook)  | bb(b, Black, Rook)  |
+     bb(b, White, Queen) | bb(b, Black, Queen)) != 0 && return false
+
+    wn = count_bits(bb(b, White, Knight))
+    bn = count_bits(bb(b, Black, Knight))
+    wb = count_bits(bb(b, White, Bishop))
+    bb_ = count_bits(bb(b, Black, Bishop))
+    total_minor = wn + bn + wb + bb_
+
+    total_minor == 0 && return true   # K vs K
+    total_minor == 1 && return true   # K+minor vs K
+
+    # K+B vs K+B: draw only when both bishops travel on the same colour.
+    # A bishop's square colour is (file+rank) mod 2.
+    if wn == 0 && bn == 0 && wb == 1 && bb_ == 1
+        ws = lsb(bb(b, White, Bishop))
+        bs = lsb(bb(b, Black, Bishop))
+        return (file_of(ws) + rank_of(ws)) & 1 == (file_of(bs) + rank_of(bs)) & 1
+    end
+    false
+end
+
 # ── EvalBreakdown ──────────────────────────────────────────────────────────────
 struct EvalBreakdown
     material::Int
