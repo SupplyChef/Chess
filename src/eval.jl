@@ -153,7 +153,6 @@ end
 
 function _eval_piece_activity(b::Board)::Int
     # Game phase: 24 = full material, 0 = king+pawns only.
-    # Used to taper the king PST between MG and EG.
     ph = 0
     for c in (White, Black)
         ph += count_bits(bb(b, c, Knight)) + count_bits(bb(b, c, Bishop))
@@ -164,7 +163,11 @@ function _eval_piece_activity(b::Board)::Int
 
     score = 0
     for c in (White, Black)
-        sign = c == White ? 1 : -1
+        sign        = c == White ? 1 : -1
+        my_pawns    = bb(b, c, Pawn)
+        enemy_pawns = bb(b, other(c), Pawn)
+        seventh     = c == White ? 6 : 1   # 0-indexed rank of the 7th rank
+
         for s in BitIter(bb(b, c, Pawn));   score += sign * _pst(PST_PAWN,   c, s); end
         for s in BitIter(bb(b, c, Knight)); score += sign * _pst(PST_KNIGHT, c, s); end
         for s in BitIter(bb(b, c, Bishop)); score += sign * _pst(PST_BISHOP, c, s); end
@@ -174,7 +177,44 @@ function _eval_piece_activity(b::Board)::Int
         ks = lsb(bb(b, c, King))
         king_bonus = (ph * _pst(PST_KING_MG, c, ks) + (24 - ph) * _pst(PST_KING_EG, c, ks)) ÷ 24
         score += sign * king_bonus
+
+        # Rook on open file (+20) or semi-open file (+10).
+        # Rook on the 7th rank (+15, stacks with file bonus).
+        for s in BitIter(bb(b, c, Rook))
+            f = file_of(s)
+            if ((my_pawns | enemy_pawns) & FILE_MASK[f+1]) == 0
+                score += sign * 20
+            elseif (my_pawns & FILE_MASK[f+1]) == 0
+                score += sign * 10
+            end
+            rank_of(s) == seventh && (score += sign * 15)
+        end
+
+        # Doubled rooks on the same file (+15 per file with two rooks).
+        my_rooks = bb(b, c, Rook)
+        for f in 0:7
+            count_bits(my_rooks & FILE_MASK[f+1]) >= 2 && (score += sign * 15)
+        end
+
+        # Knight outpost: in the opponent's half with no enemy pawn able to
+        # advance and attack the square (+20).  Uses the same corridor check
+        # as the explanation system so the two stay in sync.
+        for s in BitIter(bb(b, c, Knight))
+            in_opp_half = c == White ? rank_of(s) >= 4 : rank_of(s) <= 3
+            in_opp_half || continue
+            pmask = (c == White ? _PASSED_W[s+1] : _PASSED_B[s+1]) &
+                    ~FILE_MASK[file_of(s)+1]
+            (pmask & enemy_pawns) != 0 && continue
+            score += sign * 20
+        end
     end
+
+    # Bishop pair bonus (+30): two bishops outperform two knights or bishop+knight
+    # in open positions.
+    for c in (White, Black)
+        count_bits(bb(b, c, Bishop)) >= 2 && (score += (c == White ? 1 : -1) * 30)
+    end
+
     score
 end
 

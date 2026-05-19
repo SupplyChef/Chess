@@ -100,20 +100,20 @@ function apply_moves!(board::Board, moves_str::AbstractString,
 end
 
 # How many milliseconds to think.
-# Each move costs ~500 ms beyond pure search (HTTP round-trip, latency, coaching).
-# Subtract that overhead from the budget so the total wall time fits the clock.
-const MOVE_OVERHEAD_MS = 500
+# Target 70 moves per side (conservative for blitz); subtract per-move overhead
+# (HTTP + latency) so total wall time fits inside the clock.
+const MOVE_OVERHEAD_MS = 400
 
 function time_for_move(remaining_ms::Int, increment_ms::Int, n_moves_played::Int)::Int
     n_our_moves = n_moves_played ÷ 2
-    moves_left  = max(40 - n_our_moves, 12)
+    # Use 70 expected moves so the formula handles long games without timing out.
+    moves_left  = max(70 - n_our_moves, 20)
 
-    # Deduct overhead for every expected remaining move, then divide evenly.
     usable_ms = max(remaining_ms - MOVE_OVERHEAD_MS * moves_left, 0)
     base_ms   = usable_ms ÷ moves_left + increment_ms * 8 ÷ 10
 
-    # Never burn more than 20% of remaining on one move; always keep 2 s on the clock.
-    max_ms = min(remaining_ms * 20 ÷ 100, remaining_ms - 2_000)
+    # Never burn more than 12% of remaining on one move; keep 2 s on the clock.
+    max_ms = min(remaining_ms * 12 ÷ 100, remaining_ms - 2_000)
     max_ms = max(max_ms, 100)
 
     clamp(base_ms, 100, max_ms)
