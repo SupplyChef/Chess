@@ -7,6 +7,9 @@ function _san_sym(k::PieceKind)::String
 end
 
 function _approx_san(m::Move, b::Board)::String
+    fl = flags(m)
+    fl == MF_KS_CAST && return "O-O"
+    fl == MF_QS_CAST && return "O-O-O"
     k   = b.piece_on[from_sq(m)+1].kind
     cap = is_capture(m) || is_ep(m)
     dst = sq_name(to_sq(m))
@@ -57,14 +60,14 @@ function _pv_material_swing(pv::Vector{Move}, b::Board)::Int
 end
 
 # Plain-English position assessment from the bot's perspective.
-function _eval_phrase(bot_cp::Int)::String
-    if     bot_cp >=  300; "I have a decisive advantage"
-    elseif bot_cp >=  100; "I'm clearly better"
-    elseif bot_cp >=   50; "I'm slightly better"
-    elseif bot_cp >=  -49; "it's roughly equal"
-    elseif bot_cp >= -100; "you're slightly better"
-    elseif bot_cp >= -300; "you have a clear advantage"
-    else;                  "you have a decisive advantage"
+function _eval_phrase(cp::Int)::String
+    if     cp >=  300; "I have a decisive advantage"
+    elseif cp >=  100; "I'm clearly better"
+    elseif cp >=   50; "I'm slightly better"
+    elseif cp >=  -49; "it's roughly equal"
+    elseif cp >= -100; "you're slightly better"
+    elseif cp >= -300; "you have a clear advantage"
+    else;              "you have a decisive advantage"
     end
 end
 
@@ -72,29 +75,35 @@ end
     explain_move(result, b, my_color) → String
 
 Build a Lichess-chat explanation for the bot's move.
-- Tactical (PV swings ≥1 pawn): names the gain/loss and shows the key follow-up.
-- Positional (quiet PV): describes the main concept and the planned continuation.
+- Tactical: shown only when the AB score confirms a real material change (≥60cp).
+- Positional: describes the main concept and planned continuation.
 `b` must be the board *before* the move was played.
 """
 function explain_move(result::SearchResult, b::Board, my_color::Color)::String
-    e       = result.eval
-    sgn     = my_color == White ? 1 : -1
-    bot_cp  = sgn * total(e)
+    # Use the search score (effect of our move already priced in), not static eval.
+    our_cp  = result.score           # from root player's (bot's) perspective
     our_san = _approx_san(result.move, b)
-    ep      = _eval_phrase(bot_cp)
-    score_note = "($(bot_cp)cp, depth $(result.depth))"
+    ep      = _eval_phrase(our_cp)
+    s(x)    = x >= 0 ? "+$(x)" : "$(x)"
+    score_note = "($(s(our_cp))cp, depth $(result.depth))"
 
     isempty(result.pv) &&
         return "I played $our_san. $(uppercasefirst(ep)) $score_note."
 
     swing = _pv_material_swing(result.pv, b)
 
-    if abs(swing) >= 90
-        winning = swing > 0
+    # Only call a move "tactical" when BOTH the material swing AND the search score
+    # confirm the gain/loss. A swing without score confirmation means the material
+    # is quickly recovered (exchange, compensation, etc.).
+    genuinely_winning = swing >=  90 && our_cp >=  60
+    genuinely_losing  = swing <= -90 && our_cp <= -60
+
+    if genuinely_winning || genuinely_losing
+        winning = genuinely_winning
         what    = abs(swing) >= 800 ? "the queen" : abs(swing) >= 450 ? "the rook" :
                   abs(swing) >= 270 ? "a piece" : "a pawn"
 
-        # Build a continuation sentence: "After Nxe5, I recapture with Bxe5."
+        # Show opponent's best reply and our follow-up.
         undo = make_move!(b, result.move)
         cont = if length(result.pv) >= 3
             opp_san  = _approx_san(result.pv[2], b)
@@ -116,7 +125,9 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
             return "I played $our_san — losing $what, but it's the best I can do.$cont $(uppercasefirst(ep)) $score_note."
         end
     else
-        # Positional: describe the main concept, then give the planned line.
+        # Positional: describe the main concept, then give the planned continuation.
+        sgn  = my_color == White ? 1 : -1
+        e    = result.eval
         undo = make_move!(b, result.move)
         e2   = evaluate(b)
 
@@ -139,17 +150,17 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
         Δpawn = sgn * (e2.pawn_structure - e.pawn_structure)
         Δking = sgn * (e2.king_safety    - e.king_safety)
 
-        # Pick the two most significant concepts, largest first.
+        # Build a list of the most significant concepts. Skip noisy small deltas.
+        # Only show king safety when it's a clear improvement (e.g., castling).
+        # Avoid "targets your king" — negative Δking just means our pawn shield shifted.
         concepts = Tuple{Int,String}[]
-        abs(Δact)  >= 5 && push!(concepts, (abs(Δact),
-            Δact  > 0 ? "activates my pieces"     : "concedes some activity"))
-        abs(Δpawn) >= 5 && push!(concepts, (abs(Δpawn),
-            Δpawn > 0 ? "strengthens my pawns"     : "weakens my pawn structure"))
-        abs(Δking) >= 5 && push!(concepts, (abs(Δking),
-            Δking > 0 ? "improves my king safety"  : "targets your king"))
+        Δact  >=  8 && push!(concepts, (Δact,       "activates my pieces"))
+        Δpawn >=  8 && push!(concepts, (Δpawn,       "strengthens my pawns"))
+        Δpawn <= -8 && push!(concepts, (abs(Δpawn),  "creates a structural weakness"))
+        Δking >= 12 && push!(concepts, (Δking,       "improves my king safety"))
         sort!(concepts; by = first, rev = true)
 
-        concept = isempty(concepts) ? "a solid developing move" :
+        concept = isempty(concepts) ? "a developing move" :
                   length(concepts) == 1 ? concepts[1][2] :
                   "$(concepts[1][2]) and $(concepts[2][2])"
 
