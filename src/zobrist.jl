@@ -1,13 +1,22 @@
-# Zobrist hashing. Fixed seed so keys are reproducible across runs.
+# Zobrist hashing: every board feature (piece/square pair, side to move, castling
+# rights, en-passant file) is assigned a random UInt64.  XOR-ing them together gives
+# a position hash.  Because XOR is its own inverse, incrementally updating the hash
+# on make/unmake_move! is O(1) — just XOR in/out the changed features.
 
 using Random: MersenneTwister, rand!
 
 const ZOBRIST_PIECE = zeros(UInt64, 2, 7, 64)   # [color+1, kind+1, square+1]
 const ZOBRIST_SIDE  = Ref(UInt64(0))
+# Castling rights are a 4-bit mask (K/Q for each side) → 16 possible states.
+# Each state gets its own independent key so any change flips the hash.
 const ZOBRIST_CAST  = zeros(UInt64, 16)          # indexed by 4-bit castling mask
+# Only the ep file matters for legality (the rank is always fixed by side to move),
+# so 8 keys suffice.
 const ZOBRIST_EP    = zeros(UInt64, 8)           # indexed by ep file (0-7)
 
 function _init_zobrist!()
+    # Fixed seed: the transposition table survives restarts and is reproducible in
+    # tests — any seed works, this one is arbitrary.
     rng = MersenneTwister(0x4B1D_CAFE)
     rand!(rng, ZOBRIST_PIECE)
     ZOBRIST_SIDE[] = rand(rng, UInt64)

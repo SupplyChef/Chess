@@ -1,3 +1,14 @@
+# Chess engine module.  Architectural layers (each include builds on the previous):
+#
+#   types        — Board, Move, Piece, Color, PieceKind, bitboard aliases
+#   attacks      — precomputed sliding/jumping attack tables (magic bitboards)
+#   zobrist      — Zobrist hash init; incremental hash used by the TT in search
+#   fen          — FEN parsing/serialisation, UCI move conversion
+#   movegen      — legal-move generation, make/unmake, check detection
+#   eval         — static evaluation (material + PST + structure + king safety)
+#   search       — alpha-beta with iterative deepening, TT, move ordering
+#   explain      — natural-language move explanations for Lichess chat
+#   perft        — move-generation correctness tests
 module Chess
 
 using Printf
