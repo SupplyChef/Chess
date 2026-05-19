@@ -146,7 +146,7 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
             "$(length(moves_played)) half-moves played)…")
 
     t0     = time()
-    result = search_move(board, time_ms; si)
+    result = search_move(board, time_ms; si, prior_counts = POSITION_COUNTS[game_id])
 
     if result.move == NULL_MOVE
         @warn "No legal move in game $game_id — game must be over"

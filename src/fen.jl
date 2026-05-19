@@ -1,4 +1,12 @@
-# FEN parsing and serialisation.
+# FEN (Forsyth–Edwards Notation) parsing and serialisation.
+# A FEN string has 6 space-separated fields:
+#   1. piece placement (ranks 8→1, '/' separated, digits = empty squares)
+#   2. side to move ('w'/'b')
+#   3. castling rights ('KQkq' or '-')
+#   4. en-passant target square or '-'
+#   5. halfmove clock (for the 50-move rule)
+#   6. fullmove number
+# Ranks are stored 8→1 in the string but 0→7 internally, so we iterate descending.
 
 const PIECE_CHARS = Dict(
     'P' => (White, Pawn),   'N' => (White, Knight), 'B' => (White, Bishop),
@@ -9,6 +17,9 @@ const PIECE_CHARS = Dict(
 
 const KIND_CHAR = Dict(Pawn=>'P', Knight=>'N', Bishop=>'B', Rook=>'R', Queen=>'Q', King=>'K')
 
+# Update both the bitboard layer and the mailbox simultaneously.
+# The engine relies on both representations staying in sync (the hybrid invariant):
+# bitboards for fast bulk operations, mailbox for O(1) piece-on-square queries.
 function _place_piece!(b::Board, c::Color, k::PieceKind, s::Square)
     mask = sq_bb(s)
     set_bb!(b, c, k, bb(b, c, k) | mask)
@@ -22,7 +33,8 @@ function board_from_fen(fen::AbstractString)::Board
 
     b = Board()
 
-    # 1. Piece placement
+    # 1. Piece placement — walk the string left-to-right while tracking (rank, file).
+    #    Digits skip empty squares; '/' drops to the next rank.
     rank = 7
     file = 0
     for ch in parts[1]
@@ -37,10 +49,10 @@ function board_from_fen(fen::AbstractString)::Board
         end
     end
 
-    # 2. Side to move
+    # 2. Side to move — "w" or "b".
     b.side = parts[2] == "w" ? White : Black
 
-    # 3. Castling rights
+    # 3. Castling rights — each present letter ORs in the corresponding bit flag.
     b.castling = 0x0
     if length(parts) >= 3 && parts[3] != "-"
         for ch in parts[3]
@@ -51,14 +63,14 @@ function board_from_fen(fen::AbstractString)::Board
         end
     end
 
-    # 4. En-passant
+    # 4. En-passant target square (e.g. "e6") — convert algebraic to 0-based index.
     b.ep_square = -1
     if length(parts) >= 4 && parts[4] != "-"
         ep = parts[4]
         b.ep_square = sq(Int(ep[1]) - Int('a'), Int(ep[2]) - Int('1'))
     end
 
-    # 5. Half / full move clocks
+    # 5. Halfmove clock (50-move rule counter) and fullmove number — both optional.
     if length(parts) >= 5; b.halfmove = parse(Int, parts[5]); end
     if length(parts) >= 6; b.fullmove = parse(Int, parts[6]); end
 
@@ -130,7 +142,11 @@ end
 # Convert a square to algebraic notation
 sq_name(s::Square) = string(Char(Int('a') + file_of(s)), Char(Int('1') + rank_of(s)))
 
-# Parse a UCI move string to a Move on board b
+# Parse a UCI move string to a Move on board b.
+# We generate all legal moves and find the one matching (from, to, promo) rather than
+# constructing a Move directly — this implicitly validates the UCI string (illegal
+# moves simply won't appear in the list) and correctly fills in move flags like
+# castling, en-passant, and capture bits without duplicating that logic here.
 function move_from_uci(b::Board, uci::AbstractString)::Move
     length(uci) < 4 && error("invalid UCI: $uci")
     from = sq(Int(uci[1]) - Int('a'), Int(uci[2]) - Int('1'))

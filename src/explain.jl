@@ -1,5 +1,23 @@
-# Move explanation: tactical (concrete line) vs positional (concrete objective).
-# Coaching mode compares the opponent's actual move to the engine's choice.
+# Move explanation: produce natural-language commentary for Lichess chat.
+#
+# Two public entry points:
+#   explain_move          — narrates the bot's own move to the opponent.
+#   explain_opponent_move — coaching mode: compares the opponent's move to what the
+#                           engine would have played in their position.
+#
+# Explanation priority inside explain_move (first matching branch wins):
+#   1. Forced tactical line  — a sequence that wins or loses material (swing ≥ 90cp).
+#      Shown first because concrete threats are more instructive than positional labels.
+#   2. Castling              — always has an obvious human-readable label.
+#   3. Piece attack          — calling out a threat the opponent must answer.
+#   4. Rook concepts         — open file, 7th rank, doubling (structural rook ideas).
+#   5. Knight outpost        — a permanent outpost that pawns can never challenge.
+#   6. Passed pawn creation  — long-term winning asset.
+#   7. File opening (pawn)   — pawn capture that unblocks our own rook.
+#   8. Central pawn advance  — d4/d5/e4/e5 fights for space.
+#   9. Development           — moving a minor piece off the back rank.
+#  10. King move             — context-sensitive (check escape, endgame, safety, reposition).
+#  11. Eval-delta fallback   — largest improving term from the static evaluation.
 
 function _san_sym(k::PieceKind)::String
     k == Knight ? "N" : k == Bishop ? "B" : k == Rook ? "R" :
@@ -77,7 +95,11 @@ function _attacked_enemy(b::Board, m::Move)::Tuple{PieceKind, Int}
     (best_k, best_sq)
 end
 
-# True if any piece of `defender` attacks `sq`.  Call with board already advanced.
+# Reverse-lookup defence check: "does any piece of `defender` attack `sq`?"
+# Rather than iterating over all defender pieces, we use the symmetry of attack sets:
+# a square S is attacked by a knight iff a knight on S would attack that knight.
+# We pretend a piece of each type stands on `sq` and see if it hits a real defender
+# piece of that type — one call per piece type instead of one call per piece.
 function _is_defended(b::Board, sq::Int, defender::Color)::Bool
     occ = all_occ(b)
     (pawn_attacks(sq, other(defender))  & bb(b, defender, Pawn))                              != 0 && return true
@@ -88,7 +110,10 @@ function _is_defended(b::Board, sq::Int, defender::Color)::Bool
     false
 end
 
-# True when few heavy pieces remain — king should become active.
+# Endgame detector: sum the non-pawn, non-king material for both sides.
+# Threshold 2800cp ≈ one queen + one rook total on the board, which is the
+# conventional boundary where the king transitions from liability to active piece.
+# Pawns are excluded because pawn count alone doesn't determine endgame character.
 function _is_endgame(b::Board)::Bool
     mat = 0
     for c in (White, Black)
@@ -97,7 +122,7 @@ function _is_endgame(b::Board)::Bool
         mat += PIECE_VALUE[Int(Rook)+1]   * count_bits(bb(b, c, Rook))
         mat += PIECE_VALUE[Int(Queen)+1]  * count_bits(bb(b, c, Queen))
     end
-    mat <= 2800   # roughly: both sides have ≤ queen + rook combined
+    mat <= 2800
 end
 
 """
@@ -120,7 +145,8 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
     genuinely_winning = swing >=  90 && our_cp >=  60
     genuinely_losing  = swing <= -90 && our_cp <= -60
 
-    # ── Tactical branch ───────────────────────────────────────────────────────────
+    # ── Tactical branch — checked first because a concrete material gain or loss is
+    #    always more informative than a vague positional label. ────────────────────
     if genuinely_winning || genuinely_losing
         winning = genuinely_winning
         what    = abs(swing) >= 800 ? "the queen" : abs(swing) >= 450 ? "the rook" :
@@ -151,7 +177,8 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
     our_fr = from_sq(result.move)
     our_k  = b.piece_on[our_fr+1].kind
 
-    # Compute these before advancing the board.
+    # Detectors that need the PRE-move board: source square, piece kind, development
+    # flag, and whether we were already in check.  Compute them before make_move!.
     atk_k, atk_sq  = _attacked_enemy(b, result.move)
     attacking       = atk_k != NoPiece
     back_rank       = my_color == White ? 0 : 7
@@ -164,6 +191,9 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
     dst  = to_sq(result.move)
 
     # ── Position-based detectors (board is advanced here) ─────────────────────────
+    # Concepts like "takes the open file" or "creates a passed pawn" are properties
+    # of the DESTINATION square after the move; we must advance the board first so
+    # the piece registers in its new location for bitboard queries.
 
     # Attack significance: only worth noting when we'd win material (target > attacker)
     # or the target is genuinely undefended.
@@ -331,6 +361,11 @@ end
 Coaching mode: compare the opponent's actual move to what the engine would play.
 `b_before` is the position *before* the opponent moved.
 """
+# The coaching insight comes from the gap between what was played and the engine's
+# top choice in the same position.  If they match, we validate the move; otherwise
+# we name the engine's preference and let the game continue — we deliberately avoid
+# saying the opponent's move is "wrong", since at shallow depth the engine may simply
+# not see the point.
 function explain_opponent_move(b_before::Board, opp_move::Move,
                                engine_result::SearchResult)::String
     engine_result.move == NULL_MOVE && return ""

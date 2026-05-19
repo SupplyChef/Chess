@@ -1,6 +1,10 @@
-# Perft: performance test / move-path enumerator.
-# perft(b, depth) returns the total number of leaf nodes at the given depth.
-# Used to validate the move generator against known correct counts.
+# Perft (performance test): counts the total number of leaf nodes reachable from a
+# position at exactly depth N by legal play.  It has nothing to do with engine
+# strength — it is purely a correctness test for move generation.
+#
+# The canonical node counts for standard positions are published on the Chess
+# Programming Wiki.  Any deviation means a bug in generate_moves!, make_move!, or
+# unmake_move!.  perft(b, 1) therefore equals the number of legal moves from b.
 
 function perft(b::Board, depth::Int)::Int
     depth == 0 && return 1
@@ -8,6 +12,7 @@ function perft(b::Board, depth::Int)::Int
     ml = MoveList()
     generate_moves!(ml, b)
 
+    # At depth 1, every legal move is a leaf — skip make/unmake overhead.
     depth == 1 && return length(ml)
 
     total = 0

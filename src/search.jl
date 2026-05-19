@@ -141,14 +141,24 @@ const TRICKINESS_WEIGHT = 0.10           # conservative weight; tune up if play 
 const ASPIRATION_DELTA  = 75             # initial aspiration window half-width (centipawns)
 
 mutable struct SearchInfo
-    tt         ::Vector{TTEntry}
-    killers    ::Matrix{Move}
-    move_stack ::Vector{MoveList}        # pre-allocated, one per ply
-    root_moves ::Vector{Tuple{Int,Move}} # (score, move) from last complete iteration
-    nodes      ::Int64
-    stop       ::Bool
-    time_start ::Float64
-    time_limit ::Float64
+    tt          ::Vector{TTEntry}
+    killers     ::Matrix{Move}
+    move_stack  ::Vector{MoveList}        # pre-allocated, one per ply
+    root_moves  ::Vector{Tuple{Int,Move}} # (score, move) from last complete iteration
+    nodes       ::Int64
+    stop        ::Bool
+    time_start  ::Float64
+    time_limit  ::Float64
+    # Draw detection state:
+    #   path         — Zobrist hashes of every position on the current search path,
+    #                  from the root down to the current node's parent.  Used to
+    #                  detect repetitions that occur within the search tree.
+    #   prior_counts — position counts from the GAME before the search started,
+    #                  supplied by the caller (play_lichess tracks these).  A
+    #                  position with count 2 is already in its second occurrence;
+    #                  one more repeat makes it a draw.
+    path         ::Vector{UInt64}
+    prior_counts ::Dict{UInt64,Int}
 end
 
 function SearchInfo()
@@ -161,6 +171,8 @@ function SearchInfo()
         false,
         0.0,
         0.0,
+        UInt64[],
+        Dict{UInt64,Int}(),
     )
 end
 
@@ -215,6 +227,9 @@ end
 function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::Int
     si.nodes += 1
 
+    # A capture might reduce material to a theoretically drawn endgame.
+    _is_insufficient_material(b) && return 0
+
     in_check = king_in_check(b, b.side)
 
     if !in_check
@@ -268,6 +283,25 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         return 0
     end
 
+    # ── Draw detection ────────────────────────────────────────────────────────
+    # Check these before the TT so a stale non-zero TT entry can't override a draw.
+
+    # 50-move rule: 100 half-moves (plies) without a pawn push or capture.
+    b.halfmove >= 100 && return 0
+
+    # Insufficient material: neither side can force checkmate.
+    _is_insufficient_material(b) && return 0
+
+    # Repetition: count how many times this position has been seen before —
+    # both in the game (prior_counts) and on the current search path.
+    # Two prior occurrences means this would be the third → draw.
+    # One prior occurrence means this is the second: we return 0 (draw value)
+    # so the engine avoids the repetition when winning and embraces it when losing.
+    let reps = get(si.prior_counts, b.hash, 0)
+        for h in si.path; h == b.hash && (reps += 1); end
+        reps >= 2 && return 0
+    end
+
     # TT probe: if we have previously searched this position at sufficient depth,
     # we can reuse the stored result.  "Sufficient depth" means tte.depth >= depth:
     # a stored result from a depth-3 search is not reliable when we need depth-5.
@@ -310,9 +344,13 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
 
     for i in 1:length(ml)
         m = _pick_move!(ml, i)
+        # Push the current hash before making the move so the child's repetition
+        # check can find this position in the path.
+        push!(si.path, b.hash)
         undo  = make_move!(b, m)
         score = -_negamax(b, depth - 1, -beta, -alpha, ply + 1, si)
         unmake_move!(b, m, undo)
+        pop!(si.path)
 
         si.stop && break
 
@@ -428,9 +466,11 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
     _score_moves!(ml, b, hash_move, si.killers, 1)
     for i in 1:length(ml)
         m = _pick_move!(ml, i)
+        push!(si.path, b.hash)
         undo  = make_move!(b, m)
         score = -_negamax(b, depth - 1, -beta, -alpha, 2, si)
         unmake_move!(b, m, undo)
+        pop!(si.path)
 
         si.stop && break
 
@@ -449,12 +489,19 @@ end
 # ── Public API ────────────────────────────────────────────────────────────────
 
 """
-    search_move(b, time_ms; si) → SearchResult
+    search_move(b, time_ms; si, prior_counts, verbose) → SearchResult
 
 Find the best move in position `b` within `time_ms` milliseconds.
-Pass a pre-allocated `SearchInfo` to reuse the transposition table across moves.
+- `si`: pre-allocated SearchInfo; reuse across moves to keep the TT warm.
+- `prior_counts`: Zobrist-hash → occurrence-count map for positions seen in the
+  game before this search.  Used for three-fold-repetition detection.
+- `verbose`: when false, suppresses the per-depth `info` lines (used for the
+  background coaching search that runs after our move is submitted).
 """
-function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo(), verbose::Bool = true)::SearchResult
+function search_move(b::Board, time_ms::Int;
+                     si::SearchInfo = SearchInfo(),
+                     prior_counts::Dict{UInt64,Int} = Dict{UInt64,Int}(),
+                     verbose::Bool = true)::SearchResult
     # Handle checkmate / stalemate before touching the TT or time management.
     ml = si.move_stack[1]
     generate_moves!(ml, b)
@@ -463,10 +510,12 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo(), verb
         return SearchResult(NULL_MOVE, score, 0, Int64(0), evaluate(b), Move[])
     end
 
-    si.stop       = false
-    si.nodes      = 0
-    si.time_start = time()
-    si.time_limit = si.time_start + time_ms / 1000.0
+    si.stop         = false
+    si.nodes        = 0
+    si.time_start   = time()
+    si.time_limit   = si.time_start + time_ms / 1000.0
+    si.prior_counts = prior_counts
+    empty!(si.path)
     fill!(si.killers, NULL_MOVE)
 
     best_move       = NULL_MOVE
