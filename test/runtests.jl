@@ -240,28 +240,28 @@ using Test
     @testset "Search - finds free capture" begin
         # White rook can take the undefended black queen on d5 freely.
         b = board_from_fen("7k/8/8/3q4/8/8/8/3R3K w - - 0 1")
-        r = search_move(b, 5_000)
+        r = search_move(b, 500)
         @test move_to_uci(r.move) == "d1d5"
     end
 
     @testset "Search - avoids losing piece" begin
         # White knight on e4 is attacked by the black pawn on d5; the knight must move.
         b = board_from_fen("4k3/8/8/3p4/4N3/8/8/4K3 w - - 0 1")
-        r = search_move(b, 5_000)
+        r = search_move(b, 500)
         @test from_sq(r.move) == sq(4, 3)   # knight on e4 moves away
     end
 
     @testset "Search - finds mate in 1" begin
         # Position after 1.e4 e5 2.Bc4 Nc6 3.Qh5 Nf6??; white plays Qxf7#.
         b = board_from_fen("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4")
-        r = search_move(b, 5_000)
+        r = search_move(b, 500)
         @test move_to_uci(r.move) == "h5f7"
     end
 
     @testset "Search - stalemate returns 0" begin
         # Black is stalemated; search_move must return NULL_MOVE with score 0.
         b = board_from_fen("k7/8/1Q6/8/8/8/8/7K b - - 0 1")
-        r = search_move(b, 1_000)
+        r = search_move(b, 200)
         @test r.score == 0
         @test r.move == NULL_MOVE
     end
@@ -269,10 +269,57 @@ using Test
     @testset "Search - SearchInfo reuse keeps TT" begin
         b  = board_from_fen(STARTPOS)
         si = SearchInfo()
-        r1 = search_move(b, 500; si)
-        r2 = search_move(b, 500; si)
+        r1 = search_move(b, 300; si)
+        r2 = search_move(b, 300; si)
         # Second search with warm TT should find at least the same or better move.
         @test r2.depth >= r1.depth
+    end
+
+    # ── Trickiness ────────────────────────────────────────────────────────────
+
+    @testset "Trickiness - score is non-negative and bounded" begin
+        # _trickiness_score must always return a value in [0, 200].
+        b  = board_from_fen(STARTPOS)
+        si = SearchInfo()
+        ml = MoveList()
+        generate_moves!(ml, b)
+        for i in 1:min(5, length(ml))
+            t = Chess._trickiness_score(b, ml[i], si)
+            @test t >= 0
+            @test t <= 200
+        end
+    end
+
+    @testset "Trickiness - low when opponent has no good reply" begin
+        # After a free queen capture (Rxd5), all Black king moves are roughly equally
+        # bad (White is heavily winning regardless), so the gap between best and
+        # second-best reply is small → trickiness close to 0.
+        b  = board_from_fen("7k/8/8/3q4/8/8/8/3R3K w - - 0 1")
+        si = SearchInfo()
+        t  = Chess._trickiness_score(b, move_from_uci(b, "d1d5"), si)
+        @test t >= 0
+        @test t <= 50   # no critical reply; all replies equally losing for Black
+    end
+
+    @testset "Trickiness - does not override clearly better move" begin
+        # The maximum trickiness bonus is TRICKINESS_WEIGHT × 200 ≈ 20cp.
+        # A move winning a free queen (+900cp) cannot be displaced by trickiness.
+        b = board_from_fen("7k/8/8/3q4/8/8/8/3R3K w - - 0 1")
+        r = search_move(b, 500)
+        @test move_to_uci(r.move) == "d1d5"
+    end
+
+    @testset "Trickiness - board restored after scoring" begin
+        # _trickiness_score must leave the board in exactly its original state.
+        b   = board_from_fen(STARTPOS)
+        si  = SearchInfo()
+        ml  = MoveList()
+        generate_moves!(ml, b)
+        fen = board_to_fen(b)
+        for i in 1:min(5, length(ml))
+            Chess._trickiness_score(b, ml[i], si)
+            @test board_to_fen(b) == fen
+        end
     end
 
 end

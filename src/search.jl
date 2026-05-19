@@ -293,11 +293,13 @@ function _trickiness_score(b::Board, m::Move, si::SearchInfo)::Int
     hash_move = tte.key == b.hash ? tte.move : NULL_MOVE
     _score_moves!(ml, b, hash_move, si.killers, 2)
 
-    # Find the opponent's best reply (minimises our score) and second-best.
-    # gap = how much worse (for the opponent) is the second-best reply.
-    best_opp   = MATE_SCORE + 1   # lowest our-score = best for opponent
-    second_opp = MATE_SCORE + 1
-    best_rank  = n
+    # Find the opponent's best reply and second-best.
+    # score = -_negamax = opponent's relative advantage (higher = better for opponent).
+    # gap = best_score - second_best: how much the one correct reply matters.
+    # High gap → opponent MUST find the exact best reply → tricky.
+    best_score  = -(MATE_SCORE + 1)
+    second_best = -(MATE_SCORE + 1)
+    best_rank   = n
 
     for i in 1:n
         reply = _pick_move!(ml, i)   # i = rank in natural (MVV-LVA) order
@@ -305,17 +307,17 @@ function _trickiness_score(b::Board, m::Move, si::SearchInfo)::Int
         score = -_negamax(b, 2, -MATE_SCORE, MATE_SCORE, 3, si)
         unmake_move!(b, reply, undo2)
         si.stop && break
-        if score < best_opp
-            second_opp = best_opp
-            best_opp   = score
-            best_rank  = i
-        elseif score < second_opp
-            second_opp = score
+        if score > best_score
+            second_best = best_score
+            best_score  = score
+            best_rank   = i
+        elseif score > second_best
+            second_best = score
         end
     end
-    # If time ran out after only one reply was evaluated, no meaningful gap exists.
-    second_opp >= MATE_SCORE && (unmake_move!(b, m, undo); return 0)
-    gap        = max(0, min(second_opp - best_opp, 200))   # cap at 200 cp
+    # If time expired after only one reply, second_best is still -(MATE_SCORE+1) — no gap.
+    second_best <= -MATE_SCORE && (unmake_move!(b, m, undo); return 0)
+    gap         = max(0, min(best_score - second_best, 200))   # cap at 200 cp
     naturalness = 1.0 / best_rank
     trickiness  = round(Int, gap * (1.0 - naturalness))
     unmake_move!(b, m, undo)
