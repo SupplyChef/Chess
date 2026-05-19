@@ -115,28 +115,26 @@ function time_for_move(remaining_ms::Int, increment_ms::Int, n_moves_played::Int
     clamp(opt_ms, 100, max_ms)
 end
 
-# ── Evaluation explanation ─────────────────────────────────────────────────────
-
-# Build the chat line that explains the position after the bot's move.
-# Score is expressed from the bot's perspective so the message is intuitive
-# for the opponent: positive = bot is better.
-function eval_chat_line(result::SearchResult, my_color::Color)::String
-    e = result.eval
-    bot_cp = my_color == White ? total(e) : -total(e)
-
-    outlook = bot_cp >  50 ? "I'm better" :
-              bot_cp < -50 ? "you're better" : "roughly equal"
-
-    s(x) = x >= 0 ? "+$x" : "$x"   # signed string helper
-
-    "Eval $(s(bot_cp))cp ($outlook) | " *
-    "material $(s(e.material)) | " *
-    "activity $(s(e.piece_activity)) | " *
-    "pawns $(s(e.pawn_structure)) | " *
-    "king safety $(s(e.king_safety)) [depth $(result.depth)]"
-end
-
 # ── Core game logic ────────────────────────────────────────────────────────────
+
+# Coaching: explain the opponent's last move using a quick background search.
+function _coaching_async(game_id::String, moves_played::Vector{Move})
+    length(moves_played) == 0 && return
+    @async begin
+        try
+            b_coach = board_from_fen(STARTPOS)
+            c_coach = Dict{UInt64,Int}(b_coach.hash => 1)
+            prev_str = join(move_to_uci.(moves_played[1:end-1]), " ")
+            apply_moves!(b_coach, prev_str, c_coach)
+            opp_move = moves_played[end]
+            r_coach  = search_move(b_coach, 1_500; si = SearchInfo())
+            msg = explain_opponent_move(b_coach, opp_move, r_coach)
+            isempty(msg) || post_chat(game_id, msg; room = "player")
+        catch e
+            @warn "Coaching error: $e"
+        end
+    end
+end
 
 function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms::Int)
     board        = BOARDS[game_id]
@@ -145,6 +143,12 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
     increment_ms = get(INCREMENTS, game_id, 0)
 
     board.side == color || return   # not our turn
+
+    # Coaching: explain the opponent's last move (runs on our clock, async).
+    opp_just_moved = length(moves_played) >= 1 &&
+        ((color == White && length(moves_played) % 2 == 0) ||
+         (color == Black && length(moves_played) % 2 == 1))
+    opp_just_moved && _coaching_async(game_id, moves_played)
 
     time_ms = time_for_move(remaining_ms, increment_ms, length(moves_played))
     println("Thinking $(time_ms)ms ($(remaining_ms)ms left, inc=$(increment_ms)ms, " *
@@ -167,8 +171,8 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
 
     play_move(game_id, uci)
 
-    # Post evaluation explanation to both chat rooms (player + spectators).
-    msg = eval_chat_line(result, color)
+    # Post move explanation to both chat rooms.
+    msg = explain_move(result, board, color)
     @async post_chat(game_id, msg; room = "player")
     @async post_chat(game_id, msg; room = "spectator")
 

@@ -9,6 +9,7 @@ include("fen.jl")
 include("movegen.jl")
 include("eval.jl")
 include("search.jl")
+include("explain.jl")
 include("perft.jl")
 
 function __init__()
@@ -50,6 +51,8 @@ export
     EvalBreakdown, evaluate, total, explain, PIECE_VALUE,
     # search
     SearchInfo, SearchResult, search_move, MATE_SCORE,
+    # explain
+    explain_move, explain_opponent_move,
     # perft
     perft, perft_divide, run_perft_suite, PERFT_SUITE
 

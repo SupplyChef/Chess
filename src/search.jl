@@ -95,16 +95,18 @@ function _update_killers!(killers::Matrix{Move}, ply::Int, m::Move)
 end
 
 # ── Search state ──────────────────────────────────────────────────────────────
-const MOVE_STACK_SIZE = MAX_PLY + 64   # regular depth + qsearch budget
+const MOVE_STACK_SIZE   = MAX_PLY + 64   # regular depth + qsearch budget
+const TRICKINESS_WEIGHT = 0.35           # cp bonus per trickiness unit
 
 mutable struct SearchInfo
     tt         ::Vector{TTEntry}
-    killers    ::Matrix{Move}            # killers[1:2, ply]
-    move_stack ::Vector{MoveList}        # pre-allocated, one per ply — no per-node alloc
+    killers    ::Matrix{Move}
+    move_stack ::Vector{MoveList}        # pre-allocated, one per ply
+    root_moves ::Vector{Tuple{Int,Move}} # (score, move) from last complete iteration
     nodes      ::Int64
     stop       ::Bool
-    time_start ::Float64                 # wall-clock start (seconds, from time())
-    time_limit ::Float64                 # wall-clock cutoff (seconds, from time())
+    time_start ::Float64
+    time_limit ::Float64
 end
 
 function SearchInfo()
@@ -112,6 +114,7 @@ function SearchInfo()
         fill(TT_EMPTY, TT_SIZE),
         fill(NULL_MOVE, 2, MAX_PLY),
         [MoveList() for _ in 1:MOVE_STACK_SIZE],
+        Tuple{Int,Move}[],
         Int64(0),
         false,
         0.0,
@@ -168,7 +171,9 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     # overhead for the quiet moves qsearch would ignore anyway.
     in_check ? generate_moves!(ml, b) : generate_captures!(ml, b)
 
-    length(ml) == 0 && return in_check ? -(MATE_SCORE - ply) : 0
+    # No captures/promos available (or not in check with no evasions).
+    # Return alpha (= stand_pat) for quiet positions; checkmate/stalemate otherwise.
+    length(ml) == 0 && return in_check ? -(MATE_SCORE - ply) : alpha
 
     _score_moves!(ml, b, NULL_MOVE, si.killers, ply)
 
@@ -263,7 +268,53 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     best_score
 end
 
-# ── Root search (tracks best move separately) ─────────────────────────────────
+# ── Trickiness scoring ────────────────────────────────────────────────────────
+# After making candidate move m, do a shallow search over the opponent's replies.
+# Returns trickiness = gap × (1 − naturalness), where:
+#   gap         = best_reply_score − second_best_score  (how much the correct reply matters)
+#   naturalness = 1/rank of best reply in MVV-LVA ordering (how obvious it is)
+# High trickiness → the winning reply is hard for a human to spot.
+function _trickiness_score(b::Board, m::Move, si::SearchInfo)::Int
+    undo = make_move!(b, m)
+    ml   = si.move_stack[2]
+    generate_moves!(ml, b)
+    n    = length(ml)
+    if n == 0
+        unmake_move!(b, m, undo)
+        return 0
+    end
+
+    tte       = _tt_get(si.tt, b.hash)
+    hash_move = tte.key == b.hash ? tte.move : NULL_MOVE
+    _score_moves!(ml, b, hash_move, si.killers, 2)
+
+    best_score  = -(MATE_SCORE + 1)
+    second_best = -(MATE_SCORE + 1)
+    best_rank   = n
+
+    for i in 1:n
+        reply = _pick_move!(ml, i)   # i = rank in natural (MVV-LVA) order
+        undo2 = make_move!(b, reply)
+        score = -_negamax(b, 2, -MATE_SCORE, MATE_SCORE, 3, si)
+        unmake_move!(b, reply, undo2)
+        si.stop && break
+        if score > best_score
+            second_best = best_score
+            best_score  = score
+            best_rank   = i
+        elseif score > second_best
+            second_best = score
+        end
+    end
+
+    gap        = max(0, best_score - second_best)
+    naturalness = 1.0 / best_rank
+    trickiness  = round(Int, gap * (1.0 - naturalness))
+    unmake_move!(b, m, undo)
+    trickiness
+end
+
+# ── Root search (tracks best move + all root scores) ──────────────────────────
 function _search_root(b::Board, depth::Int, si::SearchInfo)::Tuple{Int,Move}
     alpha      = -MATE_SCORE
     beta       =  MATE_SCORE
@@ -279,6 +330,7 @@ function _search_root(b::Board, depth::Int, si::SearchInfo)::Tuple{Int,Move}
         return (king_in_check(b, b.side) ? -(MATE_SCORE - 1) : 0, NULL_MOVE)
     end
 
+    empty!(si.root_moves)
     _score_moves!(ml, b, hash_move, si.killers, 1)
     for i in 1:length(ml)
         m = _pick_move!(ml, i)
@@ -288,6 +340,7 @@ function _search_root(b::Board, depth::Int, si::SearchInfo)::Tuple{Int,Move}
 
         si.stop && break
 
+        push!(si.root_moves, (score, m))
         if score > best_score
             best_score = score
             best_move  = m
@@ -322,9 +375,10 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo())::Sea
     si.time_limit = si.time_start + time_ms / 1000.0
     fill!(si.killers, NULL_MOVE)
 
-    best_move  = NULL_MOVE
-    best_score = 0
-    best_depth = 0
+    best_move       = NULL_MOVE
+    best_score      = 0
+    best_depth      = 0
+    completed_roots = Tuple{Int,Move}[]   # root_moves from last complete iteration
 
     for depth in 1:MAX_PLY
         score, move = _search_root(b, depth, si)
@@ -334,6 +388,8 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo())::Sea
         best_move  = move
         best_score = score
         best_depth = depth
+        resize!(completed_roots, length(si.root_moves))
+        copyto!(completed_roots, si.root_moves)
 
         elapsed_ms = round(Int, (time() - si.time_start) * 1_000)
         nps        = elapsed_ms > 0 ? si.nodes * 1_000 ÷ elapsed_ms : 0
@@ -343,6 +399,27 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo())::Sea
                 depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, pv_str)
 
         abs(score) >= MATE_SCORE - MAX_PLY && break  # mate found
+    end
+
+    # Trickiness: re-score top-3 candidates with a shallow reply search.
+    # Prefer moves where the correct reply is non-obvious (high naturalness gap).
+    if best_depth >= 4 && length(completed_roots) >= 2
+        sort!(completed_roots; by = first, rev = true)
+        top_n = min(3, length(completed_roots))
+        si.stop       = false
+        si.time_limit = time() + 0.060   # 60 ms budget for trickiness pass
+        best_adj  = -MATE_SCORE - 1
+        trick_move = best_move
+        for (ab_score, m) in completed_roots[1:top_n]
+            trick = _trickiness_score(b, m, si)
+            adj   = ab_score + round(Int, TRICKINESS_WEIGHT * trick)
+            if adj > best_adj
+                best_adj   = adj
+                trick_move = m
+            end
+            si.stop && break
+        end
+        !si.stop && (best_move = trick_move)
     end
 
     pv = _extract_pv(b, si.tt, best_move, 10)
