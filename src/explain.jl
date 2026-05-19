@@ -56,70 +56,130 @@ function _pv_material_swing(pv::Vector{Move}, b::Board)::Int
     net
 end
 
+# Plain-English position assessment from the bot's perspective.
+function _eval_phrase(bot_cp::Int)::String
+    if     bot_cp >=  300; "I have a decisive advantage"
+    elseif bot_cp >=  100; "I'm clearly better"
+    elseif bot_cp >=   50; "I'm slightly better"
+    elseif bot_cp >=  -49; "it's roughly equal"
+    elseif bot_cp >= -100; "you're slightly better"
+    elseif bot_cp >= -300; "you have a clear advantage"
+    else;                  "you have a decisive advantage"
+    end
+end
+
 """
     explain_move(result, b, my_color) → String
 
 Build a Lichess-chat explanation for the bot's move.
-- Tactical (PV swings ≥1 pawn of material): shows concrete line.
-- Positional (quiet PV): shows concept deltas from EvalBreakdown.
+- Tactical (PV swings ≥1 pawn): names the gain/loss and shows the key follow-up.
+- Positional (quiet PV): describes the main concept and the planned continuation.
 `b` must be the board *before* the move was played.
 """
 function explain_move(result::SearchResult, b::Board, my_color::Color)::String
-    e      = result.eval
-    sgn    = my_color == White ? 1 : -1
-    bot_cp = sgn * total(e)
-    s(x)   = x >= 0 ? "+$x" : "$x"
-    outlook = bot_cp > 50 ? "I'm better" : bot_cp < -50 ? "you're better" : "roughly equal"
+    e       = result.eval
+    sgn     = my_color == White ? 1 : -1
+    bot_cp  = sgn * total(e)
+    our_san = _approx_san(result.move, b)
+    ep      = _eval_phrase(bot_cp)
+    score_note = "($(bot_cp)cp, depth $(result.depth))"
 
     isempty(result.pv) &&
-        return "$(s(bot_cp))cp ($outlook) [d=$(result.depth)]"
+        return "I played $our_san. $(uppercasefirst(ep)) $score_note."
 
-    swing  = _pv_material_swing(result.pv, b)
-    pv_str = _format_pv_line(result.pv, b)
+    swing = _pv_material_swing(result.pv, b)
 
     if abs(swing) >= 90
-        winning = sgn * swing > 0
-        verb    = winning ? "winning" : "losing"
-        what    = abs(swing) >= 800 ? "a queen" : abs(swing) >= 450 ? "a rook" :
+        winning = swing > 0
+        what    = abs(swing) >= 800 ? "the queen" : abs(swing) >= 450 ? "the rook" :
                   abs(swing) >= 270 ? "a piece" : "a pawn"
-        return "$(s(bot_cp))cp ($verb $what): $pv_str [d=$(result.depth)]"
+
+        # Build a continuation sentence: "After Nxe5, I recapture with Bxe5."
+        undo = make_move!(b, result.move)
+        cont = if length(result.pv) >= 3
+            opp_san  = _approx_san(result.pv[2], b)
+            undo2    = make_move!(b, result.pv[2])
+            our_next = _approx_san(result.pv[3], b)
+            unmake_move!(b, result.pv[2], undo2)
+            " After $opp_san, I continue with $our_next."
+        elseif length(result.pv) >= 2
+            opp_san = _approx_san(result.pv[2], b)
+            " Your best reply is $opp_san."
+        else
+            ""
+        end
+        unmake_move!(b, result.move, undo)
+
+        if winning
+            return "I played $our_san, winning $what.$cont $(uppercasefirst(ep)) $score_note."
+        else
+            return "I played $our_san — losing $what, but it's the best I can do.$cont $(uppercasefirst(ep)) $score_note."
+        end
     else
-        # Positional: compute eval delta after our move.
+        # Positional: describe the main concept, then give the planned line.
         undo = make_move!(b, result.move)
         e2   = evaluate(b)
+
+        # Show opponent's expected reply and our follow-up (pv[2] and pv[3]).
+        plan = if length(result.pv) >= 3
+            opp_san  = _approx_san(result.pv[2], b)
+            undo2    = make_move!(b, result.pv[2])
+            our_next = _approx_san(result.pv[3], b)
+            unmake_move!(b, result.pv[2], undo2)
+            " If you play $opp_san, I'm planning $our_next."
+        elseif length(result.pv) >= 2
+            opp_san = _approx_san(result.pv[2], b)
+            " I expect $opp_san from you next."
+        else
+            ""
+        end
         unmake_move!(b, result.move, undo)
 
         Δact  = sgn * (e2.piece_activity - e.piece_activity)
         Δpawn = sgn * (e2.pawn_structure - e.pawn_structure)
         Δking = sgn * (e2.king_safety    - e.king_safety)
 
-        parts = String[]
-        abs(Δact)  >= 5 && push!(parts, "activity $(s(Δact))")
-        abs(Δpawn) >= 5 && push!(parts, "pawns $(s(Δpawn))")
-        abs(Δking) >= 5 && push!(parts, "king $(s(Δking))")
+        # Pick the two most significant concepts, largest first.
+        concepts = Tuple{Int,String}[]
+        abs(Δact)  >= 5 && push!(concepts, (abs(Δact),
+            Δact  > 0 ? "activates my pieces"     : "concedes some activity"))
+        abs(Δpawn) >= 5 && push!(concepts, (abs(Δpawn),
+            Δpawn > 0 ? "strengthens my pawns"     : "weakens my pawn structure"))
+        abs(Δking) >= 5 && push!(concepts, (abs(Δking),
+            Δking > 0 ? "improves my king safety"  : "targets your king"))
+        sort!(concepts; by = first, rev = true)
 
-        desc = isempty(parts) ? outlook : join(parts, ", ")
-        return "$(s(bot_cp))cp ($desc): $pv_str [d=$(result.depth)]"
+        concept = isempty(concepts) ? "a solid developing move" :
+                  length(concepts) == 1 ? concepts[1][2] :
+                  "$(concepts[1][2]) and $(concepts[2][2])"
+
+        return "I played $our_san — $concept.$plan $(uppercasefirst(ep)) $score_note."
     end
 end
 
 """
     explain_opponent_move(b_before, opp_move, engine_result) → String
 
-Coaching mode: compare opponent's actual move to what the engine would play.
+Coaching mode: compare the opponent's actual move to what the engine would play.
 `b_before` is the position *before* the opponent moved.
-Returns "" if there's nothing useful to say.
+Returns "" if the move matches the engine choice.
 """
 function explain_opponent_move(b_before::Board, opp_move::Move,
                                engine_result::SearchResult)::String
     engine_result.move == NULL_MOVE && return ""
-    opp_uci    = move_to_uci(opp_move)
-    engine_uci = move_to_uci(engine_result.move)
+
+    opp_san    = _approx_san(opp_move, b_before)
+    engine_san = _approx_san(engine_result.move, b_before)
 
     opp_move == engine_result.move &&
-        return "Good move! $opp_uci is what I'd play here."
+        return "Good move! $opp_san is exactly what I'd play in your position."
 
-    pv_str = isempty(engine_result.pv) ? engine_uci :
-             _format_pv_line(engine_result.pv, b_before)
-    "I expected $pv_str here. Watching how $opp_uci goes… [d=$(engine_result.depth)]"
+    # Show the engine's preferred move and, if available, the follow-up reply.
+    undo      = make_move!(b_before, engine_result.move)
+    reply_str = length(engine_result.pv) >= 2 ?
+                ", after which I'd play $(_approx_san(engine_result.pv[2], b_before))" : ""
+    unmake_move!(b_before, engine_result.move, undo)
+
+    "As your coach: I'd have played $engine_san there$reply_str. " *
+    "Let's see how $opp_san works out. [depth $(engine_result.depth)]"
 end

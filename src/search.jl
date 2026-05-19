@@ -96,7 +96,7 @@ end
 
 # ── Search state ──────────────────────────────────────────────────────────────
 const MOVE_STACK_SIZE   = MAX_PLY + 64   # regular depth + qsearch budget
-const TRICKINESS_WEIGHT = 0.35           # cp bonus per trickiness unit
+const TRICKINESS_WEIGHT = 0.10           # conservative weight; tune up if play feels too timid
 
 mutable struct SearchInfo
     tt         ::Vector{TTEntry}
@@ -284,10 +284,19 @@ function _trickiness_score(b::Board, m::Move, si::SearchInfo)::Int
         return 0
     end
 
+    if n <= 1
+        unmake_move!(b, m, undo)
+        return 0
+    end
+
     tte       = _tt_get(si.tt, b.hash)
     hash_move = tte.key == b.hash ? tte.move : NULL_MOVE
     _score_moves!(ml, b, hash_move, si.killers, 2)
 
+    # Find the opponent's best reply and second-best.
+    # score = -_negamax = opponent's relative advantage (higher = better for opponent).
+    # gap = best_score - second_best: how much the one correct reply matters.
+    # High gap → opponent MUST find the exact best reply → tricky.
     best_score  = -(MATE_SCORE + 1)
     second_best = -(MATE_SCORE + 1)
     best_rank   = n
@@ -306,8 +315,9 @@ function _trickiness_score(b::Board, m::Move, si::SearchInfo)::Int
             second_best = score
         end
     end
-
-    gap        = max(0, best_score - second_best)
+    # If time expired after only one reply, second_best is still -(MATE_SCORE+1) — no gap.
+    second_best <= -MATE_SCORE && (unmake_move!(b, m, undo); return 0)
+    gap         = max(0, min(best_score - second_best, 200))   # cap at 200 cp
     naturalness = 1.0 / best_rank
     trickiness  = round(Int, gap * (1.0 - naturalness))
     unmake_move!(b, m, undo)
@@ -401,16 +411,18 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo())::Sea
         abs(score) >= MATE_SCORE - MAX_PLY && break  # mate found
     end
 
-    # Trickiness: re-score top-3 candidates with a shallow reply search.
+    # Trickiness: re-score candidates within 30cp of best with a shallow reply search.
     # Prefer moves where the correct reply is non-obvious (high naturalness gap).
     if best_depth >= 4 && length(completed_roots) >= 2
         sort!(completed_roots; by = first, rev = true)
-        top_n = min(3, length(completed_roots))
+        threshold = completed_roots[1][1] - 30   # only candidates within 30cp of best
+        top_n     = min(3, length(completed_roots))
         si.stop       = false
         si.time_limit = time() + 0.060   # 60 ms budget for trickiness pass
-        best_adj  = -MATE_SCORE - 1
+        best_adj   = -MATE_SCORE - 1
         trick_move = best_move
         for (ab_score, m) in completed_roots[1:top_n]
+            ab_score < threshold && break
             trick = _trickiness_score(b, m, si)
             adj   = ab_score + round(Int, TRICKINESS_WEIGHT * trick)
             if adj > best_adj
