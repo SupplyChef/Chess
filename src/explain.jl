@@ -195,10 +195,18 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
         end
     end
 
-    # Knight outpost: in opponent's half, no enemy pawn can ever chase it.
+    # True outpost: in opponent's half AND no enemy pawn exists on adjacent files
+    # at or above the knight's rank (from the enemy's direction) — meaning no pawn
+    # can ever advance into a square that attacks the knight.
+    # Uses the passed-pawn corridor mask (same file excluded) rather than just
+    # checking current pawn attacks, which would miss e.g. c7 threatening c6→d5.
     in_opp_half    = my_color == White ? rank_of(dst) >= 4 : rank_of(dst) <= 3
-    knight_outpost = our_k == Knight && in_opp_half &&
-                     (pawn_attacks(dst, my_color) & bb(b, other(my_color), Pawn)) == 0
+    knight_outpost = our_k == Knight && in_opp_half && let
+        ep    = bb(b, other(my_color), Pawn)
+        pmask = (my_color == White ? _PASSED_W[dst+1] : _PASSED_B[dst+1]) &
+                ~FILE_MASK[file_of(dst)+1]
+        (pmask & ep) == 0
+    end
 
     # Passed pawn creation.
     creates_passed = our_k == Pawn && !is_capture(result.move) && !is_ep(result.move) &&
