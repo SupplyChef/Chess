@@ -97,7 +97,7 @@ end
 # ── Search state ──────────────────────────────────────────────────────────────
 const MOVE_STACK_SIZE   = MAX_PLY + 64   # regular depth + qsearch budget
 const TRICKINESS_WEIGHT = 0.10           # conservative weight; tune up if play feels too timid
-const ASPIRATION_DELTA  = 50             # initial aspiration window half-width (centipawns)
+const ASPIRATION_DELTA  = 75             # initial aspiration window half-width (centipawns)
 
 mutable struct SearchInfo
     tt         ::Vector{TTEntry}
@@ -393,9 +393,9 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo(), verb
 
     prev_score = 0
     for depth in 1:MAX_PLY
-        # Use a full window for the first three depths or when a mate is on the board —
+        # Use a full window for the first four depths or when a mate is on the board —
         # aspiration only pays off when the score is a reliable centipawn estimate.
-        if depth <= 3 || abs(prev_score) >= MATE_SCORE - MAX_PLY
+        if depth <= 4 || abs(prev_score) >= MATE_SCORE - MAX_PLY
             score, move = _search_root(b, depth, -MATE_SCORE, MATE_SCORE, si)
         else
             # Narrow aspiration window; widen exponentially on fail-low/high.

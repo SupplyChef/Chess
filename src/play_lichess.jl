@@ -99,24 +99,13 @@ function apply_moves!(board::Board, moves_str::AbstractString,
     played
 end
 
-# How many milliseconds to think.
-# Target 70 moves per side (conservative for blitz); subtract per-move overhead
-# (HTTP + latency) so total wall time fits inside the clock.
-const MOVE_OVERHEAD_MS = 400
-
-function time_for_move(remaining_ms::Int, increment_ms::Int, n_moves_played::Int)::Int
-    n_our_moves = n_moves_played ÷ 2
-    # Use 70 expected moves so the formula handles long games without timing out.
-    moves_left  = max(70 - n_our_moves, 20)
-
-    usable_ms = max(remaining_ms - MOVE_OVERHEAD_MS * moves_left, 0)
-    base_ms   = usable_ms ÷ moves_left + increment_ms * 8 ÷ 10
-
-    # Never burn more than 12% of remaining on one move; keep 2 s on the clock.
-    max_ms = min(remaining_ms * 12 ÷ 100, remaining_ms - 2_000)
-    max_ms = max(max_ms, 100)
-
-    clamp(base_ms, 100, max_ms)
+# Spend 1/60 of remaining time per move (geometric decay: remaining(n) = R*(59/60)^n,
+# which never reaches zero).  No "expected moves" estimate that breaks in long games.
+# Max cap at 4% of remaining keeps us safe if a single position explodes.
+function time_for_move(remaining_ms::Int, increment_ms::Int, ::Int)::Int
+    base_ms = remaining_ms ÷ 60 + increment_ms * 3 ÷ 4
+    max_ms  = max(min(remaining_ms * 4 ÷ 100, remaining_ms - 500), 50)
+    clamp(base_ms, 50, max_ms)
 end
 
 # ── Core game logic ────────────────────────────────────────────────────────────
