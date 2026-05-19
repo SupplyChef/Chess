@@ -171,7 +171,9 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     # overhead for the quiet moves qsearch would ignore anyway.
     in_check ? generate_moves!(ml, b) : generate_captures!(ml, b)
 
-    length(ml) == 0 && return in_check ? -(MATE_SCORE - ply) : 0
+    # No captures/promos available (or not in check with no evasions).
+    # Return alpha (= stand_pat) for quiet positions; checkmate/stalemate otherwise.
+    length(ml) == 0 && return in_check ? -(MATE_SCORE - ply) : alpha
 
     _score_moves!(ml, b, NULL_MOVE, si.killers, ply)
 
