@@ -299,6 +299,61 @@ function _eval_piece_activity(b::Board)::Int
         score += sign * ctrl * 3
     end
 
+    # Pin bonus: reward holding a slider aimed at the enemy king with exactly
+    # one enemy piece in the line of fire.  That piece is "absolutely pinned"
+    # and its mobility is severely restricted.  The bonus scales with the
+    # pinned piece's value — pinning a queen is more useful than pinning a pawn.
+    #
+    # Algorithm (per slider, per side):
+    #   1. Find the ray segment between the slider and the enemy king using
+    #      `_slider_attacks` with only the king as occupancy — this gives all
+    #      squares strictly between them.
+    #   2. Count how many pieces (either color) sit on that segment.  If exactly
+    #      one, and it belongs to the opponent, we have a pin.
+    for c in (White, Black)
+        sign     = c == White ? 1 : -1
+        their_k  = lsb(bb(b, other(c), King))
+        their_occ = b.occ[Int(other(c))+1]
+
+        for s in BitIter(bb(b, c, Rook) | bb(b, c, Queen))
+            sf = file_of(s); sr = rank_of(s)
+            kf = file_of(their_k); kr = rank_of(their_k)
+            if sf == kf
+                ray_mask = @inbounds FILE_MASK[sf+1]
+            elseif sr == kr
+                ray_mask = @inbounds RANK_MASK[sr+1]
+            else
+                continue
+            end
+            between = _slider_attacks(s, sq_bb(their_k), ray_mask) &
+                      _slider_attacks(their_k, sq_bb(s), ray_mask)
+            pieces_between = between & occ
+            if count_bits(pieces_between) == 1 && (pieces_between & their_occ) != 0
+                pinned_sq   = lsb(pieces_between)
+                pinned_kind = b.piece_on[pinned_sq+1].kind
+                score += sign * PIECE_VALUE[Int(pinned_kind)+1] ÷ 8
+            end
+        end
+
+        for s in BitIter(bb(b, c, Bishop) | bb(b, c, Queen))
+            if (@inbounds DIAG_MASK[s+1]) & sq_bb(their_k) != 0
+                ray_mask = @inbounds DIAG_MASK[s+1]
+            elseif (@inbounds ADIAG_MASK[s+1]) & sq_bb(their_k) != 0
+                ray_mask = @inbounds ADIAG_MASK[s+1]
+            else
+                continue
+            end
+            between = _slider_attacks(s, sq_bb(their_k), ray_mask) &
+                      _slider_attacks(their_k, sq_bb(s), ray_mask)
+            pieces_between = between & occ
+            if count_bits(pieces_between) == 1 && (pieces_between & their_occ) != 0
+                pinned_sq   = lsb(pieces_between)
+                pinned_kind = b.piece_on[pinned_sq+1].kind
+                score += sign * PIECE_VALUE[Int(pinned_kind)+1] ÷ 8
+            end
+        end
+    end
+
     score
 end
 
@@ -350,50 +405,96 @@ end
 function _eval_king_safety(b::Board)::Int
     score = 0
     for c in (White, Black)
-        sign  = c == White ? 1 : -1
-        ks    = lsb(bb(b, c, King))
-        kf    = file_of(ks); kr = rank_of(ks)
-        pawns = bb(b, c, Pawn)
+        sign     = c == White ? 1 : -1
+        ks       = lsb(bb(b, c, King))
+        kf       = file_of(ks); kr = rank_of(ks)
+        their_ks = lsb(bb(b, other(c), King))
+        their_kf = file_of(their_ks)
+        pawns    = bb(b, c, Pawn)
+        fwd      = c == White ? 1 : -1
 
-        # Only evaluate shield for a king that has castled (files a–c or f–h).
-        (kf <= 2 || kf >= 5) || continue
+        if kf <= 2 || kf >= 5
+            # King has castled — evaluate pawn shield and open-file penalties.
 
-        fwd = c == White ? 1 : -1
+            # Close shield (1 rank ahead): +20 each
+            r1 = kr + fwd
+            if 0 <= r1 <= 7
+                for df in -1:1
+                    sf = kf + df
+                    0 <= sf <= 7 || continue
+                    (pawns & sq_bb(sq(sf, r1))) != 0 && (score += sign * 20)
+                end
+            end
 
-        # Close shield (1 rank ahead): +20 each
-        r1 = kr + fwd
-        if 0 <= r1 <= 7
+            # Far shield (2 ranks ahead): +8 each
+            r2 = kr + 2*fwd
+            if 0 <= r2 <= 7
+                for df in -1:1
+                    sf = kf + df
+                    0 <= sf <= 7 || continue
+                    (pawns & sq_bb(sq(sf, r2))) != 0 && (score += sign * 8)
+                end
+            end
+
+            # Semi-open file penalty: no friendly pawn on a file next to or under
+            # the king means that file is a highway for rooks and queens.
             for df in -1:1
                 sf = kf + df
                 0 <= sf <= 7 || continue
-                (pawns & sq_bb(sq(sf, r1))) != 0 && (score += sign * 20)
+                (pawns & FILE_MASK[sf+1]) == 0 && (score -= sign * 18)
             end
         end
 
-        # Far shield (2 ranks ahead): +8 each
-        r2 = kr + 2*fwd
-        if 0 <= r2 <= 7
-            for df in -1:1
-                sf = kf + df
-                0 <= sf <= 7 || continue
-                (pawns & sq_bb(sq(sf, r2))) != 0 && (score += sign * 8)
+        # Pawn storm bonus: when the kings are on opposite flanks (file distance
+        # >= 3) we gain by advancing pawns toward the enemy king — this is the
+        # classical "pawn storm" attacking motif.  We award +6cp per rank
+        # advanced beyond rank 3 (0-indexed) for any of our pawns within two
+        # files of the enemy king, reflecting that advanced pawns on the enemy
+        # king's flank create real mating threats.
+        if abs(kf - their_kf) >= 3
+            for s in BitIter(pawns)
+                abs(file_of(s) - their_kf) <= 2 || continue
+                advance = c == White ? rank_of(s) - 2 : 5 - rank_of(s)
+                advance > 0 && (score += sign * advance * 6)
             end
-        end
-
-        # Semi-open file penalty: no friendly pawn on a file next to or under
-        # the king means that file is a highway for rooks and queens.
-        for df in -1:1
-            sf = kf + df
-            0 <= sf <= 7 || continue
-            (pawns & FILE_MASK[sf+1]) == 0 && (score -= sign * 18)
         end
     end
     score
 end
 
-# Space and tempo are small corrections; implementing them as stubs keeps
-# the first version simple while preserving the EvalBreakdown interface.
-_eval_space(::Board)::Int  = 0
+# Space advantage: count safe center squares that our pawns attack but enemy
+# pawns do not.  "Safe" means the enemy cannot immediately retake with a pawn.
+# The evaluation zone is ranks 4–6 (0-indexed 3–5), files c–f (0-indexed 2–5),
+# i.e. the extended center on both sides of the board.
+#
+# We use bulk pawn-attack bitboards to stay branchless (no square iteration).
+# File-wrap masking is critical: a pawn on file h shifted left by 7 appears on
+# file a of the next rank — the mask corrects this artifact.
+#
+#   White left attacks:  (pawns << 7) & ~FILE_MASK[8]   (a-file would wrap → exclude h)
+#   White right attacks: (pawns << 9) & ~FILE_MASK[1]   (h-file would wrap → exclude a)
+#   Black left attacks:  (pawns >> 9) & ~FILE_MASK[8]
+#   Black right attacks: (pawns >> 7) & ~FILE_MASK[1]
+function _eval_space(b::Board)::Int
+    score = 0
+    space_zone = (RANK_MASK[4] | RANK_MASK[5] | RANK_MASK[6]) &
+                 (FILE_MASK[3] | FILE_MASK[4] | FILE_MASK[5] | FILE_MASK[6])
+    for c in (White, Black)
+        sign        = c == White ? 1 : -1
+        pawns       = bb(b, c, Pawn)
+        enemy_pawns = bb(b, other(c), Pawn)
+        if c == White
+            our_atk   = ((pawns << 7) & ~FILE_MASK[8]) | ((pawns << 9) & ~FILE_MASK[1])
+            enemy_atk = ((enemy_pawns >> 9) & ~FILE_MASK[8]) | ((enemy_pawns >> 7) & ~FILE_MASK[1])
+        else
+            our_atk   = ((pawns >> 9) & ~FILE_MASK[8]) | ((pawns >> 7) & ~FILE_MASK[1])
+            enemy_atk = ((enemy_pawns << 7) & ~FILE_MASK[8]) | ((enemy_pawns << 9) & ~FILE_MASK[1])
+        end
+        safe_space = our_atk & space_zone & ~enemy_atk
+        score += sign * count_bits(safe_space) * 3
+    end
+    score
+end
 _eval_tempo(b::Board)::Int = b.side == White ? 10 : -10
 
 # ── Public API ─────────────────────────────────────────────────────────────────
