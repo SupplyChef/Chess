@@ -161,6 +161,7 @@ function _eval_piece_activity(b::Board)::Int
     end
     ph = min(ph, 24)
 
+    occ   = all_occ(b)
     score = 0
     for c in (White, Black)
         sign        = c == White ? 1 : -1
@@ -190,10 +191,15 @@ function _eval_piece_activity(b::Board)::Int
             rank_of(s) == seventh && (score += sign * 15)
         end
 
-        # Doubled rooks on the same file (+15 per file with two rooks).
+        # Connected rooks: two rooks with a clear line of sight (+15 per pair).
+        # Counts each pair once by skipping already-visited rooks.
         my_rooks = bb(b, c, Rook)
-        for f in 0:7
-            count_bits(my_rooks & FILE_MASK[f+1]) >= 2 && (score += sign * 15)
+        if count_bits(my_rooks) >= 2
+            seen = BB(0)
+            for s1 in BitIter(my_rooks)
+                (rook_attacks(s1, occ) & my_rooks & ~seen) != 0 && (score += sign * 15)
+                seen |= sq_bb(s1)
+            end
         end
 
         # Knight outpost: in the opponent's half with no enemy pawn able to
@@ -213,6 +219,22 @@ function _eval_piece_activity(b::Board)::Int
     # in open positions.
     for c in (White, Black)
         count_bits(bb(b, c, Bishop)) >= 2 && (score += (c == White ? 1 : -1) * 30)
+    end
+
+    # Center control: +3cp per piece attacking any of d4/d5/e4/e5.
+    # Bonuses from piece occupation are already in the PSTs; this rewards
+    # control even when the square is empty or held by the opponent.
+    for c in (White, Black)
+        sign = c == White ? 1 : -1
+        ctrl = 0
+        for cs in (sq(3,3), sq(4,3), sq(3,4), sq(4,4))
+            (pawn_attacks(cs, other(c)) & bb(b, c, Pawn))                              != 0 && (ctrl += 1)
+            (knight_attacks(cs)          & bb(b, c, Knight))                            != 0 && (ctrl += 1)
+            (bishop_attacks(cs, occ)     & (bb(b, c, Bishop) | bb(b, c, Queen)))       != 0 && (ctrl += 1)
+            (rook_attacks(cs, occ)       & (bb(b, c, Rook)   | bb(b, c, Queen)))       != 0 && (ctrl += 1)
+            (king_attacks(cs)            & bb(b, c, King))                              != 0 && (ctrl += 1)
+        end
+        score += sign * ctrl * 3
     end
 
     score

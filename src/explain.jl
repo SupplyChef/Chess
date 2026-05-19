@@ -182,10 +182,13 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
         my_rooks     = bb(b, my_color, Rook)
         all_pawns    = bb(b, White, Pawn) | bb(b, Black, Pawn)
         my_pawns     = bb(b, my_color, Pawn)
-        if count_bits(my_rooks & FILE_MASK[f+1]) >= 2
-            rook_concept = "doubles rooks on the $(Char('a'+f))-file"
-        elseif count_bits(my_rooks & RANK_MASK[rank_of(dst)+1]) >= 2
-            rook_concept = "doubles rooks on the $(rank_of(dst)+1)th rank"
+        occ_ex  = all_occ(b)
+        if count_bits(my_rooks & FILE_MASK[f+1]) >= 2 &&
+                (rook_attacks(dst, occ_ex) & my_rooks & ~sq_bb(dst)) != 0
+            rook_concept = "connects rooks on the $(Char('a'+f))-file"
+        elseif count_bits(my_rooks & RANK_MASK[rank_of(dst)+1]) >= 2 &&
+                (rook_attacks(dst, occ_ex) & my_rooks & ~sq_bb(dst)) != 0
+            rook_concept = "connects rooks on the $(rank_of(dst)+1)th rank"
         elseif rank_of(dst) == seventh
             rook_concept = "invades the 7th rank"
         elseif (all_pawns & FILE_MASK[f+1]) == 0
