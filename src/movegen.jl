@@ -1,6 +1,10 @@
 # Legal move generator.
-# Strategy: generate pseudo-legal moves, then filter by checking that the king
-# is not left in check. Make/unmake is used for the legality test.
+#
+# Strategy: generate pseudo-legal moves first (fast, no legality check), then
+# filter by making each move and testing whether the king is left in check.
+# The make/unmake approach is simpler than the alternative (pinned-piece
+# analysis + check-evasion logic) and correct for all edge cases including
+# discovered checks and en-passant pins.
 
 # ── Make / Unmake ──────────────────────────────────────────────────────────────
 
@@ -25,7 +29,10 @@ function make_move!(b::Board, m::Move)::UndoInfo
     hm_save       = b.halfmove
     hash_save     = b.hash
 
-    # XOR out mutable state before changes
+    # XOR out the parts of the Zobrist hash that are about to change.
+    # Castling rights and en-passant square each have their own Zobrist key
+    # because they affect position identity: the same pieces in the same places
+    # can be a different position if castling rights differ.
     b.hash ⊻= ZOBRIST_CAST[b.castling + 1]
     ep_sq_save != -1 && (b.hash ⊻= zob_ep(ep_sq_save))
 
@@ -33,6 +40,8 @@ function make_move!(b::Board, m::Move)::UndoInfo
     b.hash ⊻= zob_piece(us, moving_kind, fr)
 
     if fl == MF_EP
+        # The captured pawn is NOT on the to-square; it's on the same rank as
+        # the moving pawn, one square behind the landing square.
         captured_sq   = to + (us == White ? -8 : 8)
         captured_kind = Pawn
         _remove_piece!(b, them, Pawn, captured_sq)
@@ -43,10 +52,12 @@ function make_move!(b::Board, m::Move)::UndoInfo
         b.hash ⊻= zob_piece(them, captured_kind, to)
     end
 
+    # On promotion the piece that lands differs from the piece that left.
     place_kind = (fl & MF_PROMO) != 0 ? promo_kind(m) : moving_kind
     _add_piece!(b, us, place_kind, to)
     b.hash ⊻= zob_piece(us, place_kind, to)
 
+    # Castling moves the rook as well; the king's move was handled above.
     if fl == MF_KS_CAST
         rf, rt = us == White ? (H1, F1) : (H8, F8)
         _remove_piece!(b, us, Rook, rf); _add_piece!(b, us, Rook, rt)
@@ -57,11 +68,17 @@ function make_move!(b::Board, m::Move)::UndoInfo
         b.hash ⊻= zob_piece(us, Rook, rf) ⊻ zob_piece(us, Rook, rt)
     end
 
+    # Castling rights are lost when a rook or king moves from its home square.
+    # ANDing the pre-computed mask for both from- and to-squares handles rook
+    # captures (opponent captures our rook → our right on that side is gone).
     b.castling  &= _castling_mask(fr) & _castling_mask(to)
+
+    # En-passant is only valid immediately after a double pawn push; we record
+    # the skipped square so the next position knows which EP capture is legal.
     b.ep_square  = fl == MF_DPUSH ? fr + (us == White ? 8 : -8) : -1
     b.halfmove   = (moving_kind == Pawn || captured_kind != NoPiece) ? 0 : b.halfmove + 1
 
-    # XOR in updated mutable state
+    # XOR in updated mutable state and flip the side-to-move key.
     b.hash ⊻= ZOBRIST_CAST[b.castling + 1]
     b.ep_square != -1 && (b.hash ⊻= zob_ep(b.ep_square))
     b.hash ⊻= ZOBRIST_SIDE[]
@@ -73,6 +90,8 @@ function make_move!(b::Board, m::Move)::UndoInfo
 end
 
 function unmake_move!(b::Board, m::Move, undo::UndoInfo)
+    # Restoring the saved hash is safer than re-deriving it — avoids any
+    # risk of hash drift from floating-point or ordering differences.
     b.hash      = undo.hash
     b.side      = other(b.side)
     us = b.side; them = other(us)
@@ -85,6 +104,8 @@ function unmake_move!(b::Board, m::Move, undo::UndoInfo)
     moved_kind = b.piece_on[to+1].kind
     _remove_piece!(b, us, moved_kind, to)
 
+    # On promotion the piece on `to` is the promoted piece, not the pawn —
+    # restore a pawn, not the promoted piece.
     restore_kind = (fl & MF_PROMO) != 0 ? Pawn : moved_kind
     _add_piece!(b, us, restore_kind, fr)
 
@@ -117,7 +138,10 @@ end
     b.piece_on[s+1]         = Piece(c, k)
 end
 
-# Castling-right loss mask per square (ANDed into castling after each move).
+# Castling-right loss mask per square: ANDed into b.castling after each move.
+# Moving from/to a rook's home square clears that rook's castling right;
+# moving from/to a king's home square clears both rights for that color.
+# Using a lookup table avoids four conditional branches on every make_move!.
 const _CAST_MASK = fill(UInt8(0xFF), 64)
 function _init_castling_masks!()
     _CAST_MASK[A1+1] = ~CR_WQ
@@ -136,6 +160,10 @@ end
 end
 
 # ── Pseudo-legal move generation ───────────────────────────────────────────────
+# We generate all moves that are structurally valid (correct piece movement,
+# no landing on own pieces) but may leave the king in check.  The subsequent
+# _filter_legal! pass removes those.  This split is faster than checking
+# legality during generation because most positions have no pins or checks.
 
 function generate_moves!(ml::MoveList, b::Board)
     us = b.side; them = other(us)
@@ -159,8 +187,18 @@ end
 # ─── Pawn moves ───────────────────────────────────────────────────────────────
 # FILE_MASK indices are 1-based: FILE_MASK[1]=file-a, FILE_MASK[8]=file-h.
 # RANK_MASK indices are 1-based: RANK_MASK[1]=rank-1 … RANK_MASK[8]=rank-8.
+#
+# Pawn pushes are computed with bulk bitboard shifts:
+#   single push: all pawns shifted one rank forward, masked to empty squares.
+#   double push: the single-push result filtered to rank 3 (for white), then
+#     shifted one more rank.  Filtering to rank 3 first ensures we only push
+#     from the starting rank AND the intermediate square was empty.
+# Captures use diagonal shifts masked against opponent pieces, with file-edge
+# guards to stop wrap-around (a-file pawns cannot capture to the left).
 
 function _add_promos!(ml, fr, to, capture::Bool)
+    # Always generate queen first so it scores highest under MVV-LVA ordering;
+    # underpromotions are included because knight promotions sometimes save material.
     base = capture ? MF_PRCAP_Q : MF_PROMO_Q
     push!(ml, Move(fr, to, base))
     push!(ml, Move(fr, to, base - 1))   # R
@@ -187,7 +225,9 @@ function _gen_pawn_moves!(ml, b, us, them, their_occ, empty)
             _add_promos!(ml, to - 8, to, false)
         end
 
-        # Captures (left = file decreases = shift <<7 from pawn square)
+        # Captures: left diagonal = file decreases = shift <<7 from pawn square.
+        # ~FILE_MASK[1] masks out the a-file so an a-file pawn cannot "wrap"
+        # a left-shift of 7 bits onto the h-file of the rank below.
         cap_l = (pawns & ~FILE_MASK[1]) << 7 & their_occ
         cap_r = (pawns & ~FILE_MASK[8]) << 9 & their_occ
         for to in BitIter(cap_l & ~RANK_MASK[8]); push!(ml, Move(to - 7, to, MF_CAPTURE)); end
@@ -195,14 +235,15 @@ function _gen_pawn_moves!(ml, b, us, them, their_occ, empty)
         for to in BitIter(cap_l &  RANK_MASK[8]); _add_promos!(ml, to - 7, to, true); end
         for to in BitIter(cap_r &  RANK_MASK[8]); _add_promos!(ml, to - 9, to, true); end
 
-        # En-passant
+        # En-passant: the ep_square is the square the pawn LANDS on (behind the
+        # captured pawn), not the captured pawn's square.
         if ep != -1
             ep_bb = sq_bb(ep)
             (pawns & ~FILE_MASK[1]) << 7 & ep_bb != 0 && push!(ml, Move(ep - 7, ep, MF_EP))
             (pawns & ~FILE_MASK[8]) << 9 & ep_bb != 0 && push!(ml, Move(ep - 9, ep, MF_EP))
         end
 
-    else  # Black
+    else  # Black — all directions are mirrored
         single = (pawns >> 8) & empty
         double = ((single & RANK_MASK[6]) >> 8) & empty
 
@@ -216,8 +257,8 @@ function _gen_pawn_moves!(ml, b, us, them, their_occ, empty)
             _add_promos!(ml, to + 8, to, false)
         end
 
-        # For black: shifting right 7 = lower-right diagonal (file+1, rank-1)
-        # guard: not file-h to avoid wrap when going right
+        # For black: right-shift 7 = lower-right diagonal (file+1, rank-1);
+        # guard with ~FILE_MASK[8] (not h-file) to prevent wrap to file-a.
         cap_l = (pawns & ~FILE_MASK[8]) >> 7 & their_occ
         cap_r = (pawns & ~FILE_MASK[1]) >> 9 & their_occ
         for to in BitIter(cap_l & ~RANK_MASK[1]); push!(ml, Move(to + 7, to, MF_CAPTURE)); end
@@ -274,7 +315,14 @@ function _gen_king_moves!(ml, b, us, our_occ, their_occ, occ)
     for to in BitIter(atk & their_occ);  push!(ml, Move(ks, to, MF_CAPTURE)); end
     for to in BitIter(atk & ~their_occ); push!(ml, Move(ks, to, MF_QUIET));   end
 
-    # Castling — squares between king and rook must be empty, king must not pass through check.
+    # Castling legality requires three conditions simultaneously:
+    #   1. The castling right flag is still set (neither king nor rook has moved).
+    #   2. All squares between king and rook are empty (the rook cannot jump).
+    #   3. The king does not pass through or land on an attacked square
+    #      (the king cannot castle out of, through, or into check).
+    # We do NOT check whether the rook is still present — the castling right
+    # flag is cleared whenever a rook moves from its home square, which covers
+    # the case of a rook being captured as well as moving.
     if us == White
         if (b.castling & CR_WK) != 0 &&
            (occ & BB(0x0000000000000060)) == 0 &&
@@ -309,7 +357,9 @@ function _gen_king_moves!(ml, b, us, our_occ, their_occ, occ)
 end
 
 # ─── Legality filter ──────────────────────────────────────────────────────────
-
+# In-place compaction: overwrite illegal moves with the next legal move using
+# a write pointer.  Avoids a second allocation and keeps the MoveList self-
+# contained.
 function _filter_legal!(ml::MoveList, b::Board)
     us = b.side
     write_idx = 0
@@ -333,9 +383,10 @@ function count_legal_moves(b::Board)::Int
 end
 
 # ─── Capture + promotion generator (for quiescence search) ────────────────────
-# Generates only pseudo-legal captures, en-passant, and promotions, then
-# filters for legality. Avoids paying to legality-check ~25 quiet moves that
-# quiescence search would skip anyway.
+# Quiescence search only needs captures, en-passant, and promotions — quiet
+# moves are ignored because they don't change material and the stand-pat score
+# already accounts for them.  Generating only these moves avoids running the
+# legality filter over ~25 quiet moves per node that would be discarded anyway.
 
 function _gen_pawn_captures_promos!(ml, b, us, their_occ, empty)
     pawns = bb(b, us, Pawn)

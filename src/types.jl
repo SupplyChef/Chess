@@ -18,7 +18,10 @@ end
 const NO_PIECE = Piece(White, NoPiece)
 
 # ── Move representation ─────────────────────────────────────────────────────────
-# Packed into a UInt32 for efficiency but we expose a plain struct.
+# A Move is a single UInt32 so the MoveList can be a flat array with no heap
+# pointers — cache-friendly and GC-free during search.  All information needed
+# to make and unmake a move is encoded in the flag bits; no auxiliary arrays
+# are needed to reconstruct what happened.
 #
 #  bits  0- 5  from square  (0-63)
 #  bits  6-11  to square    (0-63)
@@ -33,6 +36,10 @@ const NO_PIECE = Piece(White, NoPiece)
 #
 # We combine promotion + capture as flag 12 (= 8 | 4).
 # Promotion piece: 0=N 1=B 2=R 3=Q (stored in bits 15-16)
+#
+# Encoding the move type in flags rather than as separate fields lets
+# is_capture / is_promo / is_castle reduce to single bitwise tests —
+# no branching on move category is needed in the hot path.
 
 const MF_QUIET    = 0x0
 const MF_DPUSH    = 0x1
@@ -64,6 +71,9 @@ end
 @inline to_sq(m::Move)    = Int((m.data >> 6) & 0x3F)
 @inline flags(m::Move)    = Int((m.data >> 12) & 0xF)
 
+# En-passant (0x5) doesn't share a bit with MF_CAPTURE (0x4), so we test it
+# explicitly.  The flag encoding keeps capture-promo combos contiguous (0xC–0xF),
+# making it easy to add new move types without changing the capture test.
 @inline is_capture(m::Move)   = (flags(m) & MF_CAPTURE) != 0 || flags(m) == MF_EP
 @inline is_promo(m::Move)     = (flags(m) & MF_PROMO) != 0
 @inline is_castle(m::Move)    = flags(m) == MF_KS_CAST || flags(m) == MF_QS_CAST
@@ -75,22 +85,38 @@ end
 end
 
 # ── Board state ────────────────────────────────────────────────────────────────
+# The Board uses a hybrid bitboard + mailbox representation.  Each structure
+# serves a different access pattern; keeping both avoids O(n) scans.
+#
+# Bitboards (bb matrix, 2×7 UInt64s):
+#   bb[color+1, kind] has one set bit per square that holds that piece.
+#   Bulk operations — "all white pawns that can push", "any piece attacks e4" —
+#   are single shift/mask/OR instructions rather than loops over piece lists.
+#   The 2×7 layout wastes column 1 (NoPiece kind) but keeps indexing uniform:
+#   Int(c)+1 and Int(k) map directly to the matrix without subtraction.
+#
+# Mailbox (piece_on, 64-element array):
+#   piece_on[sq+1] returns the piece on that square in O(1).
+#   Captures need the victim's kind for material accounting; scanning bitboards
+#   to find it would cost up to 12 bitboard reads instead of one array load.
+#
+# occ[color+1]: union of all same-color bitboards, cached so attack generation
+#   can mask out friendly squares without recomputing the union each time.
+#
+# Zobrist hash (maintained incrementally):
+#   Each piece placement/removal XORs in/out a precomputed random key, so
+#   the hash of the position after a move is a handful of XOR operations.
+#   This is what makes TT probes O(1) — no full rehash after every move.
 mutable struct Board
-    # piece bitboards: bb[color+1][kind]  (White=1, Black=2; NoPiece=1..King=6 index 1-6)
-    bb::Matrix{BB}        # 2 × 7  (index 1=White,2=Black × 1..6 for piece kind; col 1 unused)
-
-    # combined occupancy shortcuts
-    occ::Vector{BB}       # occ[1]=white occ, occ[2]=black occ
-
-    # 64-square piece map for fast capture detection
-    piece_on::Vector{Piece}  # length 64
-
-    side::Color
-    ep_square::Int        # en-passant target square, or -1
-    castling::UInt8       # bits: 1=WK 2=WQ 4=BK 8=BQ
-    halfmove::Int         # for 50-move rule
-    fullmove::Int
-    hash::UInt64          # Zobrist hash, maintained incrementally
+    bb        ::Matrix{BB}      # [color+1, kind] — 2×7; column 1 (NoPiece) unused
+    occ       ::Vector{BB}      # [color+1] — union of all pieces of that color
+    piece_on  ::Vector{Piece}   # [sq+1] — fast O(1) lookup of piece on a square
+    side      ::Color
+    ep_square ::Int             # target square of a just-made double pawn push, or -1
+    castling  ::UInt8           # four flags: bit0=WK bit1=WQ bit2=BK bit3=BQ
+    halfmove  ::Int             # plies since last pawn move or capture (50-move rule)
+    fullmove  ::Int
+    hash      ::UInt64          # Zobrist hash, updated incrementally in make_move!
 
     function Board()
         new(
@@ -109,10 +135,7 @@ end
 
 @inline all_occ(b::Board) = b.occ[1] | b.occ[2]
 
-# helper: get bitboard for a color+kind
 @inline bb(b::Board, c::Color, k::PieceKind) = b.bb[Int(c)+1, Int(k)]
-
-# helper: set bitboard
 @inline set_bb!(b::Board, c::Color, k::PieceKind, v::BB) = (b.bb[Int(c)+1, Int(k)] = v)
 
 # ── Castling right constants ────────────────────────────────────────────────────
@@ -136,7 +159,9 @@ const A8=56; const B8=57; const C8=58; const D8=59; const E8=60; const F8=61; co
 @inline pop_lsb!(b::BB)::Tuple{Square,BB} = (lsb(b), b & (b - BB(1)))
 @inline count_bits(b::BB)     = count_ones(b)
 
-# Iterate over set bits: `for sq in BitIter(bb)  ...  end`
+# BitIter strips the lowest set bit each step using the identity b & (b-1),
+# which clears exactly the LSB without affecting any other bits.
+# This is cheaper than maintaining an index counter or using a branch on each step.
 struct BitIter
     bb::BB
 end
@@ -146,6 +171,14 @@ Base.length(it::BitIter) = count_ones(it.bb)
 Base.eltype(::Type{BitIter}) = Square
 
 # ── Move list ──────────────────────────────────────────────────────────────────
+# Fixed-capacity design: no chess position has more than ~218 legal moves, so
+# a 256-entry pre-allocated buffer is always sufficient.  Avoiding resize!/push!
+# on a heap-allocated vector eliminates GC pressure in the hot search loop.
+#
+# The parallel `scores` array is filled by _score_moves! and consumed by
+# _pick_move!, implementing partial selection sort: we only sort as many moves
+# as we actually search before a beta cutoff, saving the full sort cost in
+# branches where most moves are pruned after the first few.
 const MAX_MOVES = 256
 struct MoveList
     moves ::Vector{Move}

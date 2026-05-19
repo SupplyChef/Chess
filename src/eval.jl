@@ -8,6 +8,8 @@ const PIECE_VALUE = (0, 100, 320, 330, 500, 900, 20_000)
 # 64 entries written rank-8 → rank-1, file-a → file-h (visual board order).
 # For White: pst[sq] = table[(7 − rank) × 8 + file + 1]
 # For Black: mirror by rank → table[rank × 8 + file + 1]
+# The mirror formula ensures both colors use the same geometric preferences
+# without storing two tables.
 
 @inline function _pst(table, c::Color, s::Square)::Int
     idx = c == White ? (7 - rank_of(s)) * 8 + file_of(s) + 1 :
@@ -70,7 +72,16 @@ const PST_QUEEN = Int16[
     -20,-10,-10, -5, -5,-10,-10,-20,
 ]
 
-# King tables blend from MG (hide behind pawns) to EG (centralize).
+# ── Tapered king evaluation ────────────────────────────────────────────────────
+# The king's ideal location changes completely between the middlegame (MG) and
+# endgame (EG): in the MG it should hide behind pawns in a corner; in the EG
+# all pawns may be gone so the king must centralise to support its own pawns.
+#
+# We blend MG and EG tables by a "phase" value that counts remaining material:
+#   phase = knights + bishops + 2×rooks + 4×queens, clamped to [0, 24].
+# At full material (phase=24) the result is the pure MG score; at phase=0 it
+# is the pure EG score.  The linear interpolation king_bonus = (ph×MG + (24-ph)×EG) / 24
+# continuously adjusts the king's positional incentive as pieces come off the board.
 const PST_KING_MG = Int16[
     -30,-40,-40,-50,-50,-40,-40,-30,
     -30,-40,-40,-50,-50,-40,-40,-30,
@@ -78,7 +89,7 @@ const PST_KING_MG = Int16[
     -30,-40,-40,-50,-50,-40,-40,-30,
     -20,-30,-30,-40,-40,-30,-30,-20,
     -10,-20,-20,-25,-25,-20,-20,-10,
-    -20,-20,-20,-25,-25,-20,-20,-20,   # rank 2: was +20 for corners — king must NOT walk here in MG
+    -20,-20,-20,-25,-25,-20,-20,-20,   # rank 2: corners penalised to prevent premature king walks
      20, 30, 10,  0,  0, 10, 30, 20,
 ]
 
@@ -93,9 +104,16 @@ const PST_KING_EG = Int16[
     -50,-30,-30,-30,-30,-30,-30,-50,
 ]
 
-# ── Passed-pawn masks ──────────────────────────────────────────────────────────
-# _PASSED_W[s+1] = squares that must be free of black pawns for white pawn on s to be passed.
-# _PASSED_B[s+1] = same for black.
+# ── Passed-pawn corridor masks ─────────────────────────────────────────────────
+# A pawn is "passed" when no enemy pawn can ever block or capture it — i.e.,
+# there is no enemy pawn in the three-file corridor (own file + adjacent files)
+# in front of it.
+#
+# _PASSED_W[s+1] covers all squares on files f-1, f, f+1 with rank > r (for white).
+# _PASSED_B[s+1] covers the same files with rank < r (for black).
+# If the intersection with enemy pawns is empty, the pawn is passed.
+# These masks are also reused for the knight-outpost test, which checks that no
+# enemy pawn can advance to challenge the outpost square.
 function _build_passed_masks()
     wm = zeros(BB, 64)
     bm = zeros(BB, 64)
@@ -121,6 +139,8 @@ const (_PASSED_W, _PASSED_B) = _build_passed_masks()
 
 # Bonus in centipawns for a passed pawn based on how far advanced it is.
 # Indexed by rank_of(s)+1 (1=rank1 … 8=rank8); ranks 1 and 8 unused for pawns.
+# The exponential-ish growth reflects that a pawn on rank 7 is nearly a queen
+# while a pawn on rank 3 is only marginally threatening.
 const PASSED_BONUS_W = (0, 0, 10, 20, 40, 60, 80, 0)
 const PASSED_BONUS_B = (0, 80, 60, 40, 20, 10,  0, 0)
 
@@ -153,6 +173,8 @@ end
 
 function _eval_piece_activity(b::Board)::Int
     # Game phase: 24 = full material, 0 = king+pawns only.
+    # Used to blend MG and EG king tables; also controls how aggressively
+    # king centralisation is incentivised.
     ph = 0
     for c in (White, Black)
         ph += count_bits(bb(b, c, Knight)) + count_bits(bb(b, c, Bishop))
@@ -175,11 +197,13 @@ function _eval_piece_activity(b::Board)::Int
         for s in BitIter(bb(b, c, Rook));   score += sign * _pst(PST_ROOK,   c, s); end
         for s in BitIter(bb(b, c, Queen));  score += sign * _pst(PST_QUEEN,  c, s); end
 
+        # Tapered king: linear blend between MG and EG scores based on phase.
         ks = lsb(bb(b, c, King))
         king_bonus = (ph * _pst(PST_KING_MG, c, ks) + (24 - ph) * _pst(PST_KING_EG, c, ks)) ÷ 24
         score += sign * king_bonus
 
         # Rook on open file (+20) or semi-open file (+10).
+        # Open = no pawn of either color on the file; semi-open = no friendly pawn.
         # Rook on the 7th rank (+15, stacks with file bonus).
         for s in BitIter(bb(b, c, Rook))
             f = file_of(s)
@@ -192,7 +216,8 @@ function _eval_piece_activity(b::Board)::Int
         end
 
         # Connected rooks: two rooks with a clear line of sight (+15 per pair).
-        # Counts each pair once by skipping already-visited rooks.
+        # The `seen` mask ensures each pair is counted once even if three rooks
+        # are somehow on the board (promoted rook).
         my_rooks = bb(b, c, Rook)
         if count_bits(my_rooks) >= 2
             seen = BB(0)
@@ -202,9 +227,10 @@ function _eval_piece_activity(b::Board)::Int
             end
         end
 
-        # Knight outpost: in the opponent's half with no enemy pawn able to
-        # advance and attack the square (+20).  Uses the same corridor check
-        # as the explanation system so the two stay in sync.
+        # Knight outpost: a knight in the opponent's half that cannot be chased
+        # by an enemy pawn.  We reuse the passed-pawn corridor mask (minus the
+        # knight's own file) to test whether any enemy pawn can advance to an
+        # adjacent file at any rank in front of the knight (+20).
         for s in BitIter(bb(b, c, Knight))
             in_opp_half = c == White ? rank_of(s) >= 4 : rank_of(s) <= 3
             in_opp_half || continue
@@ -216,14 +242,15 @@ function _eval_piece_activity(b::Board)::Int
     end
 
     # Bishop pair bonus (+30): two bishops outperform two knights or bishop+knight
-    # in open positions.
+    # in open positions because they cover both diagonal colors.
     for c in (White, Black)
         count_bits(bb(b, c, Bishop)) >= 2 && (score += (c == White ? 1 : -1) * 30)
     end
 
-    # Center control: +3cp per piece attacking any of d4/d5/e4/e5.
-    # Bonuses from piece occupation are already in the PSTs; this rewards
-    # control even when the square is empty or held by the opponent.
+    # Center control: +3cp per piece that attacks any of d4/d5/e4/e5.
+    # PSTs reward pieces that occupy the center squares, but a bishop on a2
+    # pointing at d5 also exerts meaningful control.  Using the actual attack
+    # lookups captures this indirect control that PSTs cannot express.
     for c in (White, Black)
         sign = c == White ? 1 : -1
         ctrl = 0
@@ -251,9 +278,12 @@ function _eval_pawn_structure(b::Board)::Int
             fp = pawns & FILE_MASK[f+1]
             fp == 0 && continue
             n = count_bits(fp)
-            # Doubled pawns: penalty per extra pawn on the same file
+            # Doubled pawns: penalty per extra pawn on the same file.
+            # The lead pawn is neutral; each additional pawn is a liability
+            # because it cannot protect the one ahead of it.
             n > 1 && (score += sign * (n - 1) * (-15))
-            # Isolated pawns: no friendly pawn on either adjacent file
+            # Isolated pawns: no friendly pawn on either adjacent file means
+            # this pawn can never be defended by another pawn.
             left  = f > 0 ? pawns & FILE_MASK[f]   : BB(0)
             right = f < 7 ? pawns & FILE_MASK[f+2] : BB(0)
             (left == 0 && right == 0) && (score += sign * n * (-10))
@@ -266,6 +296,22 @@ function _eval_pawn_structure(b::Board)::Int
     score
 end
 
+# ── King-safety pawn shield ────────────────────────────────────────────────────
+# After castling the king typically sits on g1/h1 (kingside) or b1/c1 (queenside).
+# The pawns on the two ranks directly in front of it form a "shield" that
+# blocks enemy queens and rooks from approaching on open files.
+#
+# We award +20 per pawn in the rank directly in front of the king (close shield)
+# and +8 per pawn two ranks ahead (far shield).  The smaller far-shield bonus
+# acknowledges that a pawn on h3 still provides some cover but leaves the king
+# more exposed than one on h2.
+#
+# We also penalise open files adjacent to the king (-18 each): an open file is
+# an invasion route for heavy pieces even if the immediate pawn shield is intact.
+#
+# The whole block is skipped when the king is in the centre (files c–e), because
+# a centralised king in the middlegame is already penalised by PST_KING_MG and
+# the shield geometry doesn't apply.
 function _eval_king_safety(b::Board)::Int
     score = 0
     for c in (White, Black)
@@ -274,12 +320,12 @@ function _eval_king_safety(b::Board)::Int
         kf    = file_of(ks); kr = rank_of(ks)
         pawns = bb(b, c, Pawn)
 
-        # Pawn shield only relevant when king is castled (queenside a-c or kingside f-h)
+        # Only evaluate shield for a king that has castled (files a–c or f–h).
         (kf <= 2 || kf >= 5) || continue
 
         fwd = c == White ? 1 : -1
 
-        # Close shield (1 rank ahead): +20 each — pushing g4/h4 costs 20cp per pawn
+        # Close shield (1 rank ahead): +20 each
         r1 = kr + fwd
         if 0 <= r1 <= 7
             for df in -1:1
@@ -289,7 +335,7 @@ function _eval_king_safety(b::Board)::Int
             end
         end
 
-        # Far shield (2 ranks ahead): +8 each — h3 still counts but less than h2
+        # Far shield (2 ranks ahead): +8 each
         r2 = kr + 2*fwd
         if 0 <= r2 <= 7
             for df in -1:1
@@ -299,8 +345,8 @@ function _eval_king_safety(b::Board)::Int
             end
         end
 
-        # Semi-open file penalty: no friendly pawn anywhere on a file beside/under king
-        # Open files near the castled king are invasion routes for rooks/queens.
+        # Semi-open file penalty: no friendly pawn on a file next to or under
+        # the king means that file is a highway for rooks and queens.
         for df in -1:1
             sf = kf + df
             0 <= sf <= 7 || continue

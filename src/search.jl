@@ -7,11 +7,23 @@ const MAX_PLY    = 64
 const TT_BITS    = 20
 const TT_SIZE    = 1 << TT_BITS   # ~1M entries
 
+# TT flag meanings (from the perspective of the side to move at that node):
+#   EXACT  — the stored score is the true minimax value (alpha was raised and
+#             the search stayed inside the window).
+#   LOWER  — score is a lower bound; the node failed high (caused a beta cutoff),
+#             so we know the real score is ≥ stored, but not exactly what it is.
+#   UPPER  — score is an upper bound; all moves failed to improve alpha,
+#             so the real score is ≤ stored.
 const TT_EXACT = 0x00
-const TT_LOWER = 0x01   # score is a lower bound (failed high / beta cutoff)
-const TT_UPPER = 0x02   # score is an upper bound (failed low)
+const TT_LOWER = 0x01
+const TT_UPPER = 0x02
 
 # ── Transposition table ────────────────────────────────────────────────────────
+# The TT maps Zobrist hash → (score, depth, flag, best_move).
+# Because the table has ~1M slots and positions are identified by a 64-bit hash,
+# we index by hash & (TT_SIZE-1) (fast power-of-2 modulo) and store the full
+# hash in the entry to detect collisions from different positions that land on
+# the same slot.
 struct TTEntry
     key::UInt64
     score::Int32
@@ -26,18 +38,36 @@ const TT_EMPTY = TTEntry(UInt64(0), Int32(0), Int16(-1), TT_EXACT, NULL_MOVE)
     @inbounds tt[(hash & (TT_SIZE - 1)) + 1]
 end
 
+# TT replacement policy: always replace if the stored entry is from a shallower
+# search.  A deeper entry contains more information (more nodes were searched to
+# produce it) and is therefore more valuable to keep.  Same-position updates
+# (same key) always replace to capture the latest, deeper result.  Empty slots
+# are always filled.
 @inline function _tt_put!(tt::Vector{TTEntry}, hash::UInt64,
                            depth::Int, score::Int, flag::UInt8, move::Move)
     idx = (hash & (TT_SIZE - 1)) + 1
     @inbounds e = tt[idx]
-    # Replace if: same position (update), empty slot, or new search is deeper.
     if e.key == hash || e.key == 0 || e.depth <= depth
         @inbounds tt[idx] = TTEntry(hash, Int32(score), Int16(depth), flag, move)
     end
 end
 
 # ── Move ordering ──────────────────────────────────────────────────────────────
-# MVV-LVA victim scores: higher = more valuable victim.
+# Good move ordering is the single biggest practical speedup for alpha-beta:
+# searching the best moves first causes beta cutoffs earlier, pruning more of
+# the tree.  Priority order:
+#   1. Hash move (best move from a previous TT entry) — already known to be good.
+#   2. Captures, ordered by MVV-LVA (see below).
+#   3. Queen promotions.
+#   4. Killer moves (quiet moves that caused beta cutoffs at this ply before).
+#   5. All other quiet moves (score 0, searched in generation order).
+
+# MVV-LVA (Most Valuable Victim – Least Valuable Aggressor):
+# Captures are scored by victim value first (high = better) and aggressor value
+# second (low = better).  Capturing a queen with a pawn scores highest; capturing
+# a pawn with a queen scores lowest among captures.  This heuristic approximates
+# Static Exchange Evaluation cheaply: high-value captures are very likely to be
+# good moves and should be searched first.
 const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
 
 @inline function _move_score(m::Move, b::Board,
@@ -48,11 +78,17 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
     if (fl & MF_CAPTURE) != 0 || fl == MF_EP
         victim  = fl == MF_EP ? Pawn : b.piece_on[to_sq(m)+1].kind
         aggr    = b.piece_on[from_sq(m)+1].kind
+        # Victim weight dominates (×10) so any more-valuable capture outranks
+        # any less-valuable capture regardless of the aggressor.
         return 100_000 + _MVV[Int(victim)+1] * 10 - _MVV[Int(aggr)+1]
     end
 
     (fl & MF_PROMO) != 0 && return 90_000
 
+    # Killer moves: quiet moves that caused a beta cutoff at this ply in a
+    # sibling node.  They are likely good here too because they don't depend on
+    # the specific position — a knight fork that refuted one move often refutes
+    # others on the same ply.  We store two killers per ply (slot 1 = most recent).
     if 1 <= ply <= MAX_PLY
         @inbounds killers[1, ply] == m && return 80_000
         @inbounds killers[2, ply] == m && return 70_000
@@ -61,7 +97,7 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
     0
 end
 
-# Fill ml.scores with move ordering scores (no allocation).
+# Fill ml.scores with move ordering scores (parallel to ml.moves).
 function _score_moves!(ml::MoveList, b::Board,
                        hash_move::Move, killers::Matrix{Move}, ply::Int)
     @inbounds for i in 1:length(ml)
@@ -69,8 +105,10 @@ function _score_moves!(ml::MoveList, b::Board,
     end
 end
 
-# Partial selection sort: swap the best move in [idx..n] into position idx.
-# Modifies ml.moves and ml.scores in-place; returns the chosen move.
+# Partial selection sort: find the highest-scored move in [idx..n] and swap it
+# to position idx.  We sort lazily — only one move per iteration — because a
+# beta cutoff may happen on the first or second move, making the rest of the
+# sort wasted work.
 @inline function _pick_move!(ml::MoveList, idx::Int)::Move
     best_i = idx
     @inbounds best_s = ml.scores[idx]
@@ -87,6 +125,9 @@ end
     @inbounds ml.moves[idx]
 end
 
+# Update the killer table: the most-recent killer bumps the older one out.
+# We keep two slots so that two different killers can be remembered simultaneously,
+# increasing the chance of an early cutoff when both are tried.
 function _update_killers!(killers::Matrix{Move}, ply::Int, m::Move)
     1 <= ply <= MAX_PLY || return
     killers[1, ply] == m && return
@@ -97,7 +138,7 @@ end
 # ── Search state ──────────────────────────────────────────────────────────────
 const MOVE_STACK_SIZE   = MAX_PLY + 64   # regular depth + qsearch budget
 const TRICKINESS_WEIGHT = 0.10           # conservative weight; tune up if play feels too timid
-const ASPIRATION_DELTA  = 50             # initial aspiration window half-width (centipawns)
+const ASPIRATION_DELTA  = 75             # initial aspiration window half-width (centipawns)
 
 mutable struct SearchInfo
     tt         ::Vector{TTEntry}
@@ -134,7 +175,9 @@ struct SearchResult
 end
 
 # Walk the TT from the root to extract the principal variation.
-# Applies moves to b and unwinds them — b is restored on return.
+# Each EXACT entry records the best move at that node; we follow the chain
+# until we reach a position not in the TT or a repeat (loop guard).
+# b is mutated during traversal but fully restored before returning.
 function _extract_pv(b::Board, tt::Vector{TTEntry}, root_move::Move, max_len::Int)::Vector{Move}
     pv    = Move[]
     undos = UndoInfo[]
@@ -155,6 +198,20 @@ function _extract_pv(b::Board, tt::Vector{TTEntry}, root_move::Move, max_len::In
 end
 
 # ── Quiescence search ─────────────────────────────────────────────────────────
+# Alpha-beta at depth 0 hands off to quiescence rather than calling the static
+# evaluator directly.  Without this, the engine would miss obvious captures
+# immediately after the horizon and assign wildly wrong scores to positions where
+# a piece has just been sacrificed.
+#
+# Stand-pat: before searching any capture we evaluate the position statically.
+# This score is a lower bound on what the side to move can achieve — they can
+# always "stand pat" and decline all captures.  If stand_pat >= beta we prune
+# immediately (the opponent already had a better alternative earlier).
+# If stand_pat > alpha we raise alpha (we found a quiet baseline that beats the
+# previous best).  Searching captures then looks for something better.
+#
+# When in check we cannot stand pat (the king may be lost) and must consider
+# all evasions, not just captures.
 function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::Int
     si.nodes += 1
 
@@ -167,13 +224,10 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     end
 
     ml = si.move_stack[min(ply, MOVE_STACK_SIZE)]
-    # In check: must consider all evasions. Otherwise: captures + promos only.
-    # generate_captures! filters ~5 moves instead of ~30, skipping _filter_legal!
-    # overhead for the quiet moves qsearch would ignore anyway.
     in_check ? generate_moves!(ml, b) : generate_captures!(ml, b)
 
-    # No captures/promos available (or not in check with no evasions).
-    # Return alpha (= stand_pat) for quiet positions; checkmate/stalemate otherwise.
+    # No captures/promos available and not in check: this is a quiet position,
+    # return alpha (= stand_pat).  In check with no evasions: checkmate.
     length(ml) == 0 && return in_check ? -(MATE_SCORE - ply) : alpha
 
     _score_moves!(ml, b, NULL_MOVE, si.killers, ply)
@@ -193,7 +247,18 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     best
 end
 
-# ── Alpha-beta (negamax) ──────────────────────────────────────────────────────
+# ── Alpha-beta negamax ────────────────────────────────────────────────────────
+# Negamax is a clean formulation of minimax where every node maximises its own
+# score.  The trick: the score returned by a child node is negated before
+# comparison, and the window is flipped (−beta, −alpha) when passed down.
+# This works because the child's "best score for me" is the parent's
+# "worst score for me" — negation converts between the two perspectives.
+#
+# Alpha = lower bound: the current player is guaranteed at least this much.
+# Beta  = upper bound: the opponent won't allow us to do better than this
+#         (they have a refutation elsewhere in the tree).
+# A beta cutoff occurs when we find a move that scores >= beta — the opponent
+# won't reach this node because they have something better, so we stop searching.
 function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                   ply::Int, si::SearchInfo)::Int
     # Periodic time check (every 1024 nodes to keep overhead low).
@@ -203,7 +268,11 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         return 0
     end
 
-    # Transposition table probe.
+    # TT probe: if we have previously searched this position at sufficient depth,
+    # we can reuse the stored result.  "Sufficient depth" means tte.depth >= depth:
+    # a stored result from a depth-3 search is not reliable when we need depth-5.
+    # The flag tells us whether the stored score is exact, a lower bound, or an
+    # upper bound, and we narrow (or cut) the window accordingly.
     tte       = _tt_get(si.tt, b.hash)
     hash_move = NULL_MOVE
     if tte.key == b.hash
@@ -221,12 +290,14 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         end
     end
 
-    # At horizon: drop into quiescence search.
+    # At horizon: drop into quiescence search rather than returning the static
+    # eval, to avoid the "horizon effect" of missing captures on the next move.
     depth <= 0 && return _quiesce(b, alpha, beta, ply, si)
 
     ml = si.move_stack[min(ply, MOVE_STACK_SIZE)]
     generate_moves!(ml, b)
 
+    # No legal moves: checkmate (king in check) or stalemate (not in check).
     if length(ml) == 0
         return king_in_check(b, b.side) ? -(MATE_SCORE - ply) : 0
     end
@@ -251,6 +322,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             if score > alpha
                 alpha = score
                 if alpha >= beta
+                    # Beta cutoff: record quiet moves that cause cutoffs as killers
+                    # so they get tried early in sibling nodes.
                     fl = flags(m)
                     (fl & MF_CAPTURE) == 0 && fl != MF_EP &&
                         _update_killers!(si.killers, ply, m)
@@ -260,6 +333,10 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         end
     end
 
+    # Store the result in the TT.  The flag reflects what we learned:
+    #   best_score >= beta  → lower bound (we stopped early; true score could be higher)
+    #   best_score > orig_alpha → exact (alpha was raised; this IS the minimax value)
+    #   otherwise           → upper bound (no move improved alpha; true score ≤ best_score)
     if !si.stop
         flag = best_score >= beta      ? TT_LOWER :
                best_score > orig_alpha ? TT_EXACT : TT_UPPER
@@ -270,21 +347,30 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
 end
 
 # ── Trickiness scoring ────────────────────────────────────────────────────────
-# After making candidate move m, do a shallow search over the opponent's replies.
-# Returns trickiness = gap × (1 − naturalness), where:
-#   gap         = best_reply_score − second_best_score  (how much the correct reply matters)
-#   naturalness = 1/rank of best reply in MVV-LVA ordering (how obvious it is)
-# High trickiness → the winning reply is hard for a human to spot.
+# "Trickiness" measures how hard it is for the OPPONENT to find the correct
+# response to a candidate move.  After playing candidate move m, we score all
+# of the opponent's replies with a shallow search and compute:
+#
+#   gap         = best_reply_score − second_best_score
+#               (how much the one correct reply matters; large gap → only one
+#                good answer exists, making the position easy to go wrong in)
+#
+#   naturalness = 1 / rank_of_best_reply_in_MVV-LVA_order
+#               (how obvious the best reply is; naturalness=1 if it is the
+#                top-scored move by MVV-LVA, lower if it appears further down
+#                the list and the opponent must find a non-obvious move)
+#
+#   trickiness  = gap × (1 − naturalness)
+#
+# A large gap combined with a non-obvious best reply (low naturalness) gives
+# high trickiness: the opponent is likely to play the second-best reply and
+# suffer a significant loss.  Among candidate moves that are within 30cp of
+# the best objective score, we prefer the trickiest one.
 function _trickiness_score(b::Board, m::Move, si::SearchInfo)::Int
     undo = make_move!(b, m)
     ml   = si.move_stack[2]
     generate_moves!(ml, b)
     n    = length(ml)
-    if n == 0
-        unmake_move!(b, m, undo)
-        return 0
-    end
-
     if n <= 1
         unmake_move!(b, m, undo)
         return 0
@@ -294,16 +380,12 @@ function _trickiness_score(b::Board, m::Move, si::SearchInfo)::Int
     hash_move = tte.key == b.hash ? tte.move : NULL_MOVE
     _score_moves!(ml, b, hash_move, si.killers, 2)
 
-    # Find the opponent's best reply and second-best.
-    # score = -_negamax = opponent's relative advantage (higher = better for opponent).
-    # gap = best_score - second_best: how much the one correct reply matters.
-    # High gap → opponent MUST find the exact best reply → tricky.
     best_score  = -(MATE_SCORE + 1)
     second_best = -(MATE_SCORE + 1)
-    best_rank   = n
+    best_rank   = n   # default: best reply found last (worst naturalness)
 
     for i in 1:n
-        reply = _pick_move!(ml, i)   # i = rank in natural (MVV-LVA) order
+        reply = _pick_move!(ml, i)   # i is the reply's rank in MVV-LVA order
         undo2 = make_move!(b, reply)
         score = -_negamax(b, 2, -MATE_SCORE, MATE_SCORE, 3, si)
         unmake_move!(b, reply, undo2)
@@ -316,7 +398,9 @@ function _trickiness_score(b::Board, m::Move, si::SearchInfo)::Int
             second_best = score
         end
     end
-    # If time expired after only one reply, second_best is still -(MATE_SCORE+1) — no gap.
+
+    # If time expired after only one reply was evaluated, second_best is still
+    # sentinel — we cannot compute a meaningful gap, so return 0.
     second_best <= -MATE_SCORE && (unmake_move!(b, m, undo); return 0)
     gap         = max(0, min(best_score - second_best, 200))   # cap at 200 cp
     naturalness = 1.0 / best_rank
@@ -393,29 +477,39 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo(), verb
 
     prev_score = 0
     for depth in 1:MAX_PLY
-        # Use a full window for the first three depths or when a mate is on the board —
-        # aspiration only pays off when the score is a reliable centipawn estimate.
-        if depth <= 3 || abs(prev_score) >= MATE_SCORE - MAX_PLY
+        # Aspiration windows: search with a narrow window centred on the previous
+        # iteration's score.  If the true score lies outside, we get a fail-low
+        # (score ≤ α) or fail-high (score ≥ β) and must re-search with a wider
+        # window.  The payoff: when the score is stable, roughly 80% of nodes
+        # that would be searched with a full window are pruned.
+        #
+        # We use a full window for the first four depths or when a mate score
+        # is on the board — aspiration only helps when the score is a stable
+        # centipawn estimate, not when it may be a mate distance that changes
+        # wildly between iterations.
+        if depth <= 4 || abs(prev_score) >= MATE_SCORE - MAX_PLY
             score, move = _search_root(b, depth, -MATE_SCORE, MATE_SCORE, si)
         else
-            # Narrow aspiration window; widen exponentially on fail-low/high.
             δ = ASPIRATION_DELTA
             α = max(-MATE_SCORE, prev_score - δ)
             β = min( MATE_SCORE, prev_score + δ)
             while true
                 score, move = _search_root(b, depth, α, β, si)
                 si.stop && break
-                if score <= α          # fail-low: widen bottom
+                if score <= α          # fail-low: the position is worse than expected;
+                    # keep β close to the old α (the score won't be much higher)
+                    # and widen the lower side only.
                     β  = (α + β) ÷ 2
                     α  = max(-MATE_SCORE, score - δ)
                     δ *= 3
-                elseif score >= β      # fail-high: widen top
+                elseif score >= β      # fail-high: a move scored much better than expected;
+                    # widen the upper side and retry.
                     β  = min(MATE_SCORE, score + δ)
                     δ *= 3
                 else
-                    break              # score inside window — done
+                    break              # score inside window — result is reliable
                 end
-                δ > 2 * MATE_SCORE && break  # full-window fallback safety
+                δ > 2 * MATE_SCORE && break  # fallback: give up and accept the result
             end
         end
 
@@ -436,17 +530,22 @@ function search_move(b::Board, time_ms::Int; si::SearchInfo = SearchInfo(), verb
         verbose && @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  pv %s\n",
                            depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, pv_str)
 
-        abs(score) >= MATE_SCORE - MAX_PLY && break  # mate found
+        abs(score) >= MATE_SCORE - MAX_PLY && break  # mate found; no need to search deeper
     end
 
-    # Trickiness: re-score candidates within 30cp of best with a shallow reply search.
-    # Only consider moves that were the AB-best at some iteration — those have been
-    # searched as the principal variation and have known continuations in the TT.
-    # Moves that were never the PV best (like a speculative exchange) must not be
-    # selected here; we'd be playing a move whose line was never deeply analyzed.
+    # Trickiness pass: among the top-3 moves within 30cp of the best, prefer
+    # the one whose correct reply is hardest for the opponent to find.
+    #
+    # The pv_candidates filter is critical: we only consider moves that were the
+    # AB-best at some depth iteration.  These moves have been the principal
+    # variation and therefore have known continuations stored in the TT from deep
+    # searches.  A move that was never the PV best (e.g. a speculative sacrifice
+    # ranked 5th) was never searched as the main line — we don't know its true
+    # value, so selecting it based on shallow trickiness would mean playing an
+    # un-analyzed move.
     if best_depth >= 4 && length(completed_roots) >= 2
         sort!(completed_roots; by = first, rev = true)
-        threshold = completed_roots[1][1] - 30   # only candidates within 30cp of best
+        threshold = completed_roots[1][1] - 30
         top_n     = min(3, length(completed_roots))
         si.stop       = false
         si.time_limit = time() + 0.060   # 60 ms budget for trickiness pass
