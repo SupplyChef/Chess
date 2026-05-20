@@ -185,9 +185,10 @@ mutable struct SearchInfo
     #                  one more repeat makes it a draw.
     path         ::Vector{UInt64}
     prior_counts ::Dict{UInt64,Int}
+    config       ::EngineConfig
 end
 
-function SearchInfo()
+function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
     SearchInfo(
         fill(TT_EMPTY, TT_SIZE),
         fill(NULL_MOVE, 2, MAX_PLY),
@@ -200,6 +201,7 @@ function SearchInfo()
         0.0,
         UInt64[],
         Dict{UInt64,Int}(),
+        cfg,
     )
 end
 
@@ -260,7 +262,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     in_check = king_in_check(b, b.side)
 
     if !in_check
-        stand_pat = (b.side == White ? 1 : -1) * total(evaluate(b))
+        stand_pat = (b.side == White ? 1 : -1) * total(evaluate(b, si.config))
         stand_pat >= beta && return stand_pat
         alpha = max(alpha, stand_pat)
     end
@@ -366,7 +368,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     #
     # We use a null-window around beta (–β, –β+1) and a reduced depth R so
     # the null search is very fast.  R = 3 at depth ≥ 6, R = 2 otherwise.
-    if !is_null && !in_check && depth >= 3 &&
+    cfg = si.config
+    if cfg.null_move && !is_null && !in_check && depth >= 3 &&
        (bb(b, b.side, Knight) | bb(b, b.side, Bishop) |
         bb(b, b.side, Rook)   | bb(b, b.side, Queen)) != BB(0)
         R       = depth >= 6 ? 3 : 2
@@ -394,8 +397,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # alpha, quiet moves are unlikely to improve alpha — prune them.
     # Captures and promotions bypass this check: they can swing material
     # dramatically and must always be searched.
-    futility_ok = !in_check && depth <= 2 &&
-        (b.side == White ? 1 : -1) * total(evaluate(b)) +
+    futility_ok = cfg.futility && !in_check && depth <= 2 &&
+        (b.side == White ? 1 : -1) * total(evaluate(b, cfg)) +
         FUTILITY_MARGIN[depth + 1] < alpha
 
     ml = si.move_stack[min(ply, MOVE_STACK_SIZE)]
@@ -432,7 +435,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         # Checking moves lead to forced sequences (the opponent must evade), so
         # the resulting subtree is narrow and cheap to explore.  Extending ensures
         # we don't miss a forced mate that LMR would otherwise reduce away.
-        extension = gives_check ? 1 : 0
+        extension = (cfg.check_extensions && gives_check) ? 1 : 0
 
         # LMR: after the first 3 moves, reduce quiet non-checking moves.
         # Good moves appear early in the sorted list; late moves are usually
@@ -440,7 +443,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         # we re-search at full depth — LMR only saves work on unsound moves.
         # Extra reduction for very late moves (index > 8).
         reduction = 0
-        if depth >= 3 && i > 3 && !is_capture && !is_promo && !gives_check && !in_check
+        if cfg.lmr && depth >= 3 && i > 3 && !is_capture && !is_promo && !gives_check && !in_check
             reduction = i > 8 ? 2 : 1
         end
 
@@ -610,7 +613,7 @@ function search_move(b::Board, time_ms::Int;
     generate_moves!(ml, b)
     if length(ml) == 0
         score = king_in_check(b, b.side) ? -(MATE_SCORE - 1) : 0
-        return SearchResult(NULL_MOVE, score, 0, Int64(0), evaluate(b), Move[])
+        return SearchResult(NULL_MOVE, score, 0, Int64(0), evaluate(b, si.config), Move[])
     end
 
     si.stop         = false
@@ -640,7 +643,7 @@ function search_move(b::Board, time_ms::Int;
         # is on the board — aspiration only helps when the score is a stable
         # centipawn estimate, not when it may be a mate distance that changes
         # wildly between iterations.
-        if depth <= 4 || abs(prev_score) >= MATE_SCORE - MAX_PLY
+        if !si.config.aspiration || depth <= 4 || abs(prev_score) >= MATE_SCORE - MAX_PLY
             score, move = _search_root(b, depth, -MATE_SCORE, MATE_SCORE, si)
         else
             δ = ASPIRATION_DELTA
@@ -719,5 +722,5 @@ function search_move(b::Board, time_ms::Int;
     end
 
     pv = _extract_pv(b, si.tt, best_move, 10)
-    SearchResult(best_move, best_score, best_depth, si.nodes, evaluate(b), pv)
+    SearchResult(best_move, best_score, best_depth, si.nodes, evaluate(b, si.config), pv)
 end

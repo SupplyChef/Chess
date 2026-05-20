@@ -213,7 +213,7 @@ function _eval_material(b::Board)::Int
     score
 end
 
-function _eval_piece_activity(b::Board)::Int
+function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     # Game phase: 24 = full material, 0 = king+pawns only.
     # Used to blend MG and EG king tables; also controls how aggressively
     # king centralisation is incentivised.
@@ -289,63 +289,41 @@ function _eval_piece_activity(b::Board)::Int
         count_bits(bb(b, c, Bishop)) >= 2 && (score += (c == White ? 1 : -1) * 30)
     end
 
-    # Mobility: reward pieces that have many legal destinations.
-    # A "good" bishop on an open diagonal is fundamentally different from a "bad"
-    # bishop locked behind its own pawns — PSTs cannot capture this because the
-    # same square can have very different mobility depending on pawn structure.
-    # We exclude own pieces from the target squares (landing on them is illegal)
-    # but include enemy pieces (captures are valid destinations).
-    #
-    # Weights reflect diminishing returns per piece type:
-    #   Knight: +4 cp/sq — range is small (max 8), so each reachable square matters
-    #   Bishop: +3 cp/sq — long-range but diagonal-color-locked
-    #   Rook:   +2 cp/sq — already rewarded by open-file/7th-rank bonuses
-    #   Queen:  +1 cp/sq — already has the highest base value
-    for c in (White, Black)
-        sign    = c == White ? 1 : -1
-        our_occ = b.occ[Int(c)+1]
-        for s in BitIter(bb(b, c, Knight))
-            score += sign * count_bits(knight_attacks(s) & ~our_occ) * 4
-        end
-        for s in BitIter(bb(b, c, Bishop))
-            score += sign * count_bits(bishop_attacks(s, occ) & ~our_occ) * 3
-        end
-        for s in BitIter(bb(b, c, Rook))
-            score += sign * count_bits(rook_attacks(s, occ) & ~our_occ) * 2
-        end
-        for s in BitIter(bb(b, c, Queen))
-            score += sign * count_bits(queen_attacks(s, occ) & ~our_occ) * 1
+    if cfg.eval_mobility
+        for c in (White, Black)
+            sign    = c == White ? 1 : -1
+            our_occ = b.occ[Int(c)+1]
+            for s in BitIter(bb(b, c, Knight))
+                score += sign * count_bits(knight_attacks(s) & ~our_occ) * 4
+            end
+            for s in BitIter(bb(b, c, Bishop))
+                score += sign * count_bits(bishop_attacks(s, occ) & ~our_occ) * 3
+            end
+            for s in BitIter(bb(b, c, Rook))
+                score += sign * count_bits(rook_attacks(s, occ) & ~our_occ) * 2
+            end
+            for s in BitIter(bb(b, c, Queen))
+                score += sign * count_bits(queen_attacks(s, occ) & ~our_occ) * 1
+            end
         end
     end
 
-    # Center control: +3cp per piece that attacks any of d4/d5/e4/e5.
-    # PSTs reward pieces that occupy the center squares, but a bishop on a2
-    # pointing at d5 also exerts meaningful control.  Using the actual attack
-    # lookups captures this indirect control that PSTs cannot express.
-    for c in (White, Black)
-        sign = c == White ? 1 : -1
-        ctrl = 0
-        for cs in (sq(3,3), sq(4,3), sq(3,4), sq(4,4))
-            (pawn_attacks(cs, other(c)) & bb(b, c, Pawn))                              != 0 && (ctrl += 1)
-            (knight_attacks(cs)          & bb(b, c, Knight))                            != 0 && (ctrl += 1)
-            (bishop_attacks(cs, occ)     & (bb(b, c, Bishop) | bb(b, c, Queen)))       != 0 && (ctrl += 1)
-            (rook_attacks(cs, occ)       & (bb(b, c, Rook)   | bb(b, c, Queen)))       != 0 && (ctrl += 1)
-            (king_attacks(cs)            & bb(b, c, King))                              != 0 && (ctrl += 1)
+    if cfg.eval_center
+        for c in (White, Black)
+            sign = c == White ? 1 : -1
+            ctrl = 0
+            for cs in (sq(3,3), sq(4,3), sq(3,4), sq(4,4))
+                (pawn_attacks(cs, other(c)) & bb(b, c, Pawn))                              != 0 && (ctrl += 1)
+                (knight_attacks(cs)          & bb(b, c, Knight))                            != 0 && (ctrl += 1)
+                (bishop_attacks(cs, occ)     & (bb(b, c, Bishop) | bb(b, c, Queen)))       != 0 && (ctrl += 1)
+                (rook_attacks(cs, occ)       & (bb(b, c, Rook)   | bb(b, c, Queen)))       != 0 && (ctrl += 1)
+                (king_attacks(cs)            & bb(b, c, King))                              != 0 && (ctrl += 1)
+            end
+            score += sign * ctrl * 3
         end
-        score += sign * ctrl * 3
     end
 
-    # Pin bonus: reward holding a slider aimed at the enemy king with exactly
-    # one enemy piece in the line of fire.  That piece is "absolutely pinned"
-    # and its mobility is severely restricted.  The bonus scales with the
-    # pinned piece's value — pinning a queen is more useful than pinning a pawn.
-    #
-    # Algorithm (per slider, per side):
-    #   1. Find the ray segment between the slider and the enemy king using
-    #      `_slider_attacks` with only the king as occupancy — this gives all
-    #      squares strictly between them.
-    #   2. Count how many pieces (either color) sit on that segment.  If exactly
-    #      one, and it belongs to the opponent, we have a pin.
+    if cfg.eval_pins
     for c in (White, Black)
         sign     = c == White ? 1 : -1
         their_k  = lsb(bb(b, other(c), King))
@@ -388,7 +366,8 @@ function _eval_piece_activity(b::Board)::Int
                 score += sign * PIECE_VALUE[Int(pinned_kind)+1] ÷ 8
             end
         end
-    end
+    end   # for c
+    end   # cfg.eval_pins
 
     # ── Endgame king tropism ──────────────────────────────────────────────────────
     # In the endgame the king is an active fighting piece.  Beyond what the tapered
@@ -410,7 +389,7 @@ function _eval_piece_activity(b::Board)::Int
     #
     # All three terms are weighted by (24 − ph) / 12 so they vanish at full
     # material and reach full strength at bare-king endings.
-    if ph < 20
+    if cfg.eval_king_tropism && ph < 20
         eg_weight = 24 - ph   # 4..24
         for c in (White, Black)
             sign        = c == White ? 1 : -1
@@ -423,15 +402,43 @@ function _eval_piece_activity(b::Board)::Int
                 _is_passed(s, c, their_pawns) || continue
                 score += sign * (7 - _chebyshev(our_k, s)) * eg_weight * 2 ÷ 12
             end
+            # King toward enemy passer: tripled coefficient vs own-passer escort
+            # because stopping a passed pawn is more urgent than escorting one.
+            # Each step closer is worth ~4 cp at typical endgame phase (ph≈8),
+            # enough to make a 5-move king march compete with pawn-advance gains.
             for s in BitIter(their_pawns)
                 _is_passed(s, other(c), our_pawns) || continue
-                score += sign * (7 - _chebyshev(our_k, s)) * eg_weight ÷ 12
+                score += sign * (7 - _chebyshev(our_k, s)) * eg_weight * 3 ÷ 12
             end
 
             their_kf    = file_of(their_k)
             their_kr    = rank_of(their_k)
             corner_dist = min(their_kf, 7 - their_kf, their_kr, 7 - their_kr)
             score += sign * (7 - corner_dist) * eg_weight * 3 ÷ 12
+        end
+    end
+
+    if cfg.eval_rook_passer
+        for c in (White, Black)
+            sign        = c == White ? 1 : -1
+            their_pawns = bb(b, other(c), Pawn)
+            my_rooks    = bb(b, c, Rook)
+            enemy_rooks = bb(b, other(c), Rook)
+            for s in BitIter(bb(b, c, Pawn))
+                _is_passed(s, c, their_pawns) || continue
+                f = file_of(s); r = rank_of(s)
+                # Our rook behind our passed pawn — the classic battery.
+                for rs in BitIter(my_rooks & FILE_MASK[f+1])
+                    behind = c == White ? rank_of(rs) < r : rank_of(rs) > r
+                    if behind; score += sign * 45; break; end
+                end
+                # Enemy rook in front of our passed pawn — blockading it.
+                # We reward the rook's OWNER (the blocking side) via sign flip.
+                for rs in BitIter(enemy_rooks & FILE_MASK[f+1])
+                    blocking = c == White ? rank_of(rs) > r : rank_of(rs) < r
+                    if blocking; score -= sign * 20; break; end
+                end
+            end
         end
     end
 
@@ -487,7 +494,7 @@ end
 # The whole block is skipped when the king is in the centre (files c–e), because
 # a centralised king in the middlegame is already penalised by PST_KING_MG and
 # the shield geometry doesn't apply.
-function _eval_king_safety(b::Board)::Int
+function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     score = 0
     for c in (White, Black)
         sign     = c == White ? 1 : -1
@@ -535,13 +542,14 @@ function _eval_king_safety(b::Board)::Int
             end
         end
 
-        # Pawn storm bonus: when the kings are on opposite flanks (file distance
+        # Pawn storm bonus (gated by cfg.eval_pawn_storm):
+        # when the kings are on opposite flanks (file distance
         # >= 3) we gain by advancing pawns toward the enemy king — this is the
         # classical "pawn storm" attacking motif.  We award +6cp per rank
         # advanced beyond rank 3 (0-indexed) for any of our pawns within two
         # files of the enemy king, reflecting that advanced pawns on the enemy
         # king's flank create real mating threats.
-        if abs(kf - their_kf) >= 3
+        if cfg.eval_pawn_storm && abs(kf - their_kf) >= 3
             for s in BitIter(pawns)
                 abs(file_of(s) - their_kf) <= 2 || continue
                 advance = c == White ? rank_of(s) - 2 : 5 - rank_of(s)
@@ -589,13 +597,25 @@ _eval_tempo(b::Board)::Int = b.side == White ? 10 : -10
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-function evaluate(b::Board)::EvalBreakdown
+function evaluate(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::EvalBreakdown
+    mat = _eval_material(b)
+
+    # Complexity bonus: the trailing side benefits from queens on the board.
+    # A queen gives the weaker side mating threats and tactical counterplay that
+    # pure rook endings deny.  Discourages the losing side from swapping queens
+    # and the winning side from forcing simplification.
+    complexity = 0
+    if cfg.eval_complexity && abs(mat) >= 60 &&
+       (bb(b, White, Queen) | bb(b, Black, Queen)) != BB(0)
+        complexity = mat < 0 ? 20 : -20   # bonus for the side that is behind
+    end
+
     EvalBreakdown(
-        _eval_material(b),
-        _eval_piece_activity(b),
+        mat,
+        _eval_piece_activity(b, cfg),
         _eval_pawn_structure(b),
-        _eval_king_safety(b),
-        _eval_space(b),
+        _eval_king_safety(b, cfg),
+        (cfg.eval_space ? _eval_space(b) : 0) + complexity,
         _eval_tempo(b),
     )
 end

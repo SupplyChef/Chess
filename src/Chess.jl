@@ -18,8 +18,10 @@ include("attacks.jl")
 include("zobrist.jl")
 include("fen.jl")
 include("movegen.jl")
+include("config.jl")
 include("eval.jl")
 include("search.jl")
+include("selfplay.jl")
 include("explain.jl")
 include("perft.jl")
 
@@ -60,8 +62,12 @@ export
     compute_hash,
     # eval
     EvalBreakdown, evaluate, total, explain, PIECE_VALUE,
+    # config
+    EngineConfig, DEFAULT_CONFIG,
     # search
     SearchInfo, SearchResult, search_move, MATE_SCORE,
+    # selfplay
+    MatchResult, selfplay,
     # explain
     explain_move, explain_opponent_move,
     # perft
