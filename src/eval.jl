@@ -366,6 +366,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 score += sign * PIECE_VALUE[Int(pinned_kind)+1] ÷ 8
             end
         end
+    end   # for c
     end   # cfg.eval_pins
 
     # ── Endgame king tropism ──────────────────────────────────────────────────────
