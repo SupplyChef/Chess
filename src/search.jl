@@ -342,6 +342,17 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         hash_move = tte.move
         if tte.depth >= depth
             sc = Int(tte.score)
+            # Ply-normalize mate scores: stored value is relative to the node that
+            # stored it; convert to relative to the current node by undoing the
+            # storage adjustment (subtract ply when storing, add back when retrieving
+            # — and vice-versa for the losing side).
+            # Threshold: MATE_SCORE - MOVE_STACK_SIZE covers the deepest reachable ply
+            # (including quiescence), ensuring all mate-distance values are caught.
+            if sc > MATE_SCORE - MOVE_STACK_SIZE
+                sc -= ply
+            elseif sc < -(MATE_SCORE - MOVE_STACK_SIZE)
+                sc += ply
+            end
             if tte.flag == TT_EXACT
                 return sc
             elseif tte.flag == TT_LOWER
@@ -484,7 +495,16 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     if !si.stop
         flag = best_score >= beta      ? TT_LOWER :
                best_score > orig_alpha ? TT_EXACT : TT_UPPER
-        _tt_put!(si.tt, b.hash, depth, best_score, flag, best_move)
+        # Ply-normalize mate scores before storing so the value is node-relative
+        # rather than root-relative.  Retrieving at any ply then gives the correct
+        # mate distance by applying the inverse adjustment.
+        store_score = best_score
+        if best_score > MATE_SCORE - MOVE_STACK_SIZE
+            store_score = best_score + ply
+        elseif best_score < -(MATE_SCORE - MOVE_STACK_SIZE)
+            store_score = best_score - ply
+        end
+        _tt_put!(si.tt, b.hash, depth, store_score, flag, best_move)
     end
 
     best_score
