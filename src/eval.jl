@@ -465,12 +465,17 @@ function _eval_king_safety(b::Board)::Int
                 end
             end
 
-            # Semi-open file penalty: no friendly pawn on a file next to or under
-            # the king means that file is a highway for rooks and queens.
+            # Semi-open file penalty: a pawn on g4 with the king on g1 provides
+            # no protection — only pawns at the close (r1) or far (r2) shield
+            # ranks count.  Using the full file mask would miss the case where
+            # the pawn has advanced past the shield zone, leaving the king
+            # exposed to rooks and queens on what is effectively an open file.
             for df in -1:1
                 sf = kf + df
                 0 <= sf <= 7 || continue
-                (pawns & FILE_MASK[sf+1]) == 0 && (score -= sign * 18)
+                has_shield = (0 <= r1 <= 7 && (pawns & sq_bb(sq(sf, r1))) != 0) ||
+                             (0 <= r2 <= 7 && (pawns & sq_bb(sq(sf, r2))) != 0)
+                has_shield || (score -= sign * 22)
             end
         end
 
