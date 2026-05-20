@@ -580,11 +580,11 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
 
         si.stop && break
 
-        push!(si.root_moves, (score, m))
         if score > best_score
             best_score = score
             best_move  = m
             alpha = max(alpha, score)
+            push!(si.root_moves, (score, m))
         end
     end
 
