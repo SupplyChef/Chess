@@ -17,6 +17,11 @@ const PIECE_VALUE = (0, 100, 320, 330, 500, 900, 20_000)
     Int(table[idx])
 end
 
+# Chebyshev (chessboard) distance: the number of king moves between two squares.
+# Equal to max(|Δfile|, |Δrank|) because the king can move diagonally.
+@inline _chebyshev(s1::Square, s2::Square)::Int =
+    max(abs(file_of(s1) - file_of(s2)), abs(rank_of(s1) - rank_of(s2)))
+
 const PST_PAWN = Int16[
      0,  0,  0,  0,  0,  0,  0,  0,
     50, 50, 50, 50, 50, 50, 50, 50,
@@ -139,10 +144,12 @@ const (_PASSED_W, _PASSED_B) = _build_passed_masks()
 
 # Bonus in centipawns for a passed pawn based on how far advanced it is.
 # Indexed by rank_of(s)+1 (1=rank1 … 8=rank8); ranks 1 and 8 unused for pawns.
-# The exponential-ish growth reflects that a pawn on rank 7 is nearly a queen
-# while a pawn on rank 3 is only marginally threatening.
-const PASSED_BONUS_W = (0, 0, 10, 20, 40, 60, 80, 0)
-const PASSED_BONUS_B = (0, 80, 60, 40, 20, 10,  0, 0)
+# Growth is intentionally steep: a pawn on rank 7 is one move from a queen
+# (~900 cp swing) so even a 120 cp bonus still heavily undersells the threat.
+# The gap between rank 6 and rank 5 reflects that a 7th-rank pawn often queens
+# immediately regardless of what the opponent does.
+const PASSED_BONUS_W = (0, 0, 15, 30, 55, 85, 120, 0)
+const PASSED_BONUS_B = (0, 120, 85, 55, 30, 15,   0, 0)
 
 @inline _passed_bonus(s::Square, c::Color)::Int =
     c == White ? PASSED_BONUS_W[rank_of(s)+1] : PASSED_BONUS_B[rank_of(s)+1]
@@ -383,6 +390,51 @@ function _eval_piece_activity(b::Board)::Int
         end
     end
 
+    # ── Endgame king tropism ──────────────────────────────────────────────────────
+    # In the endgame the king is an active fighting piece.  Beyond what the tapered
+    # PSTs already reward (king centralisation), three additional incentives apply:
+    #
+    #   (a) Own king → own passed pawns: escort them to promotion.
+    #       Bonus = (7 − dist) × eg_weight × 2 ÷ 12
+    #       At bare-king endgame (eg_weight=24): up to +28 cp per pawn.
+    #
+    #   (b) Own king → enemy passed pawns: blockade or capture them.
+    #       Bonus = (7 − dist) × eg_weight ÷ 12
+    #       At bare-king endgame: up to +14 cp per pawn.
+    #
+    #   (c) Enemy king near the edge/corner: mating patterns require the losing
+    #       king to be confined.  corner_dist = min(file, 7−file, rank, 7−rank);
+    #       a king in the centre has corner_dist≈3, on the edge 0, in a corner 0.
+    #       Bonus = (7 − corner_dist) × eg_weight × 3 ÷ 12
+    #       At bare-king endgame: up to +42 cp for an edge-confined king.
+    #
+    # All three terms are weighted by (24 − ph) / 12 so they vanish at full
+    # material and reach full strength at bare-king endings.
+    if ph < 20
+        eg_weight = 24 - ph   # 4..24
+        for c in (White, Black)
+            sign        = c == White ? 1 : -1
+            our_k       = lsb(bb(b, c, King))
+            their_k     = lsb(bb(b, other(c), King))
+            our_pawns   = bb(b, c, Pawn)
+            their_pawns = bb(b, other(c), Pawn)
+
+            for s in BitIter(our_pawns)
+                _is_passed(s, c, their_pawns) || continue
+                score += sign * (7 - _chebyshev(our_k, s)) * eg_weight * 2 ÷ 12
+            end
+            for s in BitIter(their_pawns)
+                _is_passed(s, other(c), our_pawns) || continue
+                score += sign * (7 - _chebyshev(our_k, s)) * eg_weight ÷ 12
+            end
+
+            their_kf    = file_of(their_k)
+            their_kr    = rank_of(their_k)
+            corner_dist = min(their_kf, 7 - their_kf, their_kr, 7 - their_kr)
+            score += sign * (7 - corner_dist) * eg_weight * 3 ÷ 12
+        end
+    end
+
     score
 end
 
@@ -399,13 +451,17 @@ function _eval_pawn_structure(b::Board)::Int
             n = count_bits(fp)
             # Doubled pawns: penalty per extra pawn on the same file.
             # The lead pawn is neutral; each additional pawn is a liability
-            # because it cannot protect the one ahead of it.
-            n > 1 && (score += sign * (n - 1) * (-15))
+            # because it cannot protect the one ahead of it.  −25 cp reflects
+            # that doubled pawns also create weaknesses on the adjacent files
+            # that the opponent can target with a rook or majority.
+            n > 1 && (score += sign * (n - 1) * (-25))
             # Isolated pawns: no friendly pawn on either adjacent file means
-            # this pawn can never be defended by another pawn.
+            # this pawn can never be defended by another pawn.  −20 cp is larger
+            # than the doubled penalty because an isolated pawn is a permanent
+            # structural weakness, not just a mobility issue.
             left  = f > 0 ? pawns & FILE_MASK[f]   : BB(0)
             right = f < 7 ? pawns & FILE_MASK[f+2] : BB(0)
-            (left == 0 && right == 0) && (score += sign * n * (-10))
+            (left == 0 && right == 0) && (score += sign * n * (-20))
         end
 
         for s in BitIter(pawns)
