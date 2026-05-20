@@ -699,7 +699,7 @@ function search_move(b::Board, time_ms::Int;
     # ranked 5th) was never searched as the main line — we don't know its true
     # value, so selecting it based on shallow trickiness would mean playing an
     # un-analyzed move.
-    if best_depth >= 4 && length(completed_roots) >= 2
+    if best_depth >= 4 && length(completed_roots) >= 2 && !is_capture(best_move)
         sort!(completed_roots; by = first, rev = true)
         threshold = completed_roots[1][1] - 30
         top_n     = min(3, length(completed_roots))
