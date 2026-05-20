@@ -73,6 +73,18 @@ Base.@kwdef struct EngineConfig
 
     eval_center      ::Bool = true
     # +3 cp per piece (any type) that attacks any of d4/d5/e4/e5.
+
+    eval_rook_passer ::Bool = true
+    # Rook behind own passed pawn (+45 cp): the classic battery that makes the
+    # pawn nearly unstoppable.  Rook blockading enemy passed pawn (+20 cp):
+    # rewards the defender for cutting off the advance.
+    # Both bonuses are awarded to the rook owner.
+
+    eval_complexity  ::Bool = true
+    # When a side is materially down (≥60 cp) and queens are still on the board,
+    # add +20 cp for that side.  The trailing side has more fighting chances with
+    # queens than in a simplified endgame, so this discourages queen trades when
+    # behind and encourages them when ahead.
 end
 
 """The default full-strength configuration (all features enabled)."""

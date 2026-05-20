@@ -401,15 +401,43 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 _is_passed(s, c, their_pawns) || continue
                 score += sign * (7 - _chebyshev(our_k, s)) * eg_weight * 2 ÷ 12
             end
+            # King toward enemy passer: tripled coefficient vs own-passer escort
+            # because stopping a passed pawn is more urgent than escorting one.
+            # Each step closer is worth ~4 cp at typical endgame phase (ph≈8),
+            # enough to make a 5-move king march compete with pawn-advance gains.
             for s in BitIter(their_pawns)
                 _is_passed(s, other(c), our_pawns) || continue
-                score += sign * (7 - _chebyshev(our_k, s)) * eg_weight ÷ 12
+                score += sign * (7 - _chebyshev(our_k, s)) * eg_weight * 3 ÷ 12
             end
 
             their_kf    = file_of(their_k)
             their_kr    = rank_of(their_k)
             corner_dist = min(their_kf, 7 - their_kf, their_kr, 7 - their_kr)
             score += sign * (7 - corner_dist) * eg_weight * 3 ÷ 12
+        end
+    end
+
+    if cfg.eval_rook_passer
+        for c in (White, Black)
+            sign        = c == White ? 1 : -1
+            their_pawns = bb(b, other(c), Pawn)
+            my_rooks    = bb(b, c, Rook)
+            enemy_rooks = bb(b, other(c), Rook)
+            for s in BitIter(bb(b, c, Pawn))
+                _is_passed(s, c, their_pawns) || continue
+                f = file_of(s); r = rank_of(s)
+                # Our rook behind our passed pawn — the classic battery.
+                for rs in BitIter(my_rooks & FILE_MASK[f+1])
+                    behind = c == White ? rank_of(rs) < r : rank_of(rs) > r
+                    if behind; score += sign * 45; break; end
+                end
+                # Enemy rook in front of our passed pawn — blockading it.
+                # We reward the rook's OWNER (the blocking side) via sign flip.
+                for rs in BitIter(enemy_rooks & FILE_MASK[f+1])
+                    blocking = c == White ? rank_of(rs) > r : rank_of(rs) < r
+                    if blocking; score -= sign * 20; break; end
+                end
+            end
         end
     end
 
@@ -569,12 +597,24 @@ _eval_tempo(b::Board)::Int = b.side == White ? 10 : -10
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 function evaluate(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::EvalBreakdown
+    mat = _eval_material(b)
+
+    # Complexity bonus: the trailing side benefits from queens on the board.
+    # A queen gives the weaker side mating threats and tactical counterplay that
+    # pure rook endings deny.  Discourages the losing side from swapping queens
+    # and the winning side from forcing simplification.
+    complexity = 0
+    if cfg.eval_complexity && abs(mat) >= 60 &&
+       (bb(b, White, Queen) | bb(b, Black, Queen)) != BB(0)
+        complexity = mat < 0 ? 20 : -20   # bonus for the side that is behind
+    end
+
     EvalBreakdown(
-        _eval_material(b),
+        mat,
         _eval_piece_activity(b, cfg),
         _eval_pawn_structure(b),
         _eval_king_safety(b, cfg),
-        cfg.eval_space ? _eval_space(b) : 0,
+        (cfg.eval_space ? _eval_space(b) : 0) + complexity,
         _eval_tempo(b),
     )
 end
