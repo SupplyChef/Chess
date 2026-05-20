@@ -230,7 +230,9 @@ function _extract_pv(b::Board, tt::Vector{TTEntry}, root_move::Move, max_len::In
         push!(pv, m)
         push!(undos, make_move!(b, m))
         tte = _tt_get(tt, b.hash)
-        m   = (tte.key == b.hash && tte.flag == TT_EXACT) ? tte.move : NULL_MOVE
+        # Follow EXACT and LOWER entries: both record the best move found at that node.
+        # UPPER entries (all moves failed low) have no reliable best move, so stop there.
+        m   = (tte.key == b.hash && tte.flag != TT_UPPER) ? tte.move : NULL_MOVE
     end
     for i in length(pv):-1:1
         unmake_move!(b, pv[i], undos[i])
@@ -608,7 +610,10 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
         end
     end
 
-    _tt_put!(si.tt, b.hash, depth, best_score, TT_EXACT, best_move)
+    # best_score >= beta means the true score is at least best_score (lower bound);
+    # we searched all root moves but the window was narrow (aspiration fail-high).
+    flag = best_score >= beta ? TT_LOWER : TT_EXACT
+    _tt_put!(si.tt, b.hash, depth, best_score, flag, best_move)
     (best_score, best_move)
 end
 
