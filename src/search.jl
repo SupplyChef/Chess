@@ -410,9 +410,15 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # alpha, quiet moves are unlikely to improve alpha — prune them.
     # Captures and promotions bypass this check: they can swing material
     # dramatically and must always be searched.
-    futility_ok = cfg.futility && !in_check && depth <= 2 &&
-        (b.side == White ? 1 : -1) * total(evaluate(b, cfg)) +
-        FUTILITY_MARGIN[depth + 1] < alpha
+    #
+    # Cache static_eval here so futility-pruned moves can raise the best_score
+    # floor to at least this value, preventing the -(MATE_SCORE+1) sentinel
+    # from being stored in TT (which causes scores > MATE_SCORE after ply
+    # normalization if the sentinel is later retrieved and negated by a parent).
+    static_eval = cfg.futility && !in_check && depth <= 2 ?
+        (b.side == White ? 1 : -1) * total(evaluate(b, cfg)) : -(MATE_SCORE + 1)
+    futility_ok = static_eval > -(MATE_SCORE + 1) &&
+        static_eval + FUTILITY_MARGIN[depth + 1] < alpha
 
     ml = si.move_stack[min(ply, MOVE_STACK_SIZE)]
     generate_moves!(ml, b)
@@ -435,7 +441,11 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         is_promo   = (fl & MF_PROMO)   != 0
 
         # Futility: skip quiet moves when we're too far below alpha to recover.
+        # Raise the best_score floor to static_eval so that if every move is
+        # pruned here, we return the static eval (fail-low) rather than the
+        # -(MATE_SCORE+1) sentinel, which would corrupt the TT when ply-adjusted.
         if futility_ok && !is_capture && !is_promo
+            best_score = max(best_score, static_eval)
             continue
         end
 
