@@ -484,26 +484,51 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
 
     # ── Endgame king tropism ──────────────────────────────────────────────────────
     # In the endgame the king is an active fighting piece.  Beyond what the tapered
-    # PSTs already reward (king centralisation), three additional incentives apply:
+    # PSTs already reward (king centralisation), four additional incentives apply:
     #
     #   (a) Own king → own passed pawns: escort them to promotion.
     #       Bonus = (7 − dist) × eg_weight × 2 ÷ 12
     #       At bare-king endgame (eg_weight=24): up to +28 cp per pawn.
     #
     #   (b) Own king → enemy passed pawns: blockade or capture them.
-    #       Bonus = (7 − dist) × eg_weight ÷ 12
-    #       At bare-king endgame: up to +14 cp per pawn.
+    #       Bonus = (7 − dist) × eg_weight × 3 ÷ 12
+    #       At bare-king endgame: up to +42 cp per pawn.
     #
     #   (c) Enemy king near the edge/corner: mating patterns require the losing
-    #       king to be confined.  corner_dist = min(file, 7−file, rank, 7−rank);
-    #       a king in the centre has corner_dist≈3, on the edge 0, in a corner 0.
-    #       Bonus = (7 − corner_dist) × eg_weight × 3 ÷ 12
-    #       At bare-king endgame: up to +42 cp for an edge-confined king.
+    #       king to be confined.  corner_dist = min(file, 7−file, rank, 7−rank).
+    #       Bonus = (7 − corner_dist) × eg_weight × 5 ÷ 12  (increased from 3)
+    #       At bare-king endgame: up to +70 cp for an edge-confined king.
     #
-    # All three terms are weighted by (24 − ph) / 12 so they vanish at full
-    # material and reach full strength at bare-king endings.
+    #   (d) Own king close to enemy king (K+R vs K / K+R+B vs K technique):
+    #       The king-proximity bonus is computed once outside the per-color loop
+    #       because the Chebyshev distance is symmetric — adding it inside the
+    #       loop for both sides would cancel to zero.  We award it only to the
+    #       material-superior side so the winning king is incentivised to approach
+    #       while the losing king is implicitly penalised by the opponent's bonus.
+    #       Bonus = (7 − dist) × eg_weight × 4 ÷ 12
+    #       At bare-king endgame: up to +56 cp.
+    #
+    # All terms are weighted by (24 − ph) / 12 so they vanish at full material
+    # and reach full strength at bare-king endings.
     if cfg.eval_king_tropism && ph < 20
         eg_weight = 24 - ph   # 4..24
+
+        # (d) King proximity — asymmetric, computed once.
+        let wk = lsb(bb(b, White, King))
+            bk = lsb(bb(b, Black, King))
+            king_dist  = _chebyshev(wk, bk)
+            prox_bonus = (7 - king_dist) * eg_weight * 4 ÷ 12
+            w_pieces = count_bits(bb(b, White, Knight) | bb(b, White, Bishop) |
+                                  bb(b, White, Rook)   | bb(b, White, Queen))
+            b_pieces = count_bits(bb(b, Black, Knight) | bb(b, Black, Bishop) |
+                                  bb(b, Black, Rook)   | bb(b, Black, Queen))
+            if w_pieces > b_pieces
+                score += prox_bonus
+            elseif b_pieces > w_pieces
+                score -= prox_bonus
+            end
+        end
+
         for c in (White, Black)
             sign        = c == White ? 1 : -1
             our_k       = lsb(bb(b, c, King))
@@ -515,10 +540,6 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 _is_passed(s, c, their_pawns) || continue
                 score += sign * (7 - _chebyshev(our_k, s)) * eg_weight * 2 ÷ 12
             end
-            # King toward enemy passer: tripled coefficient vs own-passer escort
-            # because stopping a passed pawn is more urgent than escorting one.
-            # Each step closer is worth ~4 cp at typical endgame phase (ph≈8),
-            # enough to make a 5-move king march compete with pawn-advance gains.
             for s in BitIter(their_pawns)
                 _is_passed(s, other(c), our_pawns) || continue
                 score += sign * (7 - _chebyshev(our_k, s)) * eg_weight * 3 ÷ 12
@@ -527,7 +548,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             their_kf    = file_of(their_k)
             their_kr    = rank_of(their_k)
             corner_dist = min(their_kf, 7 - their_kf, their_kr, 7 - their_kr)
-            score += sign * (7 - corner_dist) * eg_weight * 3 ÷ 12
+            score += sign * (7 - corner_dist) * eg_weight * 5 ÷ 12
         end
     end
 
