@@ -38,16 +38,17 @@ const TT_EMPTY = TTEntry(UInt64(0), Int32(0), Int16(-1), TT_EXACT, NULL_MOVE)
     @inbounds tt[(hash & (TT_SIZE - 1)) + 1]
 end
 
-# TT replacement policy: always replace if the stored entry is from a shallower
-# search.  A deeper entry contains more information (more nodes were searched to
-# produce it) and is therefore more valuable to keep.  Same-position updates
-# (same key) always replace to capture the latest, deeper result.  Empty slots
-# are always filled.
+# TT replacement policy: replace when the slot is empty or the stored entry is
+# from a shallower search (new depth carries more information).  Crucially, a
+# same-key entry at greater depth is preserved — a depth-3 re-search must not
+# destroy a depth-17 entry that was expensively computed earlier.  Without this
+# guard, shallow endgame searches corrupt the deep mating lines in the TT and
+# cause the engine to cycle instead of converting a won position.
 @inline function _tt_put!(tt::Vector{TTEntry}, hash::UInt64,
                            depth::Int, score::Int, flag::UInt8, move::Move)
     idx = (hash & (TT_SIZE - 1)) + 1
     @inbounds e = tt[idx]
-    if e.key == hash || e.key == 0 || e.depth <= depth
+    if e.key == 0 || e.depth <= depth
         @inbounds tt[idx] = TTEntry(hash, Int32(score), Int16(depth), flag, move)
     end
 end
@@ -721,7 +722,14 @@ function search_move(b::Board, time_ms::Int;
         verbose && @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  pv %s\n",
                            depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, pv_str)
 
-        abs(score) >= MATE_SCORE - MAX_PLY && break  # mate found; no need to search deeper
+        # Only stop early if the mate distance (in half-moves) is within the
+        # current search depth.  A "mate in 17" found at depth 3 via a TT
+        # entry is unverified — the engine would cycle if we stopped here.
+        # Continuing until depth ≥ mate_dist proves the sequence is real.
+        if abs(score) >= MATE_SCORE - MAX_PLY
+            mate_dist = MATE_SCORE - abs(score)
+            mate_dist <= depth && break
+        end
     end
 
     # Trickiness pass: among the top-3 moves within 30cp of the best, prefer
