@@ -272,14 +272,42 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         # Knight outpost: a knight in the opponent's half that cannot be chased
         # by an enemy pawn.  We reuse the passed-pawn corridor mask (minus the
         # knight's own file) to test whether any enemy pawn can advance to an
-        # adjacent file at any rank in front of the knight (+20).
+        # adjacent file at any rank in front of the knight.
+        # Full outpost (+35): no enemy pawn in the corridor at all.
+        # Semi-outpost (+15): enemy pawn is in the corridor but its immediate
+        # advance square is blocked, so it cannot drive the knight away soon.
         for s in BitIter(bb(b, c, Knight))
             in_opp_half = c == White ? rank_of(s) >= 4 : rank_of(s) <= 3
             in_opp_half || continue
             pmask = (c == White ? _PASSED_W[s+1] : _PASSED_B[s+1]) &
                     ~FILE_MASK[file_of(s)+1]
-            (pmask & enemy_pawns) != 0 && continue
-            score += sign * 20
+            challenger = pmask & enemy_pawns
+            if challenger == 0
+                score += sign * 35
+            else
+                # Semi-outpost: all challenger pawns are immediately blocked.
+                # Enemy pawn advances toward our side (decreasing rank for Black
+                # challengers, increasing rank for White challengers).
+                all_blocked = true
+                for ep in BitIter(challenger)
+                    fwd_sq = c == White ? ep - 8 : ep + 8
+                    if 0 <= fwd_sq <= 63 && (occ & sq_bb(fwd_sq)) != 0
+                        # this challenger pawn is blocked — OK
+                    else
+                        all_blocked = false; break
+                    end
+                end
+                all_blocked && (score += sign * 15)
+            end
+        end
+
+        # Safe invasion: any minor piece in the opponent's half not immediately
+        # attacked by an enemy pawn earns a small bonus for controlling space
+        # inside the enemy camp. Applies to both knights and bishops.
+        for s in BitIter(bb(b, c, Knight) | bb(b, c, Bishop))
+            in_opp_half = c == White ? rank_of(s) >= 4 : rank_of(s) <= 3
+            in_opp_half || continue
+            (pawn_attacks(s, c) & enemy_pawns) == 0 && (score += sign * 8)
         end
     end
 
@@ -539,6 +567,16 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 has_shield = (0 <= r1 <= 7 && (pawns & sq_bb(sq(sf, r1))) != 0) ||
                              (0 <= r2 <= 7 && (pawns & sq_bb(sq(sf, r2))) != 0)
                 has_shield || (score -= sign * 22)
+            end
+
+            # h-pawn hook penalty: when the h-pawn has advanced to the 6th rank
+            # (h6 for Black, h3 for White) it creates a "hook" for the opponent —
+            # Rxh6 sacrifices, Qh5-g6, and g7# mating patterns all become viable.
+            # The far-shield code rewards h6 as +8; this penalty overrides that
+            # incentive and makes the engine actively avoid pushing the h-pawn.
+            hook_rank = c == White ? 2 : 5
+            if (pawns & sq_bb(sq(7, hook_rank))) != 0
+                score -= sign * 20
             end
         end
 
