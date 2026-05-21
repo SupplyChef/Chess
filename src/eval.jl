@@ -22,7 +22,14 @@ end
 @inline _chebyshev(s1::Square, s2::Square)::Int =
     max(abs(file_of(s1) - file_of(s2)), abs(rank_of(s1) - rank_of(s2)))
 
-const PST_PAWN = Int16[
+# All piece types now have separate MG and EG tables, blended by the same
+# phase taper used for the king: value = (ph×MG + (24−ph)×EG) ÷ 24.
+# MG tables (Michniewski "Simplified Evaluation Function" baseline, unchanged)
+# reward development, central control, and formation.  EG tables reward
+# advancement, long-range activity, and centralisation, which matter more
+# once most pieces have been traded.
+
+const PST_PAWN_MG = Int16[
      0,  0,  0,  0,  0,  0,  0,  0,
     50, 50, 50, 50, 50, 50, 50, 50,
     10, 10, 20, 30, 30, 20, 10, 10,
@@ -33,7 +40,22 @@ const PST_PAWN = Int16[
      0,  0,  0,  0,  0,  0,  0,  0,
 ]
 
-const PST_KNIGHT = Int16[
+# In the endgame, advancement toward promotion is the dominant concern.
+# Formation bonuses/penalties from the MG table are dropped; central files
+# get only a small premium because connected/passed pawn bonuses are handled
+# separately by PASSED_BONUS and the pawn-structure evaluator.
+const PST_PAWN_EG = Int16[
+     0,  0,  0,  0,  0,  0,  0,  0,
+    25, 25, 25, 25, 25, 25, 25, 25,
+    15, 15, 15, 15, 15, 15, 15, 15,
+     8,  8, 10, 12, 12, 10,  8,  8,
+     3,  3,  5,  7,  7,  5,  3,  3,
+     1,  1,  2,  3,  3,  2,  1,  1,
+     0,  0,  0,  0,  0,  0,  0,  0,
+     0,  0,  0,  0,  0,  0,  0,  0,
+]
+
+const PST_KNIGHT_MG = Int16[
     -50,-40,-30,-30,-30,-30,-40,-50,
     -40,-20,  0,  0,  0,  0,-20,-40,
     -30,  0, 10, 15, 15, 10,  0,-30,
@@ -44,7 +66,21 @@ const PST_KNIGHT = Int16[
     -50,-40,-30,-30,-30,-30,-40,-50,
 ]
 
-const PST_BISHOP = Int16[
+# Knights are slightly weaker in open endgames (fewer pieces to work with).
+# Corner/edge penalties are preserved; near-centre values are softened a touch
+# since the knight's relative value drops as the board opens.
+const PST_KNIGHT_EG = Int16[
+    -50,-40,-30,-30,-30,-30,-40,-50,
+    -40,-20, -5, -5, -5, -5,-20,-40,
+    -30, -5, 10, 15, 15, 10, -5,-30,
+    -30,  0, 15, 20, 20, 15,  0,-30,
+    -30,  0, 15, 20, 20, 15,  0,-30,
+    -30, -5, 10, 15, 15, 10, -5,-30,
+    -40,-20, -5, -5, -5, -5,-20,-40,
+    -50,-40,-30,-30,-30,-30,-40,-50,
+]
+
+const PST_BISHOP_MG = Int16[
     -20,-10,-10,-10,-10,-10,-10,-20,
     -10,  0,  0,  0,  0,  0,  0,-10,
     -10,  0,  5, 10, 10,  5,  0,-10,
@@ -55,7 +91,20 @@ const PST_BISHOP = Int16[
     -20,-10,-10,-10,-10,-10,-10,-20,
 ]
 
-const PST_ROOK = Int16[
+# Bishops are strong in open endgames.  The EG table is more symmetric than MG
+# and rewards the central diagonals where the bishop controls the most squares.
+const PST_BISHOP_EG = Int16[
+    -20,-10,-10,-10,-10,-10,-10,-20,
+    -10,  5,  0,  0,  0,  0,  5,-10,
+    -10,  5, 10, 10, 10, 10,  5,-10,
+    -10,  0, 10, 15, 15, 10,  0,-10,
+    -10,  0, 10, 15, 15, 10,  0,-10,
+    -10,  5, 10, 10, 10, 10,  5,-10,
+    -10,  5,  0,  0,  0,  0,  5,-10,
+    -20,-10,-10,-10,-10,-10,-10,-20,
+]
+
+const PST_ROOK_MG = Int16[
      0,  0,  0,  0,  0,  0,  0,  0,
      5, 10, 10, 10, 10, 10, 10,  5,
     -5,  0,  0,  0,  0,  0,  0, -5,
@@ -66,7 +115,20 @@ const PST_ROOK = Int16[
      0,  0,  0,  5,  5,  0,  0,  0,
 ]
 
-const PST_QUEEN = Int16[
+# In the endgame rooks want centralized, active files.  The 7th-rank bonus is
+# handled separately (+15) so this table only adjusts file/rank preference.
+const PST_ROOK_EG = Int16[
+     0,  0,  0,  0,  0,  0,  0,  0,
+     5, 10, 10, 10, 10, 10, 10,  5,
+     0,  0,  5,  5,  5,  5,  0,  0,
+     0,  0,  5,  5,  5,  5,  0,  0,
+     0,  0,  5,  5,  5,  5,  0,  0,
+     0,  0,  5,  5,  5,  5,  0,  0,
+    -5,  0,  0,  0,  0,  0,  0, -5,
+     0,  0,  0,  3,  3,  0,  0,  0,
+]
+
+const PST_QUEEN_MG = Int16[
     -20,-10,-10, -5, -5,-10,-10,-20,
     -10,  0,  0,  0,  0,  0,  0,-10,
     -10,  0,  5,  5,  5,  5,  0,-10,
@@ -74,6 +136,19 @@ const PST_QUEEN = Int16[
       0,  0,  5,  5,  5,  5,  0, -5,
     -10,  5,  5,  5,  5,  5,  0,-10,
     -10,  0,  5,  0,  0,  0,  0,-10,
+    -20,-10,-10, -5, -5,-10,-10,-20,
+]
+
+# In the endgame the queen wants to be centralized and aggressive.
+# The MG table discourages early queen development; the EG table has no such bias.
+const PST_QUEEN_EG = Int16[
+    -20,-10,-10, -5, -5,-10,-10,-20,
+    -10,  0,  5,  5,  5,  5,  0,-10,
+    -10,  5, 10, 10, 10, 10,  5,-10,
+     -5,  5, 10, 15, 15, 10,  5, -5,
+     -5,  5, 10, 15, 15, 10,  5, -5,
+    -10,  5, 10, 10, 10, 10,  5,-10,
+    -10,  0,  5,  5,  5,  5,  0,-10,
     -20,-10,-10, -5, -5,-10,-10,-20,
 ]
 
@@ -233,11 +308,21 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         enemy_pawns = bb(b, other(c), Pawn)
         seventh     = c == White ? 6 : 1   # 0-indexed rank of the 7th rank
 
-        for s in BitIter(bb(b, c, Pawn));   score += sign * _pst(PST_PAWN,   c, s); end
-        for s in BitIter(bb(b, c, Knight)); score += sign * _pst(PST_KNIGHT, c, s); end
-        for s in BitIter(bb(b, c, Bishop)); score += sign * _pst(PST_BISHOP, c, s); end
-        for s in BitIter(bb(b, c, Rook));   score += sign * _pst(PST_ROOK,   c, s); end
-        for s in BitIter(bb(b, c, Queen));  score += sign * _pst(PST_QUEEN,  c, s); end
+        for s in BitIter(bb(b, c, Pawn))
+            score += sign * (ph * _pst(PST_PAWN_MG,   c, s) + (24-ph) * _pst(PST_PAWN_EG,   c, s)) ÷ 24
+        end
+        for s in BitIter(bb(b, c, Knight))
+            score += sign * (ph * _pst(PST_KNIGHT_MG, c, s) + (24-ph) * _pst(PST_KNIGHT_EG, c, s)) ÷ 24
+        end
+        for s in BitIter(bb(b, c, Bishop))
+            score += sign * (ph * _pst(PST_BISHOP_MG, c, s) + (24-ph) * _pst(PST_BISHOP_EG, c, s)) ÷ 24
+        end
+        for s in BitIter(bb(b, c, Rook))
+            score += sign * (ph * _pst(PST_ROOK_MG,   c, s) + (24-ph) * _pst(PST_ROOK_EG,   c, s)) ÷ 24
+        end
+        for s in BitIter(bb(b, c, Queen))
+            score += sign * (ph * _pst(PST_QUEEN_MG,  c, s) + (24-ph) * _pst(PST_QUEEN_EG,  c, s)) ÷ 24
+        end
 
         # Tapered king: linear blend between MG and EG scores based on phase.
         ks = lsb(bb(b, c, King))
