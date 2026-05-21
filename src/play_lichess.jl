@@ -163,7 +163,10 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
     play_move(game_id, uci)
 
     # Post move explanation to both chat rooms.
-    msg = explain_move(result, board, color)
+    # Pass the opponent's last move so explain_move can distinguish a recapture
+    # (restoring balance) from a genuine material gain.
+    last_opp = isempty(moves_played) ? nothing : moves_played[end]
+    msg = explain_move(result, board, color; last_opp_move = last_opp)
     @async post_chat(game_id, msg; room = "player")
     @async post_chat(game_id, msg; room = "spectator")
 

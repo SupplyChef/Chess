@@ -6,18 +6,19 @@
 #                           engine would have played in their position.
 #
 # Explanation priority inside explain_move (first matching branch wins):
-#   1. Forced tactical line  — a sequence that wins or loses material (swing ≥ 90cp).
-#      Shown first because concrete threats are more instructive than positional labels.
-#   2. Castling              — always has an obvious human-readable label.
-#   3. Piece attack          — calling out a threat the opponent must answer.
-#   4. Rook concepts         — open file, 7th rank, doubling (structural rook ideas).
-#   5. Knight outpost        — a permanent outpost that pawns can never challenge.
-#   6. Passed pawn creation  — long-term winning asset.
-#   7. File opening (pawn)   — pawn capture that unblocks our own rook.
-#   8. Central pawn advance  — d4/d5/e4/e5 fights for space.
-#   9. Development           — moving a minor piece off the back rank.
-#  10. King move             — context-sensitive (check escape, endgame, safety, reposition).
-#  11. Eval-delta fallback   — largest improving term from the static evaluation.
+#   1. Forced mate (us)    — we're mating in N moves; show the key idea.
+#   2. Being mated (them)  — we're delaying checkmate; acknowledge and fight on.
+#   3. Material gain       — we win material over the PV.  Not triggered for a
+#                            recapture: taking back on the same square the opponent
+#                            just moved to restores balance, not a new gain.
+#      3a. Fork            — we simultaneously attack 2+ profitable targets.
+#   4. Positional          — driven by the static-eval breakdown comparing the
+#                            position before and after the move.  Named structural
+#                            patterns (open file, outpost, passed pawn, …) are
+#                            reported only when the relevant eval term confirms the
+#                            improvement; the largest gaining term leads.
+
+# ── Piece / square helpers ─────────────────────────────────────────────────────
 
 function _san_sym(k::PieceKind)::String
     k == Knight ? "N" : k == Bishop ? "B" : k == Rook ? "R" :
@@ -44,7 +45,9 @@ function _piece_name(k::PieceKind)::String
     k == Rook   ? "rook"   : k == Queen  ? "queen"  : "piece"
 end
 
-# Net material gained by the side making pv[1] over the course of the PV.
+# ── Material swing over the PV ────────────────────────────────────────────────
+# Net material gained (in centipawns) by the side making pv[1] over the PV.
+# Positive = we gain; negative = we lose.
 function _pv_material_swing(pv::Vector{Move}, b::Board)::Int
     isempty(pv) && return 0
     us    = b.side
@@ -67,39 +70,11 @@ function _pv_material_swing(pv::Vector{Move}, b::Board)::Int
     net
 end
 
-# Most valuable enemy piece attacked by our moved piece (excluding the king).
-# Returns (NoPiece, -1) if nothing is attacked.  Modifies b temporarily.
-function _attacked_enemy(b::Board, m::Move)::Tuple{PieceKind, Int}
-    undo    = make_move!(b, m)
-    us      = other(b.side)
-    them    = b.side
-    dst     = to_sq(m)
-    occ     = all_occ(b)
-    theirs  = b.occ[Int(them)+1]
-    atk = let k = b.piece_on[dst+1].kind
-        k == Pawn   ? pawn_attacks(dst, us)      :
-        k == Knight ? knight_attacks(dst)         :
-        k == Bishop ? bishop_attacks(dst, occ)    :
-        k == Rook   ? rook_attacks(dst, occ)      :
-        k == Queen  ? queen_attacks(dst, occ)     : BB(0)
-    end
-    best_k = NoPiece; best_sq = -1; best_val = 0
-    for s in BitIter(atk & theirs)
-        pk = b.piece_on[s+1].kind
-        v  = PIECE_VALUE[Int(pk)+1]
-        if pk != King && v > best_val
-            best_val = v; best_k = pk; best_sq = s
-        end
-    end
-    unmake_move!(b, m, undo)
-    (best_k, best_sq)
-end
+# ── Attack / fork helpers ──────────────────────────────────────────────────────
 
-# Reverse-lookup defence check: "does any piece of `defender` attack `sq`?"
-# Rather than iterating over all defender pieces, we use the symmetry of attack sets:
-# a square S is attacked by a knight iff a knight on S would attack that knight.
-# We pretend a piece of each type stands on `sq` and see if it hits a real defender
-# piece of that type — one call per piece type instead of one call per piece.
+# Reverse-lookup: does any piece of `defender` attack `sq`?
+# Uses the symmetry of attack sets: a square S attacked by a knight iff a
+# knight on S attacks a real knight of the defender, etc.
 function _is_defended(b::Board, sq::Int, defender::Color)::Bool
     occ = all_occ(b)
     (pawn_attacks(sq, other(defender))  & bb(b, defender, Pawn))                              != 0 && return true
@@ -110,10 +85,44 @@ function _is_defended(b::Board, sq::Int, defender::Color)::Bool
     false
 end
 
-# Endgame detector: sum the non-pawn, non-king material for both sides.
-# Threshold 2800cp ≈ one queen + one rook total on the board, which is the
-# conventional boundary where the king transitions from liability to active piece.
-# Pawns are excluded because pawn count alone doesn't determine endgame character.
+# Enemy pieces attacked from the destination square after making move m,
+# filtered to those that are "profitable to capture": either undefended,
+# worth more than the mover, or the king (giving check always threatens).
+# Returns them sorted most-valuable-first.  Board is restored afterward.
+function _fork_targets(b::Board, m::Move, mover_val::Int)::Vector{Tuple{PieceKind,Int}}
+    undo   = make_move!(b, m)
+    us     = other(b.side)      # side that just moved
+    them   = b.side
+    dst    = to_sq(m)
+    occ    = all_occ(b)
+    theirs = b.occ[Int(them)+1]
+    atk    = let k = b.piece_on[dst+1].kind
+        k == Pawn   ? pawn_attacks(dst, us)   :
+        k == Knight ? knight_attacks(dst)      :
+        k == Bishop ? bishop_attacks(dst, occ) :
+        k == Rook   ? rook_attacks(dst, occ)   :
+        k == Queen  ? queen_attacks(dst, occ)  : BB(0)
+    end
+    targets = Tuple{PieceKind,Int}[]
+    for s in BitIter(atk & theirs)
+        pk = b.piece_on[s+1].kind
+        if pk == King
+            push!(targets, (King, s))
+        else
+            v = PIECE_VALUE[Int(pk)+1]
+            if v > mover_val || !_is_defended(b, s, them)
+                push!(targets, (pk, s))
+            end
+        end
+    end
+    unmake_move!(b, m, undo)
+    sort!(targets; by = p -> p[1] == King ? 10_000 : -PIECE_VALUE[Int(p[1])+1])
+    targets
+end
+
+# ── Endgame / structural helpers ───────────────────────────────────────────────
+
+# Endgame: non-pawn/king material ≤ 2800 cp (≈ one queen + one rook total).
 function _is_endgame(b::Board)::Bool
     mat = 0
     for c in (White, Black)
@@ -125,114 +134,159 @@ function _is_endgame(b::Board)::Bool
     mat <= 2800
 end
 
+# ── PV continuation sentence ───────────────────────────────────────────────────
+# Produces " After Xe4, I plan Rxf7." style text from the PV.
+# Board must be advanced by pv[1] before calling; restored by caller afterward.
+function _pv_continuation(pv::Vector{Move}, b_after::Board)::String
+    length(pv) < 2 && return ""
+    opp = _approx_san(pv[2], b_after)
+    if length(pv) >= 3
+        undo2 = make_move!(b_after, pv[2])
+        ours  = _approx_san(pv[3], b_after)
+        unmake_move!(b_after, pv[2], undo2)
+        return " After $opp, I plan $ours."
+    end
+    " I expect $opp from you next."
+end
+
+# ── explain_move ──────────────────────────────────────────────────────────────
+
 """
-    explain_move(result, b, my_color) → String
+    explain_move(result, b, my_color; last_opp_move) → String
 
 Build a Lichess-chat explanation for the bot's move.
-`b` must be the board *before* the move was played.
+`b` must be the board *before* the move.
+`last_opp_move` is the opponent's immediately preceding move (used to detect
+recaptures, where we are restoring material balance rather than gaining it).
 """
-function explain_move(result::SearchResult, b::Board, my_color::Color)::String
-    our_cp  = result.score
-    our_san = _approx_san(result.move, b)
-    s(x)    = x >= 0 ? "+$(x)" : "$(x)"
-    score_note = "($(s(our_cp))cp, depth $(result.depth))"
+function explain_move(result::SearchResult, b::Board, my_color::Color;
+                      last_opp_move::Union{Move,Nothing} = nothing)::String
+    our_san  = _approx_san(result.move, b)
+    scorestr = result.score >= 0 ? "+$(result.score)" : "$(result.score)"
+    note     = "($(scorestr)cp, depth $(result.depth))"
 
-    isempty(result.pv) &&
-        return "I played $our_san. $score_note."
+    isempty(result.pv) && return "I played $our_san. $note"
 
-    swing = _pv_material_swing(result.pv, b)
+    sgn     = my_color == White ? 1 : -1
+    our_fr  = from_sq(result.move)
+    our_k   = b.piece_on[our_fr+1].kind
+    our_val = PIECE_VALUE[Int(our_k)+1]
+    fl      = flags(result.move)
 
-    genuinely_winning = swing >=  90 && our_cp >=  60
-    genuinely_losing  = swing <= -90 && our_cp <= -60
+    # ── 1. Forced-mate sequences ───────────────────────────────────────────────
+    abs_score = abs(result.score)
+    if abs_score >= MATE_SCORE - MAX_PLY
+        # (MATE_SCORE - abs_score) = half-moves to checkmate; +1 so integer division
+        # rounds toward "mate in N" rather than N-1 for odd half-move counts.
+        mate_in = (MATE_SCORE - abs_score + 1) ÷ 2
 
-    # ── Tactical branch — checked first because a concrete material gain or loss is
-    #    always more informative than a vague positional label. ────────────────────
-    if genuinely_winning || genuinely_losing
-        winning = genuinely_winning
-        what    = abs(swing) >= 800 ? "the queen" : abs(swing) >= 450 ? "the rook" :
-                  abs(swing) >= 270 ? "a piece"   : "a pawn"
-        undo = make_move!(b, result.move)
-        cont = if length(result.pv) >= 3
-            opp_san  = _approx_san(result.pv[2], b)
-            undo2    = make_move!(b, result.pv[2])
-            our_next = _approx_san(result.pv[3], b)
-            unmake_move!(b, result.pv[2], undo2)
-            " After $opp_san, I continue with $our_next."
-        elseif length(result.pv) >= 2
-            " Your best reply is $(_approx_san(result.pv[2], b))."
-        else; ""
-        end
-        unmake_move!(b, result.move, undo)
-        if winning
-            return "I played $our_san, winning $what.$cont $score_note."
+        if result.score > 0
+            # We are mating.
+            undo    = make_move!(b, result.move)
+            cont    = _pv_continuation(result.pv, b)
+            unmake_move!(b, result.move, undo)
+            label   = mate_in == 1 ? "Checkmate!" :
+                      "I'm playing for checkmate in $mate_in.$cont"
+            return "I played $our_san — $label $note"
         else
-            return "I played $our_san — losing $what, but it's the best I can do.$cont $score_note."
+            # We are being mated; we delay as long as possible.
+            label = mate_in == 1 ? "It's checkmate — game over." :
+                    "I'm being mated in $mate_in moves, but I'll keep fighting. $note"
+            return "I played $our_san — $label"
         end
     end
 
-    # ── Positional branch ─────────────────────────────────────────────────────────
-    fl     = flags(result.move)
-    sgn    = my_color == White ? 1 : -1
-    e      = result.eval
-    our_fr = from_sq(result.move)
-    our_k  = b.piece_on[our_fr+1].kind
+    # ── 2. Material gain ────────────────────────────────────────────────────────
+    swing = _pv_material_swing(result.pv, b)
 
-    # Detectors that need the PRE-move board: source square, piece kind, development
-    # flag, and whether we were already in check.  Compute them before make_move!.
-    atk_k, atk_sq  = _attacked_enemy(b, result.move)
-    attacking       = atk_k != NoPiece
+    # A recapture (landing on the same square the opponent just vacated) restores
+    # balance; we are not winning new material, so suppress the material branch.
+    is_recap = last_opp_move !== nothing &&
+               (is_capture(result.move) || is_ep(result.move)) &&
+               to_sq(result.move) == to_sq(last_opp_move)
+
+    genuinely_winning = swing >=  90 && result.score >=  60 && !is_recap
+    genuinely_losing  = swing <= -90 && result.score <= -60 && !is_recap
+
+    if genuinely_winning || genuinely_losing
+        # 2a. Fork check: do we simultaneously threaten 2+ profitable targets?
+        forks = _fork_targets(b, result.move, our_val)
+        if length(forks) >= 2
+            n1 = _piece_name(forks[1][1])
+            n2 = _piece_name(forks[2][1])
+            what = swing >= 800 ? "the queen" : swing >= 450 ? "the rook" :
+                   swing >= 270 ? "a piece"   : "a pawn"
+            return "I played $our_san — forking your $n1 and $n2, winning $what. $note"
+        end
+
+        # 2b. Non-fork material gain / loss.
+        what = abs(swing) >= 800 ? "the queen" : abs(swing) >= 450 ? "the rook" :
+               abs(swing) >= 270 ? "a piece"   : "a pawn"
+        undo = make_move!(b, result.move)
+        cont = if length(result.pv) >= 3
+            opp  = _approx_san(result.pv[2], b)
+            undo2 = make_move!(b, result.pv[2])
+            ours  = _approx_san(result.pv[3], b)
+            unmake_move!(b, result.pv[2], undo2)
+            " After $opp, I continue with $ours."
+        elseif length(result.pv) >= 2
+            " Your best reply is $(_approx_san(result.pv[2], b))."
+        else ""
+        end
+        unmake_move!(b, result.move, undo)
+        if genuinely_winning
+            return "I played $our_san — winning $what.$cont $note"
+        else
+            return "I played $our_san — losing $what, but it's the best I can do.$cont $note"
+        end
+    end
+
+    # ── 3. Positional improvements ─────────────────────────────────────────────
+    # Compare the static eval breakdown before and after the move to identify
+    # what specifically improved.  Named structural patterns are reported only
+    # when the relevant eval term confirms the gain; the largest term leads.
+
+    # Pre-move context (needed before make_move!).
     back_rank       = my_color == White ? 0 : 7
-    is_dev          = (our_k == Knight || our_k == Bishop) && rank_of(our_fr) == back_rank
     in_check_before = king_in_check(b, my_color)
+    is_dev          = (our_k == Knight || our_k == Bishop) && rank_of(our_fr) == back_rank
 
-    # Advance the board.
     undo = make_move!(b, result.move)
     e2   = evaluate(b)
     dst  = to_sq(result.move)
+    e    = result.eval   # static eval of the position BEFORE the move
 
-    # ── Position-based detectors (board is advanced here) ─────────────────────────
-    # Concepts like "takes the open file" or "creates a passed pawn" are properties
-    # of the DESTINATION square after the move; we must advance the board first so
-    # the piece registers in its new location for bitboard queries.
+    # Deltas from our side's perspective (positive = we improved).
+    Δact  = sgn * (e2.piece_activity - e.piece_activity)
+    Δpawn = sgn * (e2.pawn_structure - e.pawn_structure)
+    Δking = sgn * (e2.king_safety    - e.king_safety)
 
-    # Attack significance: only worth noting when we'd win material (target > attacker)
-    # or the target is genuinely undefended.
-    attack_worth_noting = false
-    if attacking
-        our_val = PIECE_VALUE[Int(our_k)+1]
-        atk_val = PIECE_VALUE[Int(atk_k)+1]
-        attack_worth_noting = atk_val > our_val || !_is_defended(b, atk_sq, other(my_color))
-    end
-
-    # Rook: 7th-rank invasion, doubling, open/semi-open file.
+    # Structural patterns — checked only for the relevant piece type,
+    # and only when the corresponding eval term shows improvement.
     rook_concept = ""
     if our_k == Rook
-        seventh = my_color == White ? 6 : 1   # 0-indexed rank of the 7th rank
-        f       = file_of(dst)
-        my_rooks     = bb(b, my_color, Rook)
-        all_pawns    = bb(b, White, Pawn) | bb(b, Black, Pawn)
-        my_pawns     = bb(b, my_color, Pawn)
-        occ_ex  = all_occ(b)
-        if count_bits(my_rooks & FILE_MASK[f+1]) >= 2 &&
-                (rook_attacks(dst, occ_ex) & my_rooks & ~sq_bb(dst)) != 0
-            rook_concept = "connects rooks on the $(Char('a'+f))-file"
-        elseif count_bits(my_rooks & RANK_MASK[rank_of(dst)+1]) >= 2 &&
-                (rook_attacks(dst, occ_ex) & my_rooks & ~sq_bb(dst)) != 0
-            rook_concept = "connects rooks on the $(rank_of(dst)+1)th rank"
+        seventh   = my_color == White ? 6 : 1
+        f         = file_of(dst)
+        my_rooks  = bb(b, my_color, Rook)
+        all_pawns = bb(b, White, Pawn) | bb(b, Black, Pawn)
+        my_pawns  = bb(b, my_color, Pawn)
+        occ_ex    = all_occ(b)
+        visible     = rook_attacks(dst, occ_ex) & my_rooks & ~sq_bb(dst)
+        file_conn   = (visible & FILE_MASK[f+1]) != 0
+        rank_conn   = (visible & RANK_MASK[rank_of(dst)+1]) != 0
+        if file_conn
+            rook_concept = "connects my rooks on the $(Char('a'+f))-file"
+        elseif rank_conn
+            rook_concept = "doubles my rooks"
         elseif rank_of(dst) == seventh
             rook_concept = "invades the 7th rank"
         elseif (all_pawns & FILE_MASK[f+1]) == 0
-            rook_concept = "takes the open $(Char('a'+f))-file"
+            rook_concept = "occupies the open $(Char('a'+f))-file"
         elseif (my_pawns & FILE_MASK[f+1]) == 0
             rook_concept = "takes the semi-open $(Char('a'+f))-file"
         end
     end
 
-    # True outpost: in opponent's half AND no enemy pawn exists on adjacent files
-    # at or above the knight's rank (from the enemy's direction) — meaning no pawn
-    # can ever advance into a square that attacks the knight.
-    # Uses the passed-pawn corridor mask (same file excluded) rather than just
-    # checking current pawn attacks, which would miss e.g. c7 threatening c6→d5.
     in_opp_half    = my_color == White ? rank_of(dst) >= 4 : rank_of(dst) <= 3
     knight_outpost = our_k == Knight && in_opp_half && let
         ep    = bb(b, other(my_color), Pawn)
@@ -241,11 +295,9 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
         (pmask & ep) == 0
     end
 
-    # Passed pawn creation.
     creates_passed = our_k == Pawn && !is_capture(result.move) && !is_ep(result.move) &&
                      _is_passed(dst, my_color, bb(b, other(my_color), Pawn))
 
-    # Pawn capture opening our own file.
     opens_own_file = false; open_file_char = ' '
     if our_k == Pawn && (is_capture(result.move) || is_ep(result.move))
         src_f = file_of(our_fr)
@@ -254,106 +306,58 @@ function explain_move(result::SearchResult, b::Board, my_color::Color)::String
         end
     end
 
-    # Central pawn advance (d4/d5/e4/e5).
     pawn_center = our_k == Pawn && !is_capture(result.move) && !is_ep(result.move) &&
                   file_of(dst) in (3, 4) && rank_of(dst) in (3, 4)
 
-    # Endgame flag for king-move labelling.
     endgame = _is_endgame(b)
 
-    # ── Continuation sentence (board is advanced) ─────────────────────────────────
-    plan = if fl == MF_KS_CAST || fl == MF_QS_CAST
-        ""
-    elseif length(result.pv) >= 2
-        pv2     = result.pv[2]
-        pv2_san = _approx_san(pv2, b)
-        if attack_worth_noting
-            if to_sq(pv2) == dst && (is_capture(pv2) || is_ep(pv2))
-                if length(result.pv) >= 3
-                    undo2    = make_move!(b, pv2)
-                    our_next = _approx_san(result.pv[3], b)
-                    unmake_move!(b, pv2, undo2)
-                    " If you take with $pv2_san, I recapture with $our_next."
-                else
-                    " If you take with $pv2_san, I recapture."
-                end
-            elseif from_sq(pv2) == atk_sq
-                " This forces your $(_piece_name(atk_k)) to $pv2_san."
-            else
-                if length(result.pv) >= 3
-                    undo2    = make_move!(b, pv2)
-                    our_next = _approx_san(result.pv[3], b)
-                    unmake_move!(b, pv2, undo2)
-                    " After $pv2_san, I continue with $our_next."
-                else
-                    " I expect $pv2_san from you next."
-                end
-            end
-        else
-            if length(result.pv) >= 3
-                undo2    = make_move!(b, pv2)
-                our_next = _approx_san(result.pv[3], b)
-                unmake_move!(b, pv2, undo2)
-                " After $pv2_san, I plan $our_next."
-            else
-                " I expect $pv2_san from you next."
-            end
-        end
-    else
-        ""
-    end
+    # PV continuation.
+    plan = _pv_continuation(result.pv, b)
 
     unmake_move!(b, result.move, undo)
 
-    Δact  = sgn * (e2.piece_activity - e.piece_activity)
-    Δpawn = sgn * (e2.pawn_structure - e.pawn_structure)
-    Δking = sgn * (e2.king_safety    - e.king_safety)
-
-    # ── Concept label ─────────────────────────────────────────────────────────────
+    # Build the concept label.  Castling and king moves get explicit labels.
+    # Structural patterns take priority when the relevant eval term confirms them.
+    # The eval-delta breakdown is the final arbiter for everything else.
     concept = if fl == MF_KS_CAST
-        "castles kingside — king to safety behind the pawn shield"
+        "king to safety behind the pawn shield"
     elseif fl == MF_QS_CAST
-        "castles queenside — king to safety, rook enters the game"
-    elseif attack_worth_noting
-        "attacks your $(_piece_name(atk_k)) on $(sq_name(atk_sq))"
-    elseif !isempty(rook_concept)
-        rook_concept
-    elseif knight_outpost
-        "plants my knight on $(sq_name(dst)) — your pawns can never drive it away"
-    elseif creates_passed
-        "creates a passed pawn on the $(Char('a' + file_of(dst)))-file"
-    elseif opens_own_file
-        "opens the $(open_file_char)-file for my rook"
-    elseif pawn_center
-        "fights for the center"
-    elseif is_dev
-        "develops my $(_piece_name(our_k))"
+        "king to safety, rook enters the game"
     elseif our_k == King
-        # King moves must never fall into the generic eval-delta bucket —
-        # Δact just reflects PST changes, which is meaningless to say out loud.
-        if in_check_before
-            "escapes check"
-        elseif endgame
-            "activates the king for the endgame"
-        elseif Δking >= 8
-            "improves king safety"
-        else
-            "repositions the king"
+        if in_check_before;  "escaping check"
+        elseif endgame;      "activating the king for the endgame"
+        elseif Δking >= 8;   "improving king safety"
+        else;                "repositioning the king"
         end
+    elseif !isempty(rook_concept) && Δact >= 5
+        rook_concept
+    elseif knight_outpost && Δact >= 5
+        "establishing a permanent outpost on $(sq_name(dst)) — your pawns can never chase it away"
+    elseif creates_passed && Δpawn >= 5
+        "creating a passed pawn on the $(Char('a' + file_of(dst)))-file"
+    elseif opens_own_file && Δact >= 5
+        "opening the $(open_file_char)-file for my rook"
+    elseif pawn_center
+        "fighting for the center"
+    elseif is_dev && Δact >= 5
+        "developing my $(_piece_name(our_k))"
     else
+        # Eval-delta fallback: name the largest improving term.
         parts = Tuple{Int,String}[]
-        Δact  >=  8 && push!(parts, (Δact,      "improves my piece activity"))
-        Δpawn >=  8 && push!(parts, (Δpawn,      "strengthens my pawn structure"))
-        Δpawn <= -8 && push!(parts, (abs(Δpawn), "creates a weakness in your pawns"))
-        Δking >= 12 && push!(parts, (Δking,      "improves king safety"))
+        Δact  >=  8 && push!(parts, (Δact,       "improving my piece activity"))
+        Δpawn >=  8 && push!(parts, (Δpawn,       "strengthening my pawn structure"))
+        Δpawn <= -8 && push!(parts, (abs(Δpawn),  "weakening your pawn structure"))
+        Δking >=  8 && push!(parts, (Δking,       "improving my king safety"))
         sort!(parts; by = first, rev = true)
-        isempty(parts) ? "keeps the position solid" :
+        isempty(parts) ? "keeping the position solid" :
         length(parts) == 1 ? parts[1][2] :
         "$(parts[1][2]) and $(parts[2][2])"
     end
 
-    "I played $our_san — $concept.$plan $score_note."
+    "I played $our_san — $concept.$plan $note"
 end
+
+# ── explain_opponent_move ──────────────────────────────────────────────────────
 
 """
     explain_opponent_move(b_before, opp_move, engine_result) → String
@@ -361,11 +365,6 @@ end
 Coaching mode: compare the opponent's actual move to what the engine would play.
 `b_before` is the position *before* the opponent moved.
 """
-# The coaching insight comes from the gap between what was played and the engine's
-# top choice in the same position.  If they match, we validate the move; otherwise
-# we name the engine's preference and let the game continue — we deliberately avoid
-# saying the opponent's move is "wrong", since at shallow depth the engine may simply
-# not see the point.
 function explain_opponent_move(b_before::Board, opp_move::Move,
                                engine_result::SearchResult)::String
     engine_result.move == NULL_MOVE && return ""
