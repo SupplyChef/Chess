@@ -379,3 +379,96 @@ function explain_opponent_move(b_before::Board, opp_move::Move,
     "As your coach: I'd have played $engine_san there$reply_str. " *
     "Let's see how $opp_san works out. [depth $(engine_result.depth)]"
 end
+
+# ── explain_pv_outcome ────────────────────────────────────────────────────────
+
+"""
+    explain_pv_outcome(result, b, my_color) → String
+
+Describe the expected positional change between the current position and the
+end of the principal variation, without referencing individual moves.
+Compares the root `EvalBreakdown` to the one at the PV endpoint and maps
+the largest deltas to human-readable strategic language.
+
+Returns "" when the PV is too short or the changes are too small to report.
+"""
+function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::String
+    # Mates are already fully explained by explain_move.
+    abs(result.score) >= MATE_SCORE - MAX_PLY && return ""
+    # Need at least 3 moves (our reply + their reply + one more) for a
+    # meaningful "looking ahead" — a 1-move PV is just the current move.
+    length(result.pv) < 3 && return ""
+
+    sgn    = my_color == White ? 1 : -1
+    e_root = result.eval   # White-frame static eval of the root position
+
+    # Advance through the full PV then restore.
+    undos = UndoInfo[]
+    for m in result.pv
+        push!(undos, make_move!(b, m))
+    end
+    e_end = evaluate(b)
+    for i in length(result.pv):-1:1
+        unmake_move!(b, result.pv[i], undos[i])
+    end
+
+    # All deltas are from our perspective: positive = we improved.
+    Δmat  = sgn * (e_end.material       - e_root.material)
+    Δact  = sgn * (e_end.piece_activity - e_root.piece_activity)
+    Δpawn = sgn * (e_end.pawn_structure - e_root.pawn_structure)
+    Δking = sgn * (e_end.king_safety    - e_root.king_safety)
+    Δtot  = sgn * (total(e_end)         - total(e_root))
+
+    # Map material delta to a piece label (nil when change < 1 pawn).
+    mat_gain = if     Δmat >=  850; "the queen"
+               elseif Δmat >=  450; "a rook"
+               elseif Δmat >=  250; "a piece"
+               elseif Δmat >=  150; "the exchange"
+               elseif Δmat >=   80; "a pawn"
+               else                  ""
+               end
+    mat_loss = if     Δmat <= -850; "the queen"
+               elseif Δmat <= -450; "a rook"
+               elseif Δmat <= -250; "a piece"
+               elseif Δmat <= -150; "the exchange"
+               elseif Δmat <=  -80; "a pawn"
+               else                  ""
+               end
+
+    # Collect positional gains (our side's improvements and the opponent's
+    # deteriorations), capped at two to keep the message concise.
+    pos = String[]
+    if Δact >= 15
+        push!(pos, "much better piece activity")
+    elseif Δact >= 8
+        push!(pos, "better piece activity")
+    end
+    Δpawn >=  10 && push!(pos, "a better pawn structure")
+    Δking >=  10 && push!(pos, "a safer king")
+    Δking <= -10 && push!(pos, "an exposed enemy king")
+    pos = pos[1:min(end, 2)]   # at most two factors for readability
+
+    has_mat_gain = !isempty(mat_gain)
+    has_mat_loss = !isempty(mat_loss)
+    has_pos      = !isempty(pos)
+
+    # Nothing worth reporting.
+    !has_mat_gain && !has_mat_loss && !has_pos && abs(Δtot) < 25 && return ""
+
+    pos_str = length(pos) == 0 ? "" :
+              length(pos) == 1 ? pos[1] :
+              "$(pos[1]) and $(pos[2])"
+
+    if has_mat_gain
+        base = "Looking ahead: I expect to win $mat_gain"
+        return isempty(pos_str) ? "$base." : "$base, with $pos_str to follow."
+    elseif has_mat_loss
+        return has_pos ?
+            "Looking ahead: I sacrifice $mat_loss for $pos_str." :
+            "Looking ahead: I expect to lose $mat_loss — best available."
+    else
+        return has_pos ?
+            "Looking ahead: I'm aiming for $pos_str." :
+            "Looking ahead: I expect a gradually improving position."
+    end
+end
