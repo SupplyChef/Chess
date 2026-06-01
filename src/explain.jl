@@ -379,3 +379,248 @@ function explain_opponent_move(b_before::Board, opp_move::Move,
     "As your coach: I'd have played $engine_san there$reply_str. " *
     "Let's see how $opp_san works out. [depth $(engine_result.depth)]"
 end
+
+# ── explain_pv_outcome structural helpers ─────────────────────────────────────
+# These all operate on a single board snapshot; explain_pv_outcome calls them
+# on both the root and the PV endpoint and compares the results.
+
+# Files (as UInt8 bitmask, bit i = file i) where `c` has a rook with no pawns
+# of either colour on the file (fully open).
+function _rook_open_files(b::Board, c::Color)::UInt8
+    all_pawns = bb(b, White, Pawn) | bb(b, Black, Pawn)
+    mask      = UInt8(0)
+    for s in BitIter(bb(b, c, Rook))
+        f = file_of(s)
+        (all_pawns & FILE_MASK[f+1]) == 0 && (mask |= UInt8(1) << f)
+    end
+    mask
+end
+
+# Bitboard of squares where `c` has a full knight outpost: in the opponent's
+# half and no enemy pawn can ever chase it (corridor clear of challengers).
+function _outpost_squares(b::Board, c::Color)::BB
+    result = BB(0)
+    ep     = bb(b, other(c), Pawn)
+    for s in BitIter(bb(b, c, Knight))
+        (c == White ? rank_of(s) >= 4 : rank_of(s) <= 3) || continue
+        pmask = (c == White ? _PASSED_W[s+1] : _PASSED_B[s+1]) & ~FILE_MASK[file_of(s)+1]
+        (pmask & ep) == 0 && (result |= sq_bb(s))
+    end
+    result
+end
+
+# Bitboard of squares where `c` has a passed pawn.
+function _passed_pawn_squares(b::Board, c::Color)::BB
+    ep     = bb(b, other(c), Pawn)
+    result = BB(0)
+    for s in BitIter(bb(b, c, Pawn))
+        _is_passed(s, c, ep) && (result |= sq_bb(s))
+    end
+    result
+end
+
+# Number of rooks `c` has sitting on the opponent's 7th rank.
+function _rooks_on_seventh(b::Board, c::Color)::Int
+    seventh = c == White ? 6 : 1
+    n = 0
+    for s in BitIter(bb(b, c, Rook)); rank_of(s) == seventh && (n += 1); end
+    n
+end
+
+# Number of fully open files in the 3-file zone centred on `c`'s king
+# (the files the opponent can use as invasion routes).
+function _open_files_near_king(b::Board, c::Color)::Int
+    kf        = file_of(lsb(bb(b, c, King)))
+    all_pawns = bb(b, White, Pawn) | bb(b, Black, Pawn)
+    n         = 0
+    for df in -1:1
+        sf = kf + df
+        0 <= sf <= 7 || continue
+        (all_pawns & FILE_MASK[sf+1]) == 0 && (n += 1)
+    end
+    n
+end
+
+# Number of files where `c` has two or more pawns (doubled pawn files).
+function _doubled_files(b::Board, c::Color)::Int
+    pawns = bb(b, c, Pawn)
+    n     = 0
+    for f in 0:7; count_bits(pawns & FILE_MASK[f+1]) > 1 && (n += 1); end
+    n
+end
+
+# ── explain_pv_outcome ────────────────────────────────────────────────────────
+
+"""
+    explain_pv_outcome(result, b, my_color) → String
+
+Describe the expected positional change between the current position and the
+end of the principal variation, without referencing individual moves.
+
+Plays through the full PV, captures structural snapshots at the endpoint and
+at the root, then names the most significant specific features that appear or
+disappear: which file a passed pawn lands on, which square an outpost occupies,
+which file a rook opens up, etc.  Falls back to eval-delta language only when
+no concrete structural change is detectable.
+
+Returns "" when the PV is too short or changes are too small to be worth
+reporting.
+"""
+function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::String
+    abs(result.score) >= MATE_SCORE - MAX_PLY && return ""
+    length(result.pv) < 3 && return ""
+
+    sgn    = my_color == White ? 1 : -1
+    them   = other(my_color)
+    e_root = result.eval   # White-frame static eval of the root position
+
+    # ── Play through PV; collect endpoint snapshots ────────────────────────────
+    undos = UndoInfo[]
+    for m in result.pv
+        push!(undos, make_move!(b, m))
+    end
+
+    e_end = evaluate(b)
+
+    # Structural snapshots at the PV endpoint.
+    ep_pass  = _passed_pawn_squares(b, my_color)
+    ep_out   = _outpost_squares(b, my_color)
+    ep_rof   = _rook_open_files(b, my_color)
+    ep_7th   = _rooks_on_seventh(b, my_color)
+    ep_bpair = count_bits(bb(b, my_color, Bishop)) >= 2
+    ep_ok    = _open_files_near_king(b, them)
+    ep_dp    = _doubled_files(b, them)
+
+    # ── Restore to root; collect root snapshots ────────────────────────────────
+    for i in length(result.pv):-1:1
+        unmake_move!(b, result.pv[i], undos[i])
+    end
+
+    rp_pass  = _passed_pawn_squares(b, my_color)
+    rp_out   = _outpost_squares(b, my_color)
+    rp_rof   = _rook_open_files(b, my_color)
+    rp_7th   = _rooks_on_seventh(b, my_color)
+    rp_bpair = count_bits(bb(b, my_color, Bishop)) >= 2
+    rp_ok    = _open_files_near_king(b, them)
+    rp_dp    = _doubled_files(b, them)
+
+    # ── Material delta ─────────────────────────────────────────────────────────
+    Δmat = sgn * (e_end.material - e_root.material)
+    mat_gain = if     Δmat >=  850; "the queen"
+               elseif Δmat >=  450; "a rook"
+               elseif Δmat >=  250; "a piece"
+               elseif Δmat >=  150; "the exchange"
+               elseif Δmat >=   80; "a pawn"
+               else                  ""
+               end
+    mat_loss = if     Δmat <= -850; "the queen"
+               elseif Δmat <= -450; "a rook"
+               elseif Δmat <= -250; "a piece"
+               elseif Δmat <= -150; "the exchange"
+               elseif Δmat <=  -80; "a pawn"
+               else                  ""
+               end
+
+    # ── Named structural changes (sorted by chess importance) ─────────────────
+    # Each entry is (priority::Int, text::String); lower priority = report first.
+    changes = Tuple{Int,String}[]
+
+    # New passed pawn — report the most advanced one by file name.
+    new_pass = ep_pass & ~rp_pass
+    if new_pass != BB(0)
+        best = lsb(new_pass)
+        for s in BitIter(new_pass)
+            adv_s    = my_color == White ? rank_of(s)    : 7 - rank_of(s)
+            adv_best = my_color == White ? rank_of(best) : 7 - rank_of(best)
+            adv_s > adv_best && (best = s)
+        end
+        push!(changes, (1, "a passed pawn on the $(Char('a'+file_of(best)))-file"))
+    end
+
+    # Existing passed pawn advanced to a more dangerous rank (compare by file).
+    best_adv = 0; best_adv_sq = -1
+    for f in 0:7
+        ep_f = ep_pass & FILE_MASK[f+1]
+        rp_f = rp_pass & FILE_MASK[f+1]
+        (ep_f == 0 || rp_f == 0) && continue   # no passer on this file at one end
+        ep_s = lsb(ep_f); rp_s = lsb(rp_f)
+        adv_end  = my_color == White ? rank_of(ep_s) : 7 - rank_of(ep_s)
+        adv_root = my_color == White ? rank_of(rp_s) : 7 - rank_of(rp_s)
+        gain = adv_end - adv_root
+        if gain > best_adv; best_adv = gain; best_adv_sq = ep_s; end
+    end
+    if best_adv >= 2   # notable only when passer advanced at least two ranks
+        f    = Char('a' + file_of(best_adv_sq))
+        rank = my_color == White ? rank_of(best_adv_sq) + 1 : 8 - rank_of(best_adv_sq)
+        push!(changes, (1, "my passer on the $f-file reaching rank $rank"))
+    end
+
+    # New full knight outpost — report the square.
+    new_out = ep_out & ~rp_out
+    if new_out != BB(0)
+        s = lsb(new_out)
+        push!(changes, (2, "a knight outpost on $(sq_name(s))"))
+    end
+
+    # Rook newly placed on an open file — report the file letter.
+    new_rof = ep_rof & ~rp_rof
+    if new_rof != UInt8(0)
+        f = Char('a' + trailing_zeros(new_rof))
+        push!(changes, (3, "a rook on the open $f-file"))
+    end
+
+    # Rook newly on the 7th rank.
+    ep_7th > rp_7th &&
+        push!(changes, (3, "a rook invading the 7th rank"))
+
+    # Bishop pair gained.
+    !rp_bpair && ep_bpair &&
+        push!(changes, (4, "the bishop pair"))
+
+    # New open file in the zone around the opponent's king — an invasion route.
+    ep_ok > rp_ok &&
+        push!(changes, (2, "an open file against your king"))
+
+    # Opponent gains doubled pawns.
+    ep_dp > rp_dp &&
+        push!(changes, (5, "doubled pawns in your position"))
+
+    # Sort by priority; cap at two for readability.
+    sort!(changes; by = first)
+    pos = [c[2] for c in changes[1:min(end, 2)]]
+
+    # ── Eval-delta fallbacks (when no concrete structure was detected) ──────────
+    if isempty(pos)
+        Δact  = sgn * (e_end.piece_activity - e_root.piece_activity)
+        Δpawn = sgn * (e_end.pawn_structure - e_root.pawn_structure)
+        Δking = sgn * (e_end.king_safety    - e_root.king_safety)
+        Δtot  = sgn * (total(e_end)         - total(e_root))
+        if     Δact  >= 15; push!(pos, "much better piece coordination")
+        elseif Δact  >=  8; push!(pos, "better piece coordination")
+        end
+        Δpawn >= 10 && push!(pos, "structural pawn advantages")
+        Δking >= 10 && push!(pos, "a safer king")
+        Δking <= -10 && push!(pos, "an exposed enemy king")
+        if isempty(pos) && abs(Δtot) < 25 && isempty(mat_gain) && isempty(mat_loss)
+            return ""
+        end
+    end
+
+    # ── Compose output ─────────────────────────────────────────────────────────
+    pos_str = length(pos) == 0 ? "" :
+              length(pos) == 1 ? pos[1] :
+              "$(pos[1]) and $(pos[2])"
+
+    if !isempty(mat_gain)
+        base = "Looking ahead: I expect to win $mat_gain"
+        return isempty(pos_str) ? "$base." : "$base, with $pos_str to follow."
+    elseif !isempty(mat_loss)
+        return !isempty(pos_str) ?
+            "Looking ahead: I sacrifice $mat_loss for $pos_str." :
+            "Looking ahead: I expect to lose $mat_loss — best available."
+    else
+        return !isempty(pos_str) ?
+            "Looking ahead: I'm aiming for $pos_str." :
+            "Looking ahead: I expect a gradually improving position."
+    end
+end

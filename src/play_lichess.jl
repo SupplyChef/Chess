@@ -170,6 +170,13 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
     @async post_chat(game_id, msg; room = "player")
     @async post_chat(game_id, msg; room = "spectator")
 
+    # Follow-up: strategic outlook based on PV endpoint vs root eval.
+    outcome_msg = explain_pv_outcome(result, board, color)
+    if !isempty(outcome_msg)
+        @async post_chat(game_id, outcome_msg; room = "player")
+        @async post_chat(game_id, outcome_msg; room = "spectator")
+    end
+
     # Coaching: explain the opponent's last move. Runs after our move is submitted
     # so it doesn't compete with the main search or interleave info output.
     opp_just_moved && _coaching_async(game_id, moves_played)

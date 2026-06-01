@@ -69,7 +69,7 @@ export
     # selfplay
     MatchResult, selfplay,
     # explain
-    explain_move, explain_opponent_move,
+    explain_move, explain_opponent_move, explain_pv_outcome,
     # perft
     perft, perft_divide, run_perft_suite, PERFT_SUITE
 
