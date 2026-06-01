@@ -326,12 +326,12 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
 
     # Repetition: count how many times this position has been seen before —
     # both in the game (prior_counts) and on the current search path.
-    # Two prior occurrences means this would be the third → draw.
     # One prior occurrence means this is the second: we return 0 (draw value)
     # so the engine avoids the repetition when winning and embraces it when losing.
+    # Two prior occurrences means this would be the third → forced draw, also 0.
     let reps = get(si.prior_counts, b.hash, 0)
         for h in si.path; h == b.hash && (reps += 1); end
-        reps >= 2 && return 0
+        reps >= 1 && return 0
     end
 
     # TT probe: if we have previously searched this position at sufficient depth,
