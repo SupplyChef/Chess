@@ -137,6 +137,7 @@ end
 # ── PV continuation sentence ───────────────────────────────────────────────────
 # Produces " After Xe4, I plan Rxf7." style text from the PV.
 # Board must be advanced by pv[1] before calling; restored by caller afterward.
+# Only used for forced mate sequences where the line is reliable.
 function _pv_continuation(pv::Vector{Move}, b_after::Board)::String
     length(pv) < 2 && return ""
     opp = _approx_san(pv[2], b_after)
@@ -147,6 +148,67 @@ function _pv_continuation(pv::Vector{Move}, b_after::Board)::String
         return " After $opp, I plan $ours."
     end
     " I expect $opp from you next."
+end
+
+# ── Key PV moment ─────────────────────────────────────────────────────────────
+# What does move m achieve on board b (before the move)?
+# Returns a short phrase or "" if nothing noteworthy.
+function _key_move_concept(b::Board, m::Move, our_k::PieceKind,
+                            our_val::Int, my_color::Color)::String
+    fl = flags(m)
+    (fl & MF_PROMO) != 0 && return "promote to a queen"
+    forks = _fork_targets(b, m, our_val)
+    length(forks) >= 2 &&
+        return "fork the $(_piece_name(forks[1][1])) and $(_piece_name(forks[2][1]))"
+    if (fl & MF_CAPTURE) != 0 || fl == MF_EP
+        cap_k   = fl == MF_EP ? Pawn : b.piece_on[to_sq(m)+1].kind
+        cap_val = PIECE_VALUE[Int(cap_k)+1]
+        if cap_val > our_val || !_is_defended(b, to_sq(m), other(my_color))
+            return "win the $(_piece_name(cap_k))"
+        end
+    end
+    ""
+end
+
+# Scan our upcoming moves in the PV (pv[3], pv[5], …) and return the first
+# that achieves a concrete tactical goal: fork, winning capture, or promotion.
+# Board b must be AFTER pv[1] (our current move); it is restored on return.
+# Returns (concept, path) where path = pv[2..key_idx] is the line to display,
+# or nothing when no key moment is found.
+function _find_key_pv_moment(pv::Vector{Move}, b::Board,
+                              my_color::Color)::Union{Nothing,Tuple{String,Vector{Move}}}
+    length(pv) < 3 && return nothing
+    undos  = UndoInfo[]
+    result = nothing
+    for i in 2:length(pv)
+        m = pv[i]
+        if isodd(i)   # pv[3], pv[5], … — our moves after each opponent reply
+            our_k   = b.piece_on[from_sq(m)+1].kind
+            our_val = PIECE_VALUE[Int(our_k)+1]
+            concept = _key_move_concept(b, m, our_k, our_val, my_color)
+            if !isempty(concept)
+                result = (concept, pv[2:i])
+                break
+            end
+        end
+        push!(undos, make_move!(b, m))
+    end
+    for j in length(undos):-1:1; unmake_move!(b, pv[j+1], undos[j]); end
+    result
+end
+
+# Format a move sequence as a human-readable string ("Kh8 Nf6 Kg8 Nd7").
+# b must be the position just before path[1]; it is restored on return.
+function _format_pv_path(path::Vector{Move}, b::Board)::String
+    isempty(path) && return ""
+    parts = String[]
+    undos = UndoInfo[]
+    for m in path
+        push!(parts, _approx_san(m, b))
+        push!(undos, make_move!(b, m))
+    end
+    for j in length(undos):-1:1; unmake_move!(b, path[j], undos[j]); end
+    join(parts, " ")
 end
 
 # ── explain_move ──────────────────────────────────────────────────────────────
@@ -222,22 +284,10 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
         # 2b. Non-fork material gain / loss.
         what = abs(swing) >= 800 ? "the queen" : abs(swing) >= 450 ? "the rook" :
                abs(swing) >= 270 ? "a piece"   : "a pawn"
-        undo = make_move!(b, result.move)
-        cont = if length(result.pv) >= 3
-            opp  = _approx_san(result.pv[2], b)
-            undo2 = make_move!(b, result.pv[2])
-            ours  = _approx_san(result.pv[3], b)
-            unmake_move!(b, result.pv[2], undo2)
-            " After $opp, I continue with $ours."
-        elseif length(result.pv) >= 2
-            " Your best reply is $(_approx_san(result.pv[2], b))."
-        else ""
-        end
-        unmake_move!(b, result.move, undo)
         if genuinely_winning
-            return "I played $our_san — winning $what.$cont $note"
+            return "I played $our_san — winning $what. $note"
         else
-            return "I played $our_san — losing $what, but it's the best I can do.$cont $note"
+            return "I played $our_san — losing $what, but it's the best I can do. $note"
         end
     end
 
@@ -311,8 +361,15 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
 
     endgame = _is_endgame(b)
 
-    # PV continuation.
-    plan = _pv_continuation(result.pv, b)
+    # Key PV moment: find the most impactful upcoming move in the PV and
+    # format the path to it while b is still in the post-move state.
+    km = _find_key_pv_moment(result.pv, b, my_color)
+    km_str = if km !== nothing
+        c, path_km = km
+        (c, _format_pv_path(path_km, b))
+    else
+        nothing
+    end
 
     unmake_move!(b, result.move, undo)
 
@@ -354,7 +411,14 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
         "$(parts[1][2]) and $(parts[2][2])"
     end
 
-    "I played $our_san — $concept.$plan $note"
+    full_concept = if km_str !== nothing
+        c, path_str = km_str
+        "$concept, aiming to $c ($path_str)"
+    else
+        concept
+    end
+
+    "I played $our_san — $full_concept. $note"
 end
 
 # ── explain_opponent_move ──────────────────────────────────────────────────────
