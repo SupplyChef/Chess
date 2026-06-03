@@ -549,6 +549,21 @@ function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::St
     them   = other(my_color)
     e_root = result.eval   # White-frame static eval of the root position
 
+    # Gate: only produce a PV-endpoint outlook when pv[1] forces a constrained
+    # opponent reply.  On quiet moves the opponent deviates at n=2 ~57% of the
+    # time, making the endpoint description unreliable.
+    # • Check:           opponent must escape — very few legal replies.
+    # • Winning capture: material swing ≥ 80cp means the opponent can't simply
+    #                    ignore the capture, so a recapture response is likely.
+    undo_gate    = make_move!(b, result.pv[1])
+    opp_in_check = king_in_check(b, them)
+    unmake_move!(b, result.pv[1], undo_gate)
+    is_cap = is_capture(result.pv[1]) || is_ep(result.pv[1])
+    if !opp_in_check
+        is_cap || return ""
+        _pv_material_swing(result.pv, b) < 80 && return ""
+    end
+
     # ── Play through PV; collect endpoint snapshots ────────────────────────────
     undos = UndoInfo[]
     for m in result.pv
