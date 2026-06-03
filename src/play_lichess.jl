@@ -28,6 +28,10 @@ const POSITION_COUNTS = Dict{String, Dict{UInt64, Int}}()
 const SEARCH_INFOS    = Dict{String, SearchInfo}()
 const INCREMENTS      = Dict{String, Int}()   # increment in ms per game
 const ACTIVE_GAMES    = Set{String}()
+# PV deviation tracking: stores (start_halfmove_count, pv) for each engine search.
+# start_halfmove_count is length(moves_played) at the time of search, so pv[i]
+# should match all_moves[start + i] (1-indexed) when the game ends.
+const PV_HISTORY      = Dict{String, Vector{Tuple{Int, Vector{Move}}}}()
 
 # ── Lichess API helpers ────────────────────────────────────────────────────────
 
@@ -108,6 +112,48 @@ function time_for_move(remaining_ms::Int, increment_ms::Int, ::Int)::Int
     clamp(base_ms, 50, max_ms)
 end
 
+# ── PV deviation analysis ─────────────────────────────────────────────────────
+
+# Given the full move list played in the game and the history of PVs generated
+# by the engine, compute the first deviation index n for each PV and return
+# a formatted histogram string.  pv[1] is always played (n=1 never deviates),
+# so the minimum recorded n is 2.  Even n = opponent deviates; odd n = we deviate.
+function _pv_deviation_report(game_id::String, all_moves::Vector{Move})::String
+    history = get(PV_HISTORY, game_id, Tuple{Int, Vector{Move}}[])
+    isempty(history) && return ""
+
+    deviations = Int[]
+    for (start, pv) in history
+        first_dev = nothing
+        for i in 2:length(pv)
+            idx = start + i        # 1-indexed position in all_moves
+            idx > length(all_moves) && break
+            if all_moves[idx] != pv[i]
+                first_dev = i
+                break
+            end
+        end
+        first_dev !== nothing && push!(deviations, first_dev)
+    end
+
+    isempty(deviations) && return ""
+
+    counts  = Dict{Int, Int}()
+    for n in deviations; counts[n] = get(counts, n, 0) + 1; end
+    max_n   = maximum(keys(counts))
+    total   = length(deviations)
+
+    lines = String["PV deviation ($(length(history)) PVs, $total deviated):"]
+    for n in 2:max_n
+        c = get(counts, n, 0)
+        c == 0 && continue
+        bar = "█" ^ min(c, 15)
+        who = iseven(n) ? "opp" : "us"
+        push!(lines, "  n=$n ($who): $bar $c")
+    end
+    join(lines, "\n")
+end
+
 # ── Core game logic ────────────────────────────────────────────────────────────
 
 # Coaching: explain the opponent's last move using a quick background search.
@@ -160,15 +206,22 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
     println("Playing $uci  d=$(result.depth)  score=$(result.score)cp  " *
             "nodes=$(result.nodes)  nps=$(nps ÷ 1_000)k  time=$(elapsed_ms)ms  pv=$pv_str")
 
+    # Record PV for deviation tracking: pv[i] should match all_moves[N+i] at game end.
+    if haskey(PV_HISTORY, game_id)
+        push!(PV_HISTORY[game_id], (length(moves_played), copy(result.pv)))
+    end
+
     play_move(game_id, uci)
 
     # Post move explanation to both chat rooms.
     # Pass the opponent's last move so explain_move can distinguish a recapture
     # (restoring balance) from a genuine material gain.
+    # Append the PV in UCI so the explanation can be cross-checked against the line.
     last_opp = isempty(moves_played) ? nothing : moves_played[end]
     msg = explain_move(result, board, color; last_opp_move = last_opp)
-    @async post_chat(game_id, msg; room = "player")
-    @async post_chat(game_id, msg; room = "spectator")
+    msg_with_pv = isempty(result.pv) ? msg : "$msg [PV: $pv_str]"
+    @async post_chat(game_id, msg_with_pv; room = "player")
+    @async post_chat(game_id, msg_with_pv; room = "spectator")
 
     # Follow-up: strategic outlook based on PV endpoint vs root eval.
     outcome_msg = explain_pv_outcome(result, board, color)
@@ -211,6 +264,7 @@ function play_game(game_id::String)
                         POSITION_COUNTS[game_id] = Dict{UInt64,Int}(BOARDS[game_id].hash => 1)
                         SEARCH_INFOS[game_id]    = SearchInfo()
                         INCREMENTS[game_id]      = Int(get(event.clock, :increment, 0))
+                        PV_HISTORY[game_id]      = Tuple{Int, Vector{Move}}[]
 
                         moves_str = String(event.state.moves)
                         played    = apply_moves!(BOARDS[game_id], moves_str, POSITION_COUNTS[game_id])
@@ -218,7 +272,20 @@ function play_game(game_id::String)
                         @async make_bot_move(game_id, played, remaining)
 
                     elseif event.type == "gameState"
-                        event.status ∉ ("created", "started") && (done = true; return)
+                        if event.status ∉ ("created", "started")
+                            # Compute PV deviation histogram over the completed game.
+                            b_end = board_from_fen(STARTPOS)
+                            c_end = Dict{UInt64,Int}(b_end.hash => 1)
+                            all_played = apply_moves!(b_end, String(event.moves), c_end)
+                            hist = _pv_deviation_report(game_id, all_played)
+                            if !isempty(hist)
+                                println(hist)
+                                @async post_chat(game_id, hist; room = "player")
+                                @async post_chat(game_id, hist; room = "spectator")
+                            end
+                            done = true
+                            return
+                        end
 
                         # Accept a takeback if the opponent offered one.
                         if get(event, :wtakeback, false) || get(event, :btakeback, false)
@@ -256,6 +323,7 @@ function play_game(game_id::String)
     delete!(POSITION_COUNTS, game_id)
     delete!(SEARCH_INFOS, game_id)
     delete!(INCREMENTS, game_id)
+    delete!(PV_HISTORY, game_id)
     delete!(ACTIVE_GAMES, game_id)
     println("Game $game_id finished.")
 end
