@@ -275,7 +275,11 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
                (is_capture(result.move) || is_ep(result.move)) &&
                to_sq(result.move) == to_sq(last_opp_move)
 
-    genuinely_winning = swing >=  90 && result.score >=  60 && !is_recap
+    # Drop the result.score >= 60 gate: a winning capture should always be
+    # described as such, even when the engine is behind overall.  The score is
+    # already shown in `note`, so the explanation should describe what the move
+    # does, not contextualise it relative to the position evaluation.
+    genuinely_winning = swing >=  90 && !is_recap
     genuinely_losing  = swing <= -90 && result.score <= -60 && !is_recap
 
     if genuinely_winning || genuinely_losing
@@ -300,7 +304,12 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
         if genuinely_winning
             return "I played $our_san — winning $what. $note"
         else
-            return "I played $our_san — losing $what, but it's the best I can do. $note"
+            # If the current move is a capture, the loss is direct ("I took and lost").
+            # If it's a quiet move the loss happens later in the PV — attribute it clearly.
+            cap_move = is_capture(result.move) || is_ep(result.move)
+            return cap_move ?
+                "I played $our_san — losing $what, but it's the best I can do. $note" :
+                "I played $our_san — my best move, though it leads to losing $what. $note"
         end
     end
 
@@ -549,6 +558,11 @@ reporting.
 function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::String
     abs(result.score) >= MATE_SCORE - MAX_PLY && return ""
     length(result.pv) < 3 && return ""
+    # Suppress when the engine is already losing after its best move.  The deep
+    # search score already accounts for the full PV continuation; if it says we're
+    # behind, the static-eval material delta at the endpoint is unreliable — the
+    # apparent material gain shown in the PV doesn't hold up in deeper play.
+    result.score < -60 && return ""
 
     sgn    = my_color == White ? 1 : -1
     them   = other(my_color)
