@@ -28,10 +28,11 @@ const POSITION_COUNTS = Dict{String, Dict{UInt64, Int}}()
 const SEARCH_INFOS    = Dict{String, SearchInfo}()
 const INCREMENTS      = Dict{String, Int}()   # increment in ms per game
 const ACTIVE_GAMES    = Set{String}()
-# PV deviation tracking: stores (start_halfmove_count, pv) for each engine search.
-# start_halfmove_count is length(moves_played) at the time of search, so pv[i]
-# should match all_moves[start + i] (1-indexed) when the game ends.
-const PV_HISTORY      = Dict{String, Vector{Tuple{Int, Vector{Move}}}}()
+# PV deviation tracking: stores (start_halfmove_count, pv, score) per search.
+# start is length(moves_played) at search time, so pv[i] should match
+# all_moves[start+i].  score is result.score (our perspective, full depth) and
+# is used at game end to measure opponent deviation quality without re-searching.
+const PV_HISTORY      = Dict{String, Vector{Tuple{Int, Vector{Move}, Int}}}()
 
 # ── Lichess API helpers ────────────────────────────────────────────────────────
 
@@ -119,37 +120,55 @@ end
 # a formatted histogram string.  pv[1] is always played (n=1 never deviates),
 # so the minimum recorded n is 2.  Even n = opponent deviates; odd n = we deviate.
 function _pv_deviation_report(game_id::String, all_moves::Vector{Move})::String
-    history = get(PV_HISTORY, game_id, Tuple{Int, Vector{Move}}[])
+    history = get(PV_HISTORY, game_id, Tuple{Int, Vector{Move}, Int}[])
     isempty(history) && return ""
 
-    deviations = Int[]
-    for (start, pv) in history
+    counts_by_n = Dict{Int, Int}()
+    # For n=2 (opponent deviates immediately), collect score deltas.
+    # history[j+1].score - history[j].score: positive = we benefited (opp played worse),
+    # negative = opp found something better than the PV predicted.
+    # Caveat: this assumes the engine correctly evaluated both positions.
+    n2_deltas = Int[]
+
+    for j in 1:length(history)
+        start, pv, score = history[j]
         first_dev = nothing
         for i in 2:length(pv)
-            idx = start + i        # 1-indexed position in all_moves
+            idx = start + i
             idx > length(all_moves) && break
             if all_moves[idx] != pv[i]
                 first_dev = i
                 break
             end
         end
-        first_dev !== nothing && push!(deviations, first_dev)
+        first_dev === nothing && continue
+        counts_by_n[first_dev] = get(counts_by_n, first_dev, 0) + 1
+
+        if first_dev == 2 && j < length(history)
+            _, _, next_score = history[j + 1]
+            push!(n2_deltas, next_score - score)
+        end
     end
 
-    isempty(deviations) && return ""
+    isempty(counts_by_n) && return ""
 
-    counts  = Dict{Int, Int}()
-    for n in deviations; counts[n] = get(counts, n, 0) + 1; end
-    max_n   = maximum(keys(counts))
-    total   = length(deviations)
+    total = sum(values(counts_by_n))
+    max_n = maximum(keys(counts_by_n))
 
     lines = String["PV deviation ($(length(history)) PVs, $total deviated):"]
     for n in 2:max_n
-        c = get(counts, n, 0)
+        c = get(counts_by_n, n, 0)
         c == 0 && continue
-        bar = "█" ^ min(c, 15)
         who = iseven(n) ? "opp" : "us"
-        push!(lines, "  n=$n ($who): $bar $c")
+        bar = "█" ^ min(c, 15)
+        if n == 2 && !isempty(n2_deltas)
+            n_gained = count(d -> d >  30, n2_deltas)
+            n_equal  = count(d -> abs(d) <= 30, n2_deltas)
+            n_lost   = count(d -> d < -30, n2_deltas)
+            push!(lines, "  n=$n ($who): $bar $c  [+>30cp:$n_gained  ≈:$n_equal  -<-30cp:$n_lost]")
+        else
+            push!(lines, "  n=$n ($who): $bar $c")
+        end
     end
     join(lines, "\n")
 end
@@ -206,9 +225,11 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
     println("Playing $uci  d=$(result.depth)  score=$(result.score)cp  " *
             "nodes=$(result.nodes)  nps=$(nps ÷ 1_000)k  time=$(elapsed_ms)ms  pv=$pv_str")
 
-    # Record PV for deviation tracking: pv[i] should match all_moves[N+i] at game end.
+    # Record PV + score for deviation tracking.
+    # result.score (our perspective, full depth) lets us measure opponent deviation
+    # quality at game end by comparing consecutive entry scores around each n=2 gap.
     if haskey(PV_HISTORY, game_id)
-        push!(PV_HISTORY[game_id], (length(moves_played), copy(result.pv)))
+        push!(PV_HISTORY[game_id], (length(moves_played), copy(result.pv), result.score))
     end
 
     play_move(game_id, uci)
@@ -264,7 +285,7 @@ function play_game(game_id::String)
                         POSITION_COUNTS[game_id] = Dict{UInt64,Int}(BOARDS[game_id].hash => 1)
                         SEARCH_INFOS[game_id]    = SearchInfo()
                         INCREMENTS[game_id]      = Int(get(event.clock, :increment, 0))
-                        PV_HISTORY[game_id]      = Tuple{Int, Vector{Move}}[]
+                        PV_HISTORY[game_id]      = Tuple{Int, Vector{Move}, Int}[]
 
                         moves_str = String(event.state.moves)
                         played    = apply_moves!(BOARDS[game_id], moves_str, POSITION_COUNTS[game_id])
