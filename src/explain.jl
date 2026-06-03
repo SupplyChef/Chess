@@ -183,12 +183,20 @@ function _find_key_pv_moment(pv::Vector{Move}, b::Board,
     for i in 2:length(pv)
         m = pv[i]
         if isodd(i)   # pv[3], pv[5], … — our moves after each opponent reply
-            our_k   = b.piece_on[from_sq(m)+1].kind
-            our_val = PIECE_VALUE[Int(our_k)+1]
-            concept = _key_move_concept(b, m, our_k, our_val, my_color)
-            if !isempty(concept)
-                result = (concept, pv[2:i])
-                break
+            # Skip recaptures: if the opponent's previous move was itself a capture
+            # on this same square, we'd only be restoring balance, not winning material.
+            prev = pv[i-1]
+            is_recap = (is_capture(prev) || is_ep(prev)) &&
+                       (is_capture(m)    || is_ep(m))    &&
+                       to_sq(m) == to_sq(prev)
+            if !is_recap
+                our_k   = b.piece_on[from_sq(m)+1].kind
+                our_val = PIECE_VALUE[Int(our_k)+1]
+                concept = _key_move_concept(b, m, our_k, our_val, my_color)
+                if !isempty(concept)
+                    result = (concept, pv[2:i])
+                    break
+                end
             end
         end
         push!(undos, make_move!(b, m))
@@ -342,7 +350,10 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
         ep    = bb(b, other(my_color), Pawn)
         pmask = (my_color == White ? _PASSED_W[dst+1] : _PASSED_B[dst+1]) &
                 ~FILE_MASK[file_of(dst)+1]
-        (pmask & ep) == 0
+        # No enemy pawn can ever challenge it, AND it isn't immediately hanging
+        # (opponent attacks it while we have no recapture).
+        (pmask & ep) == 0 &&
+        !(_is_defended(b, dst, other(my_color)) && !_is_defended(b, dst, my_color))
     end
 
     creates_passed = our_k == Pawn && !is_capture(result.move) && !is_ep(result.move) &&
