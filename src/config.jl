@@ -85,6 +85,34 @@ Base.@kwdef struct EngineConfig
     # add +20 cp for that side.  The trailing side has more fighting chances with
     # queens than in a simplified endgame, so this discourages queen trades when
     # behind and encourages them when ahead.
+
+    eval_ocb_discount ::Bool = true
+    # Opposite-colored bishop discount: when each side has exactly one bishop on
+    # opposite square colors and no other pieces (rooks/queens/knights), passed
+    # pawn bonuses are halved.  OCB endings are notoriously drawish even with an
+    # extra pawn or two because the attacking bishop cannot cover the defender's
+    # key blockade squares.
+
+    eval_wrong_bishop ::Bool = true
+    # Wrong-color bishop draw: K+B+rook-pawn vs lone K is a theoretical draw when
+    # the bishop does not control the promotion square.  We apply a large penalty
+    # (-150 cp) to the "winning" side when this condition is detected.
+
+    eval_rook_cutoff  ::Bool = true
+    # Rook rank cut-off in K+R+P vs K+R endings: a rook that cuts the enemy king
+    # off by rank (placing itself between the king and the promotion zone) wins
+    # significant time for the pawn to advance.  Bonus: +30 cp per passed pawn
+    # whose enemy king is cut off from the promotion side of the board.
+
+    eval_connected_passers ::Bool = true
+    # Connected passed pawns bonus: two or more passed pawns on adjacent files
+    # support each other and are very difficult to stop.  +25 cp per pawn that
+    # has another passer on an adjacent file.
+
+    eval_knight_distance ::Bool = true
+    # Knight distance penalty in deep endgames (phase < 10): a knight far from
+    # all pawns is nearly useless.  Penalty = min_pawn_distance × (10-phase) ÷ 5
+    # centipawns, capped at 20 cp.  Incentivises repositioning the knight.
 end
 
 """The default full-strength configuration (all features enabled)."""
