@@ -558,6 +558,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             their_pawns = bb(b, other(c), Pawn)
             my_rooks    = bb(b, c, Rook)
             enemy_rooks = bb(b, other(c), Rook)
+            their_k     = lsb(bb(b, other(c), King))
             for s in BitIter(bb(b, c, Pawn))
                 _is_passed(s, c, their_pawns) || continue
                 f = file_of(s); r = rank_of(s)
@@ -572,6 +573,65 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                     blocking = c == White ? rank_of(rs) > r : rank_of(rs) < r
                     if blocking; score -= sign * 20; break; end
                 end
+                # Rook rank cut-off: our rook sits on a rank that separates the
+                # enemy king from the pawn's promotion side.  The king cannot
+                # cross that rank to catch the pawn, winning decisive time.
+                if cfg.eval_rook_cutoff
+                    enemy_kr = rank_of(their_k)
+                    for rs in BitIter(my_rooks)
+                        rr = rank_of(rs)
+                        # White pawn runs toward rank 7; cut off king below rook rank.
+                        # Black pawn runs toward rank 0; cut off king above rook rank.
+                        cut_off = c == White ? (rr > enemy_kr && rr <= r) :
+                                               (rr < enemy_kr && rr >= r)
+                        if cut_off; score += sign * 30; break; end
+                    end
+                end
+            end
+        end
+    end
+
+    # Wrong-color bishop: K+B+rook-pawn vs lone K where bishop cannot control
+    # the promotion square is a theoretical draw regardless of pawn advancement.
+    if cfg.eval_wrong_bishop
+        for c in (White, Black)
+            sign = c == White ? 1 : -1
+            # Only applies when the "winning" side has bishop+pawn(s) only.
+            (bb(b, c, Rook) | bb(b, c, Queen) | bb(b, c, Knight)) != BB(0) && continue
+            count_bits(bb(b, c, Bishop)) == 1 || continue
+            my_pawns = bb(b, c, Pawn)
+            count_bits(my_pawns) == 1 || continue
+            ps = lsb(my_pawns)
+            pf = file_of(ps)
+            (pf == 0 || pf == 7) || continue   # must be a rook pawn
+            promo_rank = c == White ? 7 : 0
+            bish_sq    = lsb(bb(b, c, Bishop))
+            # Bishop and promotion square on different square colors → draw.
+            bish_color  = (file_of(bish_sq) + rank_of(bish_sq)) & 1
+            promo_color = (pf + promo_rank) & 1
+            if bish_color != promo_color
+                score -= sign * 150
+            end
+        end
+    end
+
+    # Knight distance penalty in deep endgames (phase < 10): a knight stranded
+    # far from all pawns contributes almost nothing.
+    if cfg.eval_knight_distance && ph < 10
+        eg_wt = 10 - ph   # 1..10
+        all_pawns = bb(b, White, Pawn) | bb(b, Black, Pawn)
+        for c in (White, Black)
+            sign = c == White ? 1 : -1
+            for ns in BitIter(bb(b, c, Knight))
+                min_dist = 14
+                for ps in BitIter(all_pawns)
+                    d = _chebyshev(ns, ps)
+                    d < min_dist && (min_dist = d)
+                end
+                # No pawns on the board — knight distance is irrelevant.
+                min_dist == 14 && continue
+                penalty = min(min_dist * eg_wt ÷ 5, 20)
+                score -= sign * penalty
             end
         end
     end
@@ -579,8 +639,24 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     score
 end
 
-function _eval_pawn_structure(b::Board)::Int
+function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     score = 0
+
+    # Opposite-colored bishops with no other pieces: passed pawn bonuses halved.
+    ocb_only = false
+    if cfg.eval_ocb_discount
+        no_heavy = (bb(b, White, Rook)   | bb(b, Black, Rook)   |
+                    bb(b, White, Queen)  | bb(b, Black, Queen)  |
+                    bb(b, White, Knight) | bb(b, Black, Knight)) == BB(0)
+        if no_heavy &&
+           count_bits(bb(b, White, Bishop)) == 1 &&
+           count_bits(bb(b, Black, Bishop)) == 1
+            ws = lsb(bb(b, White, Bishop))
+            bs = lsb(bb(b, Black, Bishop))
+            ocb_only = ((file_of(ws) + rank_of(ws)) & 1) != ((file_of(bs) + rank_of(bs)) & 1)
+        end
+    end
+
     for c in (White, Black)
         sign = c == White ? 1 : -1
         pawns       = bb(b, c, Pawn)
@@ -605,8 +681,25 @@ function _eval_pawn_structure(b::Board)::Int
             (left == 0 && right == 0) && (score += sign * n * (-20))
         end
 
+        passed_bb = BB(0)
         for s in BitIter(pawns)
-            _is_passed(s, c, enemy_pawns) && (score += sign * _passed_bonus(s, c))
+            if _is_passed(s, c, enemy_pawns)
+                bonus = _passed_bonus(s, c)
+                ocb_only && (bonus = bonus ÷ 2)
+                score += sign * bonus
+                passed_bb |= sq_bb(s)
+            end
+        end
+
+        # Connected passed pawns: adjacent passers support each other and are
+        # very difficult to stop together.
+        if cfg.eval_connected_passers
+            for s in BitIter(passed_bb)
+                f = file_of(s)
+                neighbor = (f > 0 ? FILE_MASK[f]   : BB(0)) |
+                           (f < 7 ? FILE_MASK[f+2] : BB(0))
+                (passed_bb & neighbor) != 0 && (score += sign * 25)
+            end
         end
     end
     score
@@ -757,7 +850,7 @@ function evaluate(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::EvalBreakdown
     EvalBreakdown(
         mat,
         _eval_piece_activity(b, cfg),
-        _eval_pawn_structure(b),
+        _eval_pawn_structure(b, cfg),
         _eval_king_safety(b, cfg),
         (cfg.eval_space ? _eval_space(b) : 0) + complexity,
         _eval_tempo(b),
