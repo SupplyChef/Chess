@@ -281,17 +281,22 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
     if genuinely_winning || genuinely_losing
         # 2a. Fork check: do we simultaneously threaten 2+ profitable targets?
         forks = _fork_targets(b, result.move, our_val)
+        any_queen = (bb(b, White, Queen) | bb(b, Black, Queen)) != BB(0)
         if length(forks) >= 2
             n1 = _piece_name(forks[1][1])
             n2 = _piece_name(forks[2][1])
-            what = swing >= 800 ? "the queen" : swing >= 450 ? "the rook" :
-                   swing >= 270 ? "a piece"   : "a pawn"
+            what = swing >= 800 && any_queen ? "the queen" :
+                   swing >= 800              ? "significant material" :
+                   swing >= 450              ? "the rook" :
+                   swing >= 270              ? "a piece"  : "a pawn"
             return "I played $our_san — forking your $n1 and $n2, winning $what. $note"
         end
 
         # 2b. Non-fork material gain / loss.
-        what = abs(swing) >= 800 ? "the queen" : abs(swing) >= 450 ? "the rook" :
-               abs(swing) >= 270 ? "a piece"   : "a pawn"
+        what = abs(swing) >= 800 && any_queen ? "the queen" :
+               abs(swing) >= 800              ? "significant material" :
+               abs(swing) >= 450              ? "the rook" :
+               abs(swing) >= 270              ? "a piece"  : "a pawn"
         if genuinely_winning
             return "I played $our_san — winning $what. $note"
         else
@@ -308,11 +313,11 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
     back_rank       = my_color == White ? 0 : 7
     in_check_before = king_in_check(b, my_color)
     is_dev          = (our_k == Knight || our_k == Bishop) && rank_of(our_fr) == back_rank
+    e               = evaluate(b)   # root eval; same DEFAULT_CONFIG as e2 below
 
     undo = make_move!(b, result.move)
     e2   = evaluate(b)
     dst  = to_sq(result.move)
-    e    = result.eval   # static eval of the position BEFORE the move
 
     # Deltas from our side's perspective (positive = we improved).
     Δact  = sgn * (e2.piece_activity - e.piece_activity)
@@ -547,7 +552,7 @@ function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::St
 
     sgn    = my_color == White ? 1 : -1
     them   = other(my_color)
-    e_root = result.eval   # White-frame static eval of the root position
+    e_root = evaluate(b)   # White-frame static eval at root; same DEFAULT_CONFIG as e_end
 
     # Gate: only produce a PV-endpoint outlook when pv[1] forces a constrained
     # opponent reply.  On quiet moves the opponent deviates at n=2 ~57% of the
@@ -573,13 +578,15 @@ function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::St
     e_end = evaluate(b)
 
     # Structural snapshots at the PV endpoint.
-    ep_pass  = _passed_pawn_squares(b, my_color)
-    ep_out   = _outpost_squares(b, my_color)
-    ep_rof   = _rook_open_files(b, my_color)
-    ep_7th   = _rooks_on_seventh(b, my_color)
-    ep_bpair = count_bits(bb(b, my_color, Bishop)) >= 2
-    ep_ok    = _open_files_near_king(b, them)
-    ep_dp    = _doubled_files(b, them)
+    ep_pass       = _passed_pawn_squares(b, my_color)
+    ep_out        = _outpost_squares(b, my_color)
+    ep_rof        = _rook_open_files(b, my_color)
+    ep_7th        = _rooks_on_seventh(b, my_color)
+    ep_bpair      = count_bits(bb(b, my_color, Bishop)) >= 2
+    ep_ok         = _open_files_near_king(b, them)
+    ep_dp         = _doubled_files(b, them)
+    ep_them_queen = bb(b, them,     Queen) != BB(0)
+    ep_we_queen   = bb(b, my_color, Queen) != BB(0)
 
     # ── Restore to root; collect root snapshots ────────────────────────────────
     for i in length(result.pv):-1:1
@@ -595,15 +602,23 @@ function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::St
     rp_dp    = _doubled_files(b, them)
 
     # ── Material delta ─────────────────────────────────────────────────────────
-    Δmat = sgn * (e_end.material - e_root.material)
-    mat_gain = if     Δmat >=  850; "the queen"
+    Δmat          = sgn * (e_end.material - e_root.material)
+    them_has_queen = bb(b, them,     Queen) != BB(0)
+    we_have_queen  = bb(b, my_color, Queen) != BB(0)
+    # Only label "the queen" when a queen actually changed hands during the PV.
+    # Without this check, winning two rooks (≥850 cp) would also say "the queen."
+    queen_won  = them_has_queen && !ep_them_queen
+    queen_lost = we_have_queen  && !ep_we_queen
+    mat_gain = if     Δmat >=  850 && queen_won; "the queen"
+               elseif Δmat >=  850;              "significant material"
                elseif Δmat >=  450; "a rook"
                elseif Δmat >=  250; "a piece"
                elseif Δmat >=  150; "the exchange"
                elseif Δmat >=   80; "a pawn"
                else                  ""
                end
-    mat_loss = if     Δmat <= -850; "the queen"
+    mat_loss = if     Δmat <= -850 && queen_lost; "the queen"
+               elseif Δmat <= -850;               "significant material"
                elseif Δmat <= -450; "a rook"
                elseif Δmat <= -250; "a piece"
                elseif Δmat <= -150; "the exchange"
