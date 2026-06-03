@@ -407,16 +407,16 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             sign    = c == White ? 1 : -1
             our_occ = b.occ[Int(c)+1]
             for s in BitIter(bb(b, c, Knight))
-                score += sign * count_bits(knight_attacks(s) & ~our_occ) * 4
+                score += sign * count_bits(knight_attacks(s) & ~our_occ) * 5
             end
             for s in BitIter(bb(b, c, Bishop))
-                score += sign * count_bits(bishop_attacks(s, occ) & ~our_occ) * 3
+                score += sign * count_bits(bishop_attacks(s, occ) & ~our_occ) * 4
             end
             for s in BitIter(bb(b, c, Rook))
-                score += sign * count_bits(rook_attacks(s, occ) & ~our_occ) * 2
+                score += sign * count_bits(rook_attacks(s, occ) & ~our_occ) * 3
             end
             for s in BitIter(bb(b, c, Queen))
-                score += sign * count_bits(queen_attacks(s, occ) & ~our_occ) * 1
+                score += sign * count_bits(queen_attacks(s, occ) & ~our_occ) * 2
             end
         end
     end
@@ -733,7 +733,7 @@ function _eval_space(b::Board)::Int
             enemy_atk = ((enemy_pawns << 7) & ~FILE_MASK[8]) | ((enemy_pawns << 9) & ~FILE_MASK[1])
         end
         safe_space = our_atk & space_zone & ~enemy_atk
-        score += sign * count_bits(safe_space) * 3
+        score += sign * count_bits(safe_space) * 4
     end
     score
 end
