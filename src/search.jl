@@ -264,6 +264,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
 
     in_check = king_in_check(b, b.side)
 
+    orig_alpha = alpha
     if !in_check
         stand_pat = (b.side == White ? 1 : -1) * total(evaluate(b, si.config))
         stand_pat >= beta && return stand_pat
@@ -279,7 +280,8 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
 
     _score_moves!(ml, b, NULL_MOVE, si.killers, si.history, ply)
 
-    best = in_check ? -(MATE_SCORE - ply) : alpha
+    best      = in_check ? -(MATE_SCORE - ply) : alpha
+    best_move = NULL_MOVE
     for i in 1:length(ml)
         m = _pick_move!(ml, i)
 
@@ -287,10 +289,31 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
         score = -_quiesce(b, -beta, -alpha, ply + 1, si)
         unmake_move!(b, m, undo)
 
-        score > best  && (best  = score)
+        if score > best
+            best      = score
+            best_move = m
+        end
         score > alpha && (alpha = score)
         alpha >= beta && break
     end
+
+    # Record the best capture in the TT so _extract_pv can extend the PV
+    # through qsearch moves (e.g. show the recapture after a winning capture).
+    # Only written when a move actually improved over the initial bound; without
+    # this, the PV stops at the last negamax move (a capture) and the material
+    # swing calculation overcounts, falsely claiming a piece was won.
+    if !si.stop && best_move != NULL_MOVE
+        store_score = best
+        if best >= MATE_SCORE - MOVE_STACK_SIZE
+            store_score = best + ply
+        elseif best <= -(MATE_SCORE - MOVE_STACK_SIZE)
+            store_score = best - ply
+        end
+        flag = best >= beta      ? TT_LOWER :
+               best > orig_alpha ? TT_EXACT : TT_UPPER
+        _tt_put!(si.tt, b.hash, 0, store_score, flag, best_move)
+    end
+
     best
 end
 
