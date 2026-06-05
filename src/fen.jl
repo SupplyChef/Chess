@@ -75,6 +75,7 @@ function board_from_fen(fen::AbstractString)::Board
     if length(parts) >= 6; b.fullmove = parse(Int, parts[6]); end
 
     b.hash = compute_hash(b)
+    # The incremental scores and phase are handled automatically by _place_piece! -> _add_piece!
     b
 end
 

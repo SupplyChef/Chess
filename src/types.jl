@@ -118,6 +118,12 @@ mutable struct Board
     fullmove  ::Int
     hash      ::UInt64          # Zobrist hash, updated incrementally in make_move!
 
+    # Incremental evaluation state
+    mg_score  ::Int32           # total MG PST + material (ex King), from White's perspective
+    eg_score  ::Int32           # total EG PST + material (ex King), from White's perspective
+    material  ::Int32           # material balance (ex King), from White's perspective
+    phase     ::Int16           # game phase [0, 24]
+
     function Board()
         new(
             zeros(BB, 2, 7),
@@ -129,6 +135,10 @@ mutable struct Board
             0,
             1,
             UInt64(0),
+            Int32(0),
+            Int32(0),
+            Int32(0),
+            Int16(0),
         )
     end
 end

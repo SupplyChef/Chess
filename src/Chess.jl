@@ -29,6 +29,7 @@ function __init__()
     _init_attacks!()
     _init_castling_masks!()
     _init_zobrist!()
+    _init_eval!()
 end
 
 export

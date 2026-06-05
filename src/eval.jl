@@ -6,15 +6,43 @@ const PIECE_VALUE = (0, 100, 320, 330, 500, 900, 20_000)
 
 # ── Piece-square tables ────────────────────────────────────────────────────────
 # 64 entries written rank-8 → rank-1, file-a → file-h (visual board order).
-# For White: pst[sq] = table[(7 − rank) × 8 + file + 1]
-# For Black: mirror by rank → table[rank × 8 + file + 1]
-# The mirror formula ensures both colors use the same geometric preferences
-# without storing two tables.
+# We pre-compute these into MG_TABLE and EG_TABLE for both colors, including
+# the base piece value. This allows incremental updates during make/unmake.
 
-@inline function _pst(table, c::Color, s::Square)::Int
-    idx = c == White ? (7 - rank_of(s)) * 8 + file_of(s) + 1 :
-                            rank_of(s)  * 8 + file_of(s) + 1
-    Int(table[idx])
+const MG_TABLE = zeros(Int32, 2, 7, 64)
+const EG_TABLE = zeros(Int32, 2, 7, 64)
+# PHASE_TABLE mapping: NoPiece=0, Pawn=0, Knight=1, Bishop=1, Rook=2, Queen=4, King=0
+const PHASE_TABLE = Int16[0, 0, 1, 1, 2, 4, 0]
+
+function _init_eval!()
+    for c in (White, Black)
+        for k in (Pawn, Knight, Bishop, Rook, Queen, King)
+            # Standard material value excluding King's 20,000 to keep scores small
+            v = k == King ? 0 : PIECE_VALUE[Int(k)+1]
+            mg_pst = if k == Pawn; PST_PAWN_MG
+                elseif k == Knight; PST_KNIGHT_MG
+                elseif k == Bishop; PST_BISHOP_MG
+                elseif k == Rook;   PST_ROOK_MG
+                elseif k == Queen;  PST_QUEEN_MG
+                else                PST_KING_MG
+                end
+            eg_pst = if k == Pawn; PST_PAWN_EG
+                elseif k == Knight; PST_KNIGHT_EG
+                elseif k == Bishop; PST_BISHOP_EG
+                elseif k == Rook;   PST_ROOK_EG
+                elseif k == Queen;  PST_QUEEN_EG
+                else                PST_KING_EG
+                end
+
+            for s in 0:63
+                # Mirroring logic from original _pst
+                idx = c == White ? (7 - rank_of(s)) * 8 + file_of(s) + 1 :
+                                        rank_of(s)  * 8 + file_of(s) + 1
+                MG_TABLE[Int(c)+1, Int(k)+1, s+1] = v + mg_pst[idx]
+                EG_TABLE[Int(c)+1, Int(k)+1, s+1] = v + eg_pst[idx]
+            end
+        end
+    end
 end
 
 # Chebyshev (chessboard) distance: the number of king moves between two squares.
@@ -279,55 +307,16 @@ total(e::EvalBreakdown)::Int =
 
 # ── Component functions ────────────────────────────────────────────────────────
 
-function _eval_material(b::Board)::Int
-    score = 0
-    for k in (Pawn, Knight, Bishop, Rook, Queen)
-        v = PIECE_VALUE[Int(k)+1]
-        score += (count_bits(bb(b, White, k)) - count_bits(bb(b, Black, k))) * v
-    end
-    score
-end
-
 function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
-    # Game phase: 24 = full material, 0 = king+pawns only.
-    # Used to blend MG and EG king tables; also controls how aggressively
-    # king centralisation is incentivised.
-    ph = 0
-    for c in (White, Black)
-        ph += count_bits(bb(b, c, Knight)) + count_bits(bb(b, c, Bishop))
-        ph += 2 * count_bits(bb(b, c, Rook))
-        ph += 4 * count_bits(bb(b, c, Queen))
-    end
-    ph = min(ph, 24)
-
+    ph = Int(clamp(b.phase, 0, 24))
+    # score now includes material (excluding King) + tapered PST
+    score = (ph * Int(b.mg_score) + (24 - ph) * Int(b.eg_score)) ÷ 24
     occ   = all_occ(b)
-    score = 0
     for c in (White, Black)
         sign        = c == White ? 1 : -1
         my_pawns    = bb(b, c, Pawn)
         enemy_pawns = bb(b, other(c), Pawn)
         seventh     = c == White ? 6 : 1   # 0-indexed rank of the 7th rank
-
-        for s in BitIter(bb(b, c, Pawn))
-            score += sign * (ph * _pst(PST_PAWN_MG,   c, s) + (24-ph) * _pst(PST_PAWN_EG,   c, s)) ÷ 24
-        end
-        for s in BitIter(bb(b, c, Knight))
-            score += sign * (ph * _pst(PST_KNIGHT_MG, c, s) + (24-ph) * _pst(PST_KNIGHT_EG, c, s)) ÷ 24
-        end
-        for s in BitIter(bb(b, c, Bishop))
-            score += sign * (ph * _pst(PST_BISHOP_MG, c, s) + (24-ph) * _pst(PST_BISHOP_EG, c, s)) ÷ 24
-        end
-        for s in BitIter(bb(b, c, Rook))
-            score += sign * (ph * _pst(PST_ROOK_MG,   c, s) + (24-ph) * _pst(PST_ROOK_EG,   c, s)) ÷ 24
-        end
-        for s in BitIter(bb(b, c, Queen))
-            score += sign * (ph * _pst(PST_QUEEN_MG,  c, s) + (24-ph) * _pst(PST_QUEEN_EG,  c, s)) ÷ 24
-        end
-
-        # Tapered king: linear blend between MG and EG scores based on phase.
-        ks = lsb(bb(b, c, King))
-        king_bonus = (ph * _pst(PST_KING_MG, c, ks) + (24 - ph) * _pst(PST_KING_EG, c, ks)) ÷ 24
-        score += sign * king_bonus
 
         # Rook on open file (+20) or semi-open file (+10).
         # Open = no pawn of either color on the file; semi-open = no friendly pawn.
@@ -510,6 +499,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     #
     # All terms are weighted by (24 − ph) / 12 so they vanish at full material
     # and reach full strength at bare-king endings.
+    ph = Int(clamp(b.phase, 0, 24))
     if cfg.eval_king_tropism && ph < 20
         eg_weight = 24 - ph   # 4..24
 
@@ -617,6 +607,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
 
     # Knight distance penalty in deep endgames (phase < 10): a knight stranded
     # far from all pawns contributes almost nothing.
+    ph = Int(clamp(b.phase, 0, 24))
     if cfg.eval_knight_distance && ph < 10
         eg_wt = 10 - ph   # 1..10
         all_pawns = bb(b, White, Pawn) | bb(b, Black, Pawn)
@@ -835,20 +826,21 @@ _eval_tempo(b::Board)::Int = b.side == White ? 10 : -10
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 function evaluate(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::EvalBreakdown
-    mat = _eval_material(b)
+    material = b.material
 
-    # Complexity bonus: the trailing side benefits from queens on the board.
+    # Material balance (without PST) for complexity and other terms
+    # (Note: b.material already tracks this incrementally)
     # A queen gives the weaker side mating threats and tactical counterplay that
     # pure rook endings deny.  Discourages the losing side from swapping queens
     # and the winning side from forcing simplification.
     complexity = 0
-    if cfg.eval_complexity && abs(mat) >= 60 &&
+    if cfg.eval_complexity && abs(material) >= 60 &&
        (bb(b, White, Queen) | bb(b, Black, Queen)) != BB(0)
-        complexity = mat < 0 ? 20 : -20   # bonus for the side that is behind
+        complexity = material < 0 ? 20 : -20   # bonus for the side that is behind
     end
 
     EvalBreakdown(
-        mat,
+        Int(material),
         _eval_piece_activity(b, cfg),
         _eval_pawn_structure(b, cfg),
         _eval_king_safety(b, cfg),
