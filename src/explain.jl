@@ -45,13 +45,15 @@ function _piece_name(k::PieceKind)::String
     k == Rook   ? "rook"   : k == Queen  ? "queen"  : k == King   ? "king"   : "piece"
 end
 
-function _describe_material(swing::Int, queen_involved::Bool)::String
+function _describe_material(swing::Int, queen_involved::Bool, rook_involved::Bool)::String
     s = abs(swing)
     s >= 750 && queen_involved ? "the queen" :
     s >= 750                  ? "significant material" :
-    s >= 450                  ? "a rook" :
-    s >= 250                  ? "a piece" :
-    s >= 150                  ? "the exchange" :
+    s >= 450 && rook_involved ? "a rook" :
+    s >= 450                  ? "significant material" :
+    s >= 210                  ? "a piece" :
+    s >= 150 && rook_involved ? "the exchange" :
+    s >= 150                  ? "material" :
     s >=  80                  ? "a pawn" : ""
 end
 
@@ -80,7 +82,148 @@ function _pv_material_swing(pv::Vector{Move}, b::Board)::Int
     net
 end
 
-# ── Attack / fork helpers ──────────────────────────────────────────────────────
+# ── Attack / tactical helpers ──────────────────────────────────────────────────
+
+function _is_slider(k::PieceKind)::Bool
+    k == Bishop || k == Rook || k == Queen
+end
+
+# Find pieces of `pinned_side` that are pinned against their King or Queen.
+# Returns a bitboard of pinned squares.
+function _pinned_mask(b::Board, pinned_side::Color)::BB
+    occ      = all_occ(b)
+    pinned   = BB(0)
+    them     = other(pinned_side)
+    # Pieces that could be the target of a pin (King or Queen)
+    targets  = bb(b, pinned_side, King) | bb(b, pinned_side, Queen)
+
+    for target_sq in BitIter(targets)
+        for s in BitIter(bb(b, them, Rook) | bb(b, them, Queen))
+            sf, sr = file_of(s), rank_of(s)
+            kf, kr = file_of(target_sq), rank_of(target_sq)
+            ray_mask = sf == kf ? FILE_MASK[sf+1] : sr == kr ? RANK_MASK[sr+1] : BB(0)
+            ray_mask == 0 && continue
+            between = _slider_attacks(s, sq_bb(target_sq), ray_mask) &
+                      _slider_attacks(target_sq, sq_bb(s), ray_mask)
+            pieces_between = between & occ
+            if count_bits(pieces_between) == 1 && (pieces_between & b.occ[Int(pinned_side)+1]) != 0
+                pinned |= pieces_between
+            end
+        end
+        for s in BitIter(bb(b, them, Bishop) | bb(b, them, Queen))
+            ray_mask = (DIAG_MASK[s+1] & sq_bb(target_sq)) != 0 ? DIAG_MASK[s+1] :
+                       (ADIAG_MASK[s+1] & sq_bb(target_sq)) != 0 ? ADIAG_MASK[s+1] : BB(0)
+            ray_mask == 0 && continue
+            between = _slider_attacks(s, sq_bb(target_sq), ray_mask) &
+                      _slider_attacks(target_sq, sq_bb(s), ray_mask)
+            pieces_between = between & occ
+            if count_bits(pieces_between) == 1 && (pieces_between & b.occ[Int(pinned_side)+1]) != 0
+                pinned |= pieces_between
+            end
+        end
+    end
+    pinned
+end
+
+# Does move m result in trapping an enemy piece (0 or 1 safe squares)?
+function _is_trapping(b::Board, m::Move)::Bool
+    us   = b.side
+    them = other(us)
+    # Check if any enemy piece (not king) was safe before but is now trapped.
+    # Safe squares = not attacked by our pawns.
+    wp = bb(b, White, Pawn)
+    bp = bb(b, Black, Pawn)
+    w_pawn_atk = ((wp << 7) & ~FILE_MASK[8]) | ((wp << 9) & ~FILE_MASK[1])
+    b_pawn_atk = ((bp >> 9) & ~FILE_MASK[8]) | ((bp >> 7) & ~FILE_MASK[1])
+    our_pawn_atk = us == White ? w_pawn_atk : b_pawn_atk
+
+    function count_safe(b_int, sq, side, p_atk)
+        k = b_int.piece_on[sq+1].kind
+        occ = all_occ(b_int)
+        atk = k == Knight ? knight_attacks(sq) :
+              k == Bishop ? bishop_attacks(sq, occ) :
+              k == Rook   ? rook_attacks(sq, occ) :
+              k == Queen  ? queen_attacks(sq, occ) : BB(0)
+        atk &= ~b_int.occ[Int(side)+1]
+        count_bits(atk & ~p_atk)
+    end
+
+    trapped_before = BB(0)
+    for s in BitIter(b.occ[Int(them)+1] & ~bb(b, them, King))
+        count_safe(b, s, them, our_pawn_atk) <= 1 && (trapped_before |= sq_bb(s))
+    end
+
+    undo = make_move!(b, m)
+    wp2 = bb(b, White, Pawn)
+    bp2 = bb(b, Black, Pawn)
+    w_pawn_atk2 = ((wp2 << 7) & ~FILE_MASK[8]) | ((wp2 << 9) & ~FILE_MASK[1])
+    b_pawn_atk2 = ((bp2 >> 9) & ~FILE_MASK[8]) | ((bp2 >> 7) & ~FILE_MASK[1])
+    our_pawn_atk2 = us == White ? w_pawn_atk2 : b_pawn_atk2
+
+    trapped_after = BB(0)
+    for s in BitIter(b.occ[Int(them)+1] & ~bb(b, them, King))
+        count_safe(b, s, them, our_pawn_atk2) <= 1 && (trapped_after |= sq_bb(s))
+    end
+    unmake_move!(b, m, undo)
+
+    (trapped_after & ~trapped_before) != 0
+end
+
+# Does move m result in any NEW pin of an enemy piece?
+function _is_pinning(b::Board, m::Move)::Bool
+    us   = b.side
+    them = other(us)
+    # Pinned before
+    before = _pinned_mask(b, them)
+    undo   = make_move!(b, m)
+    after  = _pinned_mask(b, them)
+    unmake_move!(b, m, undo)
+    # New pins
+    (after & ~before) != 0
+end
+
+# Does move m reveal a discovered attack from one of our sliders?
+function _is_discovery(b::Board, m::Move)::Bool
+    is_promo(m) && return false # promotion is complex
+    is_castle(m) && return false
+    us   = b.side
+    them = other(us)
+    fr   = from_sq(m)
+    to   = to_sq(m)
+
+    # Sliders of our side that were blocked by the piece at fr
+    occ = all_occ(b)
+    discoverers = BB(0)
+    for s in BitIter(bb(b, us, Rook) | bb(b, us, Bishop) | bb(b, us, Queen))
+        s == fr && continue
+        # If the piece at `fr` was on a ray from `s`
+        ray = (file_of(s) == file_of(fr)) ? FILE_MASK[file_of(s)+1] :
+              (rank_of(s) == rank_of(fr)) ? RANK_MASK[rank_of(s)+1] :
+              (DIAG_MASK[s+1]  & sq_bb(fr)) != 0 ? DIAG_MASK[s+1] :
+              (ADIAG_MASK[s+1] & sq_bb(fr)) != 0 ? ADIAG_MASK[s+1] : BB(0)
+        ray == 0 && continue
+
+        # If fr was the CLOSEST piece to s on that ray
+        between = _slider_attacks(s, sq_bb(fr), ray) & _slider_attacks(fr, sq_bb(s), ray)
+        (between & occ) == 0 || continue
+
+        # Now check if moving the piece at fr reveals an attack on something valuable
+        # We check if the slider `s` now attacks anything it didn't before.
+        # Simplest check: does the slider now attack an enemy piece?
+        undo = make_move!(b, m)
+        new_occ = all_occ(b)
+        atk = _is_slider(b.piece_on[s+1].kind) ? (
+            b.piece_on[s+1].kind == Rook ? rook_attacks(s, new_occ) :
+            b.piece_on[s+1].kind == Bishop ? bishop_attacks(s, new_occ) :
+            queen_attacks(s, new_occ)
+        ) : BB(0)
+
+        discovered = (atk & b.occ[Int(them)+1]) != 0
+        unmake_move!(b, m, undo)
+        discovered && return true
+    end
+    false
+end
 
 # Reverse-lookup: does any piece of `defender` attack `sq`?
 # Uses the symmetry of attack sets: a square S attacked by a knight iff a
@@ -172,6 +315,10 @@ function _key_move_concept(b::Board, m::Move, our_k::PieceKind,
     length(forks) >= 2 &&
         return "fork the $(_piece_name(forks[1][1])) and $(_piece_name(forks[2][1]))"
 
+    _is_pinning(b, m)   && return "pin your piece"
+    _is_discovery(b, m) && return "set up a discovered attack"
+    _is_trapping(b, m)  && return "trap one of your pieces"
+
     if (fl & MF_CAPTURE) != 0 || fl == MF_EP
         cap_k    = fl == MF_EP ? Pawn : b.piece_on[to_sq(m)+1].kind
         cap_val  = PIECE_VALUE[Int(cap_k)+1]
@@ -189,7 +336,10 @@ function _key_move_concept(b::Board, m::Move, our_k::PieceKind,
             net = cap_val - our_val
             if net >= 80
                 any_queen = (bb(b, White, Queen) | bb(b, Black, Queen)) != BB(0)
-                what = _describe_material(net, any_queen)
+                any_rook  = (bb(b, White, Rook)  | bb(b, Black, Rook))  != BB(0)
+                # In a recapture, we know exactly which pieces were involved.
+                rook_involved = cap_k == Rook || our_k == Rook
+                what = _describe_material(net, any_queen, rook_involved)
                 !isempty(what) && return "win $what"
             end
         end
@@ -205,9 +355,12 @@ end
 function _find_key_pv_moment(pv::Vector{Move}, b::Board,
                               my_color::Color)::Union{Nothing,Tuple{String,Vector{Move}}}
     length(pv) < 3 && return nothing
+    # Limit lookahead: PV becomes increasingly unreliable after 2-3 full moves.
+    # We check only up to pv[5] (our next two moves).
+    limit = min(length(pv), 5)
     undos  = UndoInfo[]
     result = nothing
-    for i in 2:length(pv)
+    for i in 2:limit
         m = pv[i]
         if isodd(i)   # pv[3], pv[5], … — our moves after each opponent reply
             # Skip recaptures: if the opponent's previous move was itself a capture
@@ -379,13 +532,17 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
     end
 
     if genuinely_winning || genuinely_losing
-        # Check if a queen is actually captured or lost in the PV.
+        # Check if a queen or rook is actually captured or lost in the PV.
         pv_queen = false
+        pv_rook  = false
         undos_pv = UndoInfo[]
         for m_pv in result.pv
-            if (is_capture(m_pv) && b.piece_on[to_sq(m_pv)+1].kind == Queen) ||
-               (is_promo(m_pv) && promo_kind(m_pv) == Queen)
+            pk = b.piece_on[to_sq(m_pv)+1].kind
+            if (is_capture(m_pv) && pk == Queen) || (is_promo(m_pv) && promo_kind(m_pv) == Queen)
                 pv_queen = true
+            end
+            if (is_capture(m_pv) && pk == Rook) || (is_promo(m_pv) && promo_kind(m_pv) == Rook)
+                pv_rook = true
             end
             push!(undos_pv, make_move!(b, m_pv))
         end
@@ -396,12 +553,12 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
         if length(forks) >= 2
             n1   = _piece_name(forks[1][1])
             n2   = _piece_name(forks[2][1])
-            what = _describe_material(swing, pv_queen)
+            what = _describe_material(swing, pv_queen, pv_rook)
             return "I played $our_san — forking your $n1 and $n2, winning $what. $note"
         end
 
         # 2b. Non-fork material gain / loss.
-        what = _describe_material(swing, pv_queen)
+        what = _describe_material(swing, pv_queen, pv_rook)
         if genuinely_winning
             return "I played $our_san — winning $what. $note"
         else
@@ -414,7 +571,35 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
         end
     end
 
-    # ── 3. Positional improvements ─────────────────────────────────────────────
+    # ── 4. Tactical / Immediate ───────────────────────────────────────────────
+    # These take priority over general positional improvements when no material
+    # is immediately won/lost.
+
+    # Escaping a pin
+    pinned_before = _pinned_mask(b, my_color)
+    if (sq_bb(our_fr) & pinned_before) != 0
+        undo = make_move!(b, result.move)
+        pinned_after = _pinned_mask(b, my_color)
+        is_free = (sq_bb(to_sq(result.move)) & pinned_after) == 0
+        unmake_move!(b, result.move, undo)
+        if is_free
+            return "I played $our_san — escaping the pin on my $(_piece_name(our_k)). $note"
+        end
+    end
+
+    if _is_discovery(b, result.move)
+        return "I played $our_san — revealing a discovered attack. $note"
+    end
+
+    if _is_pinning(b, result.move)
+        return "I played $our_san — pinning your piece. $note"
+    end
+
+    if _is_trapping(b, result.move)
+        return "I played $our_san — trapping your piece. $note"
+    end
+
+    # ── 5. Positional improvements ─────────────────────────────────────────────
     # Compare the static eval breakdown before and after the move to identify
     # what specifically improved.  Named structural patterns are reported only
     # when the relevant eval term confirms the gain; the largest term leads.
@@ -430,9 +615,10 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
     dst  = to_sq(result.move)
 
     # Deltas from our side's perspective (positive = we improved).
-    Δact  = sgn * (e2.piece_activity - e.piece_activity)
-    Δpawn = sgn * (e2.pawn_structure - e.pawn_structure)
-    Δking = sgn * (e2.king_safety    - e.king_safety)
+    Δact   = sgn * (e2.piece_activity - e.piece_activity)
+    Δpawn  = sgn * (e2.pawn_structure - e.pawn_structure)
+    Δking  = sgn * (e2.king_safety    - e.king_safety)
+    Δspace = sgn * (e2.space          - e.space)
 
     # Structural patterns — checked only for the relevant piece type,
     # and only when the corresponding eval term shows improvement.
@@ -527,14 +713,21 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
     else
         # Eval-delta fallback: name the largest improving term.
         parts = Tuple{Int,String}[]
-        Δact  >=  8 && push!(parts, (Δact,       "improving my piece activity"))
-        Δpawn >=  8 && push!(parts, (Δpawn,       "strengthening my pawn structure"))
-        Δpawn <= -8 && push!(parts, (abs(Δpawn),  "weakening your pawn structure"))
-        Δking >=  8 && push!(parts, (Δking,       "improving my king safety"))
+        Δact   >=  8 && push!(parts, (Δact,        "improving my piece activity"))
+        Δpawn  >=  8 && push!(parts, (Δpawn,       "strengthening my pawn structure"))
+        Δpawn  <= -8 && push!(parts, (abs(Δpawn),  "weakening your pawn structure"))
+        Δking  >=  8 && push!(parts, (Δking,       "improving my king safety"))
+        Δspace >=  8 && push!(parts, (Δspace,      "gaining more space for my pieces"))
         sort!(parts; by = first, rev = true)
-        isempty(parts) ? "keeping the position solid" :
-        length(parts) == 1 ? parts[1][2] :
-        "$(parts[1][2]) and $(parts[2][2])"
+
+        if isempty(parts)
+            # Differentiate "solid" by piece type
+            our_k == Pawn ? "keeping my pawn structure solid" : "keeping the position solid"
+        elseif length(parts) == 1
+            parts[1][2]
+        else
+            "$(parts[1][2]) and $(parts[2][2])"
+        end
     end
 
     full_concept = if km_str !== nothing
@@ -685,8 +878,11 @@ function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::St
     end
 
     # ── Play through PV; collect endpoint snapshots ────────────────────────────
+    # Limit lookahead: positional changes are only reliable for the first few moves.
+    limit = min(length(result.pv), 6)
     undos = UndoInfo[]
-    for m in result.pv
+    for i in 1:limit
+        m = result.pv[i]
         push!(undos, make_move!(b, m))
     end
 
@@ -702,9 +898,11 @@ function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::St
     ep_dp         = _doubled_files(b, them)
     ep_them_queen = bb(b, them,     Queen) != BB(0)
     ep_we_queen   = bb(b, my_color, Queen) != BB(0)
+    ep_them_rooks = count_bits(bb(b, them, Rook))
+    ep_we_rooks   = count_bits(bb(b, my_color, Rook))
 
     # ── Restore to root; collect root snapshots ────────────────────────────────
-    for i in length(result.pv):-1:1
+    for i in limit:-1:1
         unmake_move!(b, result.pv[i], undos[i])
     end
 
@@ -715,17 +913,21 @@ function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::St
     rp_bpair = count_bits(bb(b, my_color, Bishop)) >= 2
     rp_ok    = _open_files_near_king(b, them)
     rp_dp    = _doubled_files(b, them)
+    rp_them_rooks = count_bits(bb(b, them, Rook))
+    rp_we_rooks   = count_bits(bb(b, my_color, Rook))
 
     # ── Material delta ─────────────────────────────────────────────────────────
     Δmat           = sgn * (e_end.material - e_root.material)
     them_has_queen = bb(b, them,     Queen) != BB(0)
     we_have_queen  = bb(b, my_color, Queen) != BB(0)
-    # Only label "the queen" when a queen actually changed hands during the PV.
-    # Without this check, winning two rooks (≥850 cp) would also say "the queen."
+    # Only label "the queen/rook" when they actually changed hands during the PV.
     queen_won  = them_has_queen && !ep_them_queen
     queen_lost = we_have_queen  && !ep_we_queen
-    mat_gain   = Δmat >= 80  ? _describe_material(Δmat,  queen_won)  : ""
-    mat_loss   = Δmat <= -80 ? _describe_material(Δmat, queen_lost) : ""
+    rook_won   = ep_them_rooks < rp_them_rooks
+    rook_lost  = ep_we_rooks < rp_we_rooks
+
+    mat_gain   = Δmat >= 80  ? _describe_material(Δmat,  queen_won,  rook_won)  : ""
+    mat_loss   = Δmat <= -80 ? _describe_material(Δmat, queen_lost, rook_lost) : ""
 
     # ── Named structural changes (sorted by chess importance) ─────────────────
     # Each entry is (priority::Int, text::String); lower priority = report first.
