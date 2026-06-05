@@ -126,16 +126,48 @@ end
 
 @inline function _remove_piece!(b::Board, c::Color, k::PieceKind, s::Square)
     mask = sq_bb(s)
-    b.bb[Int(c)+1, Int(k)] &= ~mask
-    b.occ[Int(c)+1]        &= ~mask
-    b.piece_on[s+1]         = NO_PIECE
+    b.bb[Int(c)+1, Int(k)+1] &= ~mask
+    b.occ[Int(c)+1]          &= ~mask
+    b.piece_on[s+1]           = NO_PIECE
+
+    # Incremental eval
+    mg = MG_TABLE[Int(c)+1, Int(k)+1, s+1]
+    eg = EG_TABLE[Int(c)+1, Int(k)+1, s+1]
+    v  = k == King ? 0 : PIECE_VALUE[Int(k)+1]
+
+    if c == White
+        b.mg_score -= mg
+        b.eg_score -= eg
+        b.material -= v
+    else
+        b.mg_score += mg
+        b.eg_score += eg
+        b.material += v
+    end
+    b.phase -= PHASE_TABLE[Int(k)+1]
 end
 
 @inline function _add_piece!(b::Board, c::Color, k::PieceKind, s::Square)
     mask = sq_bb(s)
-    b.bb[Int(c)+1, Int(k)] |= mask
-    b.occ[Int(c)+1]        |= mask
-    b.piece_on[s+1]         = Piece(c, k)
+    b.bb[Int(c)+1, Int(k)+1] |= mask
+    b.occ[Int(c)+1]          |= mask
+    b.piece_on[s+1]           = Piece(c, k)
+
+    # Incremental eval
+    mg = MG_TABLE[Int(c)+1, Int(k)+1, s+1]
+    eg = EG_TABLE[Int(c)+1, Int(k)+1, s+1]
+    v  = k == King ? 0 : PIECE_VALUE[Int(k)+1]
+
+    if c == White
+        b.mg_score += mg
+        b.eg_score += eg
+        b.material += v
+    else
+        b.mg_score -= mg
+        b.eg_score -= eg
+        b.material -= v
+    end
+    b.phase += PHASE_TABLE[Int(k)+1]
 end
 
 # Castling-right loss mask per square: ANDed into b.castling after each move.
@@ -361,10 +393,51 @@ end
 # a write pointer.  Avoids a second allocation and keeps the MoveList self-
 # contained.
 function _filter_legal!(ml::MoveList, b::Board)
-    us = b.side
+    us = b.side; them = other(us)
     write_idx = 0
+    in_check = king_in_check(b, us)
+
+    # Pre-calculate pin mask for more efficient legality filtering.
+    # A piece is pinned if removing it from a ray through our king reveals an
+    # attack from an enemy slider on the same ray.
+    ks      = lsb(bb(b, us, King))
+    occ     = all_occ(b)
+    pin_mask = BB(0)
+
+    # Rooks/Queens on files/ranks
+    for s in BitIter(bb(b, them, Rook) | bb(b, them, Queen))
+        sf = file_of(s); sr = rank_of(s); kf = file_of(ks); kr = rank_of(ks)
+        if sf == kf || sr == kr
+            ray = sf == kf ? FILE_MASK[sf+1] : RANK_MASK[sr+1]
+            between = _slider_attacks(s, sq_bb(ks), ray) & _slider_attacks(ks, sq_bb(s), ray)
+            if count_bits(between & occ) == 1 && (between & b.occ[Int(us)+1]) != 0
+                pin_mask |= (between & b.occ[Int(us)+1])
+            end
+        end
+    end
+    # Bishops/Queens on diagonals
+    for s in BitIter(bb(b, them, Bishop) | bb(b, them, Queen))
+        if (DIAG_MASK[s+1] & sq_bb(ks)) != 0 || (ADIAG_MASK[s+1] & sq_bb(ks)) != 0
+            ray = (DIAG_MASK[s+1] & sq_bb(ks)) != 0 ? DIAG_MASK[s+1] : ADIAG_MASK[s+1]
+            between = _slider_attacks(s, sq_bb(ks), ray) & _slider_attacks(ks, sq_bb(s), ray)
+            if count_bits(between & occ) == 1 && (between & b.occ[Int(us)+1]) != 0
+                pin_mask |= (between & b.occ[Int(us)+1])
+            end
+        end
+    end
+
     for i in 1:ml.count[]
         m = ml.moves[i]
+        fr = from_sq(m); fl = flags(m)
+
+        # Most moves are legal if we aren't in check and the piece isn't pinned.
+        # Exceptions: king moves and en-passant (which can reveal a check on the rank).
+        if !in_check && (sq_bb(fr) & pin_mask) == 0 && b.piece_on[fr+1].kind != King && fl != MF_EP
+            write_idx += 1
+            ml.moves[write_idx] = m
+            continue
+        end
+
         undo = make_move!(b, m)
         legal = !king_in_check(b, us)
         unmake_move!(b, m, undo)
