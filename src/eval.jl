@@ -329,6 +329,13 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     # Tapered PST score
     score = (ph * Int(b.mg_score) + (24 - ph) * Int(b.eg_score)) ÷ 24
     occ   = all_occ(b)
+
+    # Pawn attack bitboards for mobility safety checks
+    wp = bb(b, White, Pawn)
+    bp = bb(b, Black, Pawn)
+    w_pawn_atk = ((wp << 7) & ~FILE_MASK[8]) | ((wp << 9) & ~FILE_MASK[1])
+    b_pawn_atk = ((bp >> 9) & ~FILE_MASK[8]) | ((bp >> 7) & ~FILE_MASK[1])
+
     for c in (White, Black)
         sign        = c == White ? 1 : -1
         my_pawns    = bb(b, c, Pawn)
@@ -410,19 +417,41 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
 
     if cfg.eval_mobility
         for c in (White, Black)
-            sign    = c == White ? 1 : -1
-            our_occ = b.occ[Int(c)+1]
+            sign      = c == White ? 1 : -1
+            our_occ   = b.occ[Int(c)+1]
+            their_atk = c == White ? b_pawn_atk : w_pawn_atk
+
             for s in BitIter(bb(b, c, Knight))
-                score += sign * count_bits(knight_attacks(s) & ~our_occ) * 5
+                atk  = knight_attacks(s) & ~our_occ
+                safe = count_bits(atk & ~their_atk)
+                unsf = count_bits(atk &  their_atk)
+                score += sign * (safe * 6 + unsf * 2)
+                # Trapped knight penalty
+                safe == 0 && (score -= sign * 100)
+                safe == 1 && (score -= sign * 50)
             end
             for s in BitIter(bb(b, c, Bishop))
-                score += sign * count_bits(bishop_attacks(s, occ) & ~our_occ) * 4
+                atk  = bishop_attacks(s, occ) & ~our_occ
+                safe = count_bits(atk & ~their_atk)
+                unsf = count_bits(atk &  their_atk)
+                score += sign * (safe * 5 + unsf * 2)
+                # Trapped bishop penalty
+                safe == 0 && (score -= sign * 100)
+                safe == 1 && (score -= sign * 50)
             end
             for s in BitIter(bb(b, c, Rook))
-                score += sign * count_bits(rook_attacks(s, occ) & ~our_occ) * 3
+                atk  = rook_attacks(s, occ) & ~our_occ
+                safe = count_bits(atk & ~their_atk)
+                unsf = count_bits(atk &  their_atk)
+                score += sign * (safe * 4 + unsf * 1)
+                # Trapped rook penalty (e.g. cornered by pawns)
+                safe == 0 && (score -= sign * 100)
             end
             for s in BitIter(bb(b, c, Queen))
-                score += sign * count_bits(queen_attacks(s, occ) & ~our_occ) * 2
+                atk  = queen_attacks(s, occ) & ~our_occ
+                safe = count_bits(atk & ~their_atk)
+                unsf = count_bits(atk &  their_atk)
+                score += sign * (safe * 2 + unsf * 1)
             end
         end
     end
