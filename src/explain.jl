@@ -42,7 +42,17 @@ end
 
 function _piece_name(k::PieceKind)::String
     k == Pawn   ? "pawn"   : k == Knight ? "knight" : k == Bishop ? "bishop" :
-    k == Rook   ? "rook"   : k == Queen  ? "queen"  : "piece"
+    k == Rook   ? "rook"   : k == Queen  ? "queen"  : k == King   ? "king"   : "piece"
+end
+
+function _describe_material(swing::Int, queen_involved::Bool)::String
+    s = abs(swing)
+    s >= 750 && queen_involved ? "the queen" :
+    s >= 750                  ? "significant material" :
+    s >= 450                  ? "a rook" :
+    s >= 250                  ? "a piece" :
+    s >= 150                  ? "the exchange" :
+    s >=  80                  ? "a pawn" : ""
 end
 
 # ── Material swing over the PV ────────────────────────────────────────────────
@@ -154,17 +164,34 @@ end
 # What does move m achieve on board b (before the move)?
 # Returns a short phrase or "" if nothing noteworthy.
 function _key_move_concept(b::Board, m::Move, our_k::PieceKind,
-                            our_val::Int, my_color::Color)::String
+                            our_val::Int, my_color::Color;
+                            next_m::Union{Move, Nothing} = nothing)::String
     fl = flags(m)
     (fl & MF_PROMO) != 0 && return "promote to a queen"
     forks = _fork_targets(b, m, our_val)
     length(forks) >= 2 &&
         return "fork the $(_piece_name(forks[1][1])) and $(_piece_name(forks[2][1]))"
+
     if (fl & MF_CAPTURE) != 0 || fl == MF_EP
-        cap_k   = fl == MF_EP ? Pawn : b.piece_on[to_sq(m)+1].kind
-        cap_val = PIECE_VALUE[Int(cap_k)+1]
-        if cap_val > our_val || !_is_defended(b, to_sq(m), other(my_color))
-            return "win the $(_piece_name(cap_k))"
+        cap_k    = fl == MF_EP ? Pawn : b.piece_on[to_sq(m)+1].kind
+        cap_val  = PIECE_VALUE[Int(cap_k)+1]
+        is_recap = next_m !== nothing &&
+                   (is_capture(next_m) || is_ep(next_m)) &&
+                   to_sq(next_m) == to_sq(m)
+
+        if !is_recap
+            if cap_val > our_val || !_is_defended(b, to_sq(m), other(my_color))
+                return "win the $(_piece_name(cap_k))"
+            end
+        else
+            # A recapture follows: determine if the net exchange is favorable.
+            # (Note: b is the board before m).
+            net = cap_val - our_val
+            if net >= 80
+                any_queen = (bb(b, White, Queen) | bb(b, Black, Queen)) != BB(0)
+                what = _describe_material(net, any_queen)
+                !isempty(what) && return "win $what"
+            end
         end
     end
     ""
@@ -192,7 +219,8 @@ function _find_key_pv_moment(pv::Vector{Move}, b::Board,
             if !is_recap
                 our_k   = b.piece_on[from_sq(m)+1].kind
                 our_val = PIECE_VALUE[Int(our_k)+1]
-                concept = _key_move_concept(b, m, our_k, our_val, my_color)
+                next_m  = i < length(pv) ? pv[i+1] : nothing
+                concept = _key_move_concept(b, m, our_k, our_val, my_color; next_m)
                 if !isempty(concept)
                     result = (concept, pv[2:i])
                     break
@@ -351,24 +379,29 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
     end
 
     if genuinely_winning || genuinely_losing
+        # Check if a queen is actually captured or lost in the PV.
+        pv_queen = false
+        undos_pv = UndoInfo[]
+        for m_pv in result.pv
+            if (is_capture(m_pv) && b.piece_on[to_sq(m_pv)+1].kind == Queen) ||
+               (is_promo(m_pv) && promo_kind(m_pv) == Queen)
+                pv_queen = true
+            end
+            push!(undos_pv, make_move!(b, m_pv))
+        end
+        for i in length(undos_pv):-1:1; unmake_move!(b, result.pv[i], undos_pv[i]); end
+
         # 2a. Fork check: do we simultaneously threaten 2+ profitable targets?
         forks = _fork_targets(b, result.move, our_val)
-        any_queen = (bb(b, White, Queen) | bb(b, Black, Queen)) != BB(0)
         if length(forks) >= 2
-            n1 = _piece_name(forks[1][1])
-            n2 = _piece_name(forks[2][1])
-            what = swing >= 800 && any_queen ? "the queen" :
-                   swing >= 800              ? "significant material" :
-                   swing >= 450              ? "the rook" :
-                   swing >= 270              ? "a piece"  : "a pawn"
+            n1   = _piece_name(forks[1][1])
+            n2   = _piece_name(forks[2][1])
+            what = _describe_material(swing, pv_queen)
             return "I played $our_san — forking your $n1 and $n2, winning $what. $note"
         end
 
         # 2b. Non-fork material gain / loss.
-        what = abs(swing) >= 800 && any_queen ? "the queen" :
-               abs(swing) >= 800              ? "significant material" :
-               abs(swing) >= 450              ? "the rook" :
-               abs(swing) >= 270              ? "a piece"  : "a pawn"
+        what = _describe_material(swing, pv_queen)
         if genuinely_winning
             return "I played $our_san — winning $what. $note"
         else
@@ -684,29 +717,15 @@ function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::St
     rp_dp    = _doubled_files(b, them)
 
     # ── Material delta ─────────────────────────────────────────────────────────
-    Δmat          = sgn * (e_end.material - e_root.material)
+    Δmat           = sgn * (e_end.material - e_root.material)
     them_has_queen = bb(b, them,     Queen) != BB(0)
     we_have_queen  = bb(b, my_color, Queen) != BB(0)
     # Only label "the queen" when a queen actually changed hands during the PV.
     # Without this check, winning two rooks (≥850 cp) would also say "the queen."
     queen_won  = them_has_queen && !ep_them_queen
     queen_lost = we_have_queen  && !ep_we_queen
-    mat_gain = if     Δmat >=  850 && queen_won; "the queen"
-               elseif Δmat >=  850;              "significant material"
-               elseif Δmat >=  450; "a rook"
-               elseif Δmat >=  250; "a piece"
-               elseif Δmat >=  150; "the exchange"
-               elseif Δmat >=   80; "a pawn"
-               else                  ""
-               end
-    mat_loss = if     Δmat <= -850 && queen_lost; "the queen"
-               elseif Δmat <= -850;               "significant material"
-               elseif Δmat <= -450; "a rook"
-               elseif Δmat <= -250; "a piece"
-               elseif Δmat <= -150; "the exchange"
-               elseif Δmat <=  -80; "a pawn"
-               else                  ""
-               end
+    mat_gain   = Δmat >= 80  ? _describe_material(Δmat,  queen_won)  : ""
+    mat_loss   = Δmat <= -80 ? _describe_material(Δmat, queen_lost) : ""
 
     # ── Named structural changes (sorted by chess importance) ─────────────────
     # Each entry is (priority::Int, text::String); lower priority = report first.
