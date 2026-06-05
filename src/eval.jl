@@ -6,19 +6,15 @@ const PIECE_VALUE = (0, 100, 320, 330, 500, 900, 20_000)
 
 # ── Piece-square tables ────────────────────────────────────────────────────────
 # 64 entries written rank-8 → rank-1, file-a → file-h (visual board order).
-# We pre-compute these into MG_TABLE and EG_TABLE for both colors, including
-# the base piece value. This allows incremental updates during make/unmake.
+# We pre-compute these into MG_TABLE and EG_TABLE for both colors.
+# These tables store ONLY PST values (no base piece values).
 
 const MG_TABLE = zeros(Int32, 2, 7, 64)
 const EG_TABLE = zeros(Int32, 2, 7, 64)
-# PHASE_TABLE mapping: NoPiece=0, Pawn=0, Knight=1, Bishop=1, Rook=2, Queen=4, King=0
-const PHASE_TABLE = Int16[0, 0, 1, 1, 2, 4, 0]
 
 function _init_eval!()
     for c in (White, Black)
         for k in (Pawn, Knight, Bishop, Rook, Queen, King)
-            # Standard material value excluding King's 20,000 to keep scores small
-            v = k == King ? 0 : PIECE_VALUE[Int(k)+1]
             mg_pst = if k == Pawn; PST_PAWN_MG
                 elseif k == Knight; PST_KNIGHT_MG
                 elseif k == Bishop; PST_BISHOP_MG
@@ -38,8 +34,8 @@ function _init_eval!()
                 # Mirroring logic from original _pst
                 idx = c == White ? (7 - rank_of(s)) * 8 + file_of(s) + 1 :
                                         rank_of(s)  * 8 + file_of(s) + 1
-                MG_TABLE[Int(c)+1, Int(k)+1, s+1] = v + mg_pst[idx]
-                EG_TABLE[Int(c)+1, Int(k)+1, s+1] = v + eg_pst[idx]
+                MG_TABLE[Int(c)+1, Int(k)+1, s+1] = Int32(mg_pst[idx])
+                EG_TABLE[Int(c)+1, Int(k)+1, s+1] = Int32(eg_pst[idx])
             end
         end
     end
@@ -309,7 +305,7 @@ total(e::EvalBreakdown)::Int =
 
 function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     ph = Int(clamp(b.phase, 0, 24))
-    # score now includes material (excluding King) + tapered PST
+    # Tapered PST score
     score = (ph * Int(b.mg_score) + (24 - ph) * Int(b.eg_score)) ÷ 24
     occ   = all_occ(b)
     for c in (White, Black)
@@ -499,7 +495,6 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     #
     # All terms are weighted by (24 − ph) / 12 so they vanish at full material
     # and reach full strength at bare-king endings.
-    ph = Int(clamp(b.phase, 0, 24))
     if cfg.eval_king_tropism && ph < 20
         eg_weight = 24 - ph   # 4..24
 
@@ -607,7 +602,6 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
 
     # Knight distance penalty in deep endgames (phase < 10): a knight stranded
     # far from all pawns contributes almost nothing.
-    ph = Int(clamp(b.phase, 0, 24))
     if cfg.eval_knight_distance && ph < 10
         eg_wt = 10 - ph   # 1..10
         all_pawns = bb(b, White, Pawn) | bb(b, Black, Pawn)
@@ -826,6 +820,7 @@ _eval_tempo(b::Board)::Int = b.side == White ? 10 : -10
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 function evaluate(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::EvalBreakdown
+    ph = Int(clamp(b.phase, 0, 24))
     material = b.material
 
     # Material balance (without PST) for complexity and other terms

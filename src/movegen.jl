@@ -126,9 +126,9 @@ end
 
 @inline function _remove_piece!(b::Board, c::Color, k::PieceKind, s::Square)
     mask = sq_bb(s)
-    b.bb[Int(c)+1, Int(k)] &= ~mask
-    b.occ[Int(c)+1]        &= ~mask
-    b.piece_on[s+1]         = NO_PIECE
+    b.bb[Int(c)+1, Int(k)+1] &= ~mask
+    b.occ[Int(c)+1]          &= ~mask
+    b.piece_on[s+1]           = NO_PIECE
 
     # Incremental eval
     mg = MG_TABLE[Int(c)+1, Int(k)+1, s+1]
@@ -149,9 +149,9 @@ end
 
 @inline function _add_piece!(b::Board, c::Color, k::PieceKind, s::Square)
     mask = sq_bb(s)
-    b.bb[Int(c)+1, Int(k)] |= mask
-    b.occ[Int(c)+1]        |= mask
-    b.piece_on[s+1]         = Piece(c, k)
+    b.bb[Int(c)+1, Int(k)+1] |= mask
+    b.occ[Int(c)+1]          |= mask
+    b.piece_on[s+1]           = Piece(c, k)
 
     # Incremental eval
     mg = MG_TABLE[Int(c)+1, Int(k)+1, s+1]

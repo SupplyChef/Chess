@@ -2,6 +2,10 @@
 const BB = UInt64          # one bitboard
 const Square = Int         # 0-based: a1=0 … h8=63
 
+# Game phase weights: Pawn=0, Knight=1, Bishop=1, Rook=2, Queen=4, King=0
+# Indexed by Int(kind)+1
+const PHASE_TABLE = Int16[0, 0, 1, 1, 2, 4, 0]
+
 # ── Colors ─────────────────────────────────────────────────────────────────────
 @enum Color White = 0 Black = 1
 
@@ -145,8 +149,8 @@ end
 
 @inline all_occ(b::Board) = b.occ[1] | b.occ[2]
 
-@inline bb(b::Board, c::Color, k::PieceKind) = b.bb[Int(c)+1, Int(k)]
-@inline set_bb!(b::Board, c::Color, k::PieceKind, v::BB) = (b.bb[Int(c)+1, Int(k)] = v)
+@inline bb(b::Board, c::Color, k::PieceKind) = b.bb[Int(c)+1, Int(k)+1]
+@inline set_bb!(b::Board, c::Color, k::PieceKind, v::BB) = (b.bb[Int(c)+1, Int(k)+1] = v)
 
 # ── Castling right constants ────────────────────────────────────────────────────
 const CR_WK = 0x1

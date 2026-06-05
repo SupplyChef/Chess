@@ -25,6 +25,22 @@ function _place_piece!(b::Board, c::Color, k::PieceKind, s::Square)
     set_bb!(b, c, k, bb(b, c, k) | mask)
     b.occ[Int(c)+1] |= mask
     b.piece_on[s+1] = Piece(c, k)
+
+    # Incremental eval
+    mg = MG_TABLE[Int(c)+1, Int(k)+1, s+1]
+    eg = EG_TABLE[Int(c)+1, Int(k)+1, s+1]
+    v  = k == King ? 0 : PIECE_VALUE[Int(k)+1]
+
+    if c == White
+        b.mg_score += mg
+        b.eg_score += eg
+        b.material += v
+    else
+        b.mg_score -= mg
+        b.eg_score -= eg
+        b.material -= v
+    end
+    b.phase += PHASE_TABLE[Int(k)+1]
 end
 
 function board_from_fen(fen::AbstractString)::Board
