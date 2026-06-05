@@ -217,6 +217,27 @@ const (_PASSED_W, _PASSED_B) = _build_passed_masks()
 @inline _is_passed(s::Square, c::Color, enemy_pawns::BB)::Bool =
     (c == White ? _PASSED_W[s+1] : _PASSED_B[s+1]) & enemy_pawns == 0
 
+# ── Backward pawn masks ────────────────────────────────────────────────────────
+# A pawn is "backward" if it has no friendly pawns on adjacent files at the same
+# or earlier ranks, and its advance square is controlled by an enemy pawn.
+# These masks cover the "support zone": adjacent files at the same or earlier ranks.
+function _build_backward_masks()
+    wm = zeros(BB, 64)
+    bm = zeros(BB, 64)
+    for s in 0:63
+        f = file_of(s); r = rank_of(s)
+        adj_files = (f > 0 ? FILE_MASK[f] : BB(0)) | (f < 7 ? FILE_MASK[f+2] : BB(0))
+        for rank in 0:r
+            wm[s+1] |= (adj_files & RANK_MASK[rank+1])
+        end
+        for rank in r:7
+            bm[s+1] |= (adj_files & RANK_MASK[rank+1])
+        end
+    end
+    wm, bm
+end
+const (_BACKWARD_W, _BACKWARD_B) = _build_backward_masks()
+
 # Bonus in centipawns for a passed pawn based on how far advanced it is.
 # Indexed by rank_of(s)+1 (1=rank1 … 8=rank8); ranks 1 and 8 unused for pawns.
 # Growth is intentionally steep: a pawn on rank 7 is one move from a queen
@@ -688,6 +709,18 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 ocb_only && (bonus = bonus ÷ 2)
                 score += sign * bonus
                 passed_bb |= sq_bb(s)
+            else
+                # Backward pawn detection: no friendly pawns in the support zone,
+                # and the square in front is attacked by an enemy pawn.
+                support_mask = c == White ? _BACKWARD_W[s+1] : _BACKWARD_B[s+1]
+                if (pawns & support_mask) == 0
+                    fwd_sq = c == White ? s + 8 : s - 8
+                    if 0 <= fwd_sq <= 63
+                        if (pawn_attacks(fwd_sq, c) & enemy_pawns) != 0
+                            score += sign * (-15)
+                        end
+                    end
+                end
             end
         end
 
@@ -722,7 +755,17 @@ end
 # a centralised king in the middlegame is already penalised by PST_KING_MG and
 # the shield geometry doesn't apply.
 function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
+    # Game phase: 24 = full material, 0 = king+pawns only.
+    ph = 0
+    for c in (White, Black)
+        ph += count_bits(bb(b, c, Knight)) + count_bits(bb(b, c, Bishop))
+        ph += 2 * count_bits(bb(b, c, Rook))
+        ph += 4 * count_bits(bb(b, c, Queen))
+    end
+    ph = min(ph, 24)
+
     score = 0
+    occ   = all_occ(b)
     for c in (White, Black)
         sign     = c == White ? 1 : -1
         ks       = lsb(bb(b, c, King))
@@ -730,7 +773,46 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         their_ks = lsb(bb(b, other(c), King))
         their_kf = file_of(their_ks)
         pawns    = bb(b, c, Pawn)
+        them     = other(c)
         fwd      = c == White ? 1 : -1
+
+        # ── 1. King Zone attacks ──────────────────────────────────────────────
+        # Penalise the side whose king's surrounding squares are heavily
+        # attacked by enemy pieces.  This is a proxy for attacking pressure.
+        # We count how many enemy pieces (excluding pawns/king) attack any
+        # square in the 3x3 zone around our king.
+        if ph >= 8
+            king_zone = king_attacks(ks) | sq_bb(ks)
+            enemy_atk_count  = 0
+            enemy_atk_weight = 0
+
+            for s in BitIter(bb(b, them, Knight))
+                if (knight_attacks(s) & king_zone) != 0
+                    enemy_atk_count += 1; enemy_atk_weight += 2
+                end
+            end
+            for s in BitIter(bb(b, them, Bishop))
+                if (bishop_attacks(s, occ) & king_zone) != 0
+                    enemy_atk_count += 1; enemy_atk_weight += 2
+                end
+            end
+            for s in BitIter(bb(b, them, Rook))
+                if (rook_attacks(s, occ) & king_zone) != 0
+                    enemy_atk_count += 1; enemy_atk_weight += 3
+                end
+            end
+            for s in BitIter(bb(b, them, Queen))
+                if (queen_attacks(s, occ) & king_zone) != 0
+                    enemy_atk_count += 1; enemy_atk_weight += 5
+                end
+            end
+
+            if enemy_atk_count >= 2
+                # Scale by phase: full strength at ph=24, vanishes at ph=0.
+                penalty = (enemy_atk_weight * enemy_atk_count * ph) ÷ 24
+                score -= sign * penalty
+            end
+        end
 
         if kf <= 2 || kf >= 5
             # King has castled — evaluate pawn shield and open-file penalties.

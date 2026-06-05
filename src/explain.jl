@@ -282,6 +282,74 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
     genuinely_winning = swing >=  90 && !is_recap
     genuinely_losing  = swing <= -90 && result.score <= -60 && !is_recap
 
+    # ── 3. Defense / Removing the Defender ──────────────────────────────────────
+    if !is_recap && last_opp_move !== nothing
+        opp_fr = from_sq(last_opp_move)
+        opp_to = to_sq(last_opp_move)
+        opp_k  = b.piece_on[opp_to+1].kind
+
+        # Did the opponent just attack something?
+        occ_before = all_occ(b)
+        atk_before = let k = opp_k
+            k == Pawn   ? pawn_attacks(opp_to, other(my_color))   :
+            k == Knight ? knight_attacks(opp_to)                  :
+            k == Bishop ? bishop_attacks(opp_to, occ_before)      :
+            k == Rook   ? rook_attacks(opp_to, occ_before)        :
+            k == Queen  ? queen_attacks(opp_to, occ_before)       : BB(0)
+        end
+        threatened = atk_before & b.occ[Int(my_color)+1]
+
+        if threatened != 0
+            # Is the moving piece one of the threatened ones?
+            if (sq_bb(our_fr) & threatened) != 0
+                return "I played $our_san — moving my $(_piece_name(our_k)) to safety. $note"
+            end
+
+            # Does the move protect one of the threatened pieces?
+            undo_tmp = make_move!(b, result.move)
+            for s in BitIter(threatened)
+                # If it's still there and now it's defended by us
+                if b.piece_on[s+1].kind != NoPiece && _is_defended(b, s, my_color)
+                     name = _piece_name(b.piece_on[s+1].kind)
+                     unmake_move!(b, result.move, undo_tmp)
+                     return "I played $our_san — protecting my $name. $note"
+                end
+            end
+            unmake_move!(b, result.move, undo_tmp)
+        end
+
+        # Removing the defender: did we just capture a piece that was defending another target?
+        if is_capture(result.move)
+            cap_sq   = to_sq(result.move)
+            cap_kind = b.piece_on[cap_sq+1].kind
+
+            # Find what this piece was defending
+            defended_by_victim = BB(0)
+            occ_before = all_occ(b)
+            atk_by_victim = let k = cap_kind
+                k == Pawn   ? pawn_attacks(cap_sq, other(my_color))   :
+                k == Knight ? knight_attacks(cap_sq)                  :
+                k == Bishop ? bishop_attacks(cap_sq, occ_before)      :
+                k == Rook   ? rook_attacks(cap_sq, occ_before)        :
+                k == Queen  ? queen_attacks(cap_sq, occ_before)       : BB(0)
+            end
+            targets = atk_by_victim & b.occ[Int(other(my_color))+1]
+
+            if targets != 0
+                undo_tmp = make_move!(b, result.move)
+                for s in BitIter(targets)
+                    if !_is_defended(b, s, other(my_color))
+                        # We removed a defender!
+                        name = _piece_name(b.piece_on[s+1].kind)
+                        unmake_move!(b, result.move, undo_tmp)
+                        return "I played $our_san — removing the defender of your $name. $note"
+                    end
+                end
+                unmake_move!(b, result.move, undo_tmp)
+            end
+        end
+    end
+
     if genuinely_winning || genuinely_losing
         # 2a. Fork check: do we simultaneously threaten 2+ profitable targets?
         forks = _fork_targets(b, result.move, our_val)
