@@ -521,7 +521,7 @@ function get_pin_and_checker_masks(b::Board, us::Color)
     # slider and our king.
 
     # Potential pinners: enemy sliders that share a file/rank/diagonal with king
-    pinners = (rook_attacks(ks, 0) & rooks) | (bishop_attacks(ks, 0) & bishops)
+    pinners = (rook_attacks(ks, BB(0)) & rooks) | (bishop_attacks(ks, BB(0)) & bishops)
 
     for ps in BitIter(pinners)
         # Ray between king and pinner (exclusive of both)

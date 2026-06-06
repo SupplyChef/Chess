@@ -162,6 +162,11 @@ end
     @inbounds BISHOP_TABLE[idx + 1, s+1]
 end
 
+# Flexible integer versions to avoid MethodErrors
+@inline rook_attacks(s::Integer, occ::Integer)   = rook_attacks(Int(s), UInt64(occ))
+@inline bishop_attacks(s::Integer, occ::Integer) = bishop_attacks(Int(s), UInt64(occ))
+@inline queen_attacks(s::Integer, occ::Integer)  = rook_attacks(s, occ) | bishop_attacks(s, occ)
+
 @inline queen_attacks(s::Square, occ::BB)::BB = rook_attacks(s, occ) | bishop_attacks(s, occ)
 
 @inline knight_attacks(s::Square)::BB = @inbounds KNIGHT_ATTACKS[s+1]
