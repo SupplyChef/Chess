@@ -456,94 +456,22 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
                (is_capture(result.move) || is_ep(result.move)) &&
                to_sq(result.move) == to_sq(last_opp_move)
 
-    # Drop the result.score >= 60 gate: a winning capture should always be
-    # described as such, even when the engine is behind overall.  The score is
-    # already shown in `note`, so the explanation should describe what the move
-    # does, not contextualise it relative to the position evaluation.
-    genuinely_winning = swing >=  90 && !is_recap
-    genuinely_losing  = swing <= -90 && result.score <= -60 && !is_recap
+    # Genuinely winning/losing material over the PV.
+    # Score gate: only claim net "win" if the engine's score confirms it.
+    is_cap            = is_capture(result.move) || is_ep(result.move)
+    is_pr             = is_promo(result.move)
+    genuinely_winning = swing >=  90 && !is_recap && result.score >= 50
+    genuinely_losing  = swing <= -90 && !is_recap && result.score <= -60
 
-    # ── 3. Defense / Removing the Defender ──────────────────────────────────────
-    if !is_recap && last_opp_move !== nothing
-        opp_fr = from_sq(last_opp_move)
-        opp_to = to_sq(last_opp_move)
-        opp_k  = b.piece_on[opp_to+1].kind
-
-        # Did the opponent just attack something?
-        occ_before = all_occ(b)
-        atk_before = let k = opp_k
-            k == Pawn   ? pawn_attacks(opp_to, other(my_color))   :
-            k == Knight ? knight_attacks(opp_to)                  :
-            k == Bishop ? bishop_attacks(opp_to, occ_before)      :
-            k == Rook   ? rook_attacks(opp_to, occ_before)        :
-            k == Queen  ? queen_attacks(opp_to, occ_before)       : BB(0)
-        end
-        threatened = atk_before & b.occ[Int(my_color)+1]
-
-        if threatened != 0
-            # Is the moving piece one of the threatened ones?
-            if (sq_bb(our_fr) & threatened) != 0
-                return "I played $our_san — moving my $(_piece_name(our_k)) to safety. $note"
-            end
-
-            # Does the move protect one of the threatened pieces?
-            undo_tmp = make_move!(b, result.move)
-            for s in BitIter(threatened)
-                # If it's still there and now it's defended by us
-                if b.piece_on[s+1].kind != NoPiece && _is_defended(b, s, my_color)
-                     name = _piece_name(b.piece_on[s+1].kind)
-                     unmake_move!(b, result.move, undo_tmp)
-                     return "I played $our_san — protecting my $name. $note"
-                end
-            end
-            unmake_move!(b, result.move, undo_tmp)
-        end
-
-        # Removing the defender: did we just capture a piece that was defending another target?
-        if is_capture(result.move)
-            cap_sq   = to_sq(result.move)
-            cap_kind = b.piece_on[cap_sq+1].kind
-
-            # Find what this piece was defending
-            defended_by_victim = BB(0)
-            occ_before = all_occ(b)
-            atk_by_victim = let k = cap_kind
-                k == Pawn   ? pawn_attacks(cap_sq, other(my_color))   :
-                k == Knight ? knight_attacks(cap_sq)                  :
-                k == Bishop ? bishop_attacks(cap_sq, occ_before)      :
-                k == Rook   ? rook_attacks(cap_sq, occ_before)        :
-                k == Queen  ? queen_attacks(cap_sq, occ_before)       : BB(0)
-            end
-            targets = atk_by_victim & b.occ[Int(other(my_color))+1]
-
-            if targets != 0
-                undo_tmp = make_move!(b, result.move)
-                for s in BitIter(targets)
-                    if !_is_defended(b, s, other(my_color))
-                        # We removed a defender!
-                        name = _piece_name(b.piece_on[s+1].kind)
-                        unmake_move!(b, result.move, undo_tmp)
-                        return "I played $our_san — removing the defender of your $name. $note"
-                    end
-                end
-                unmake_move!(b, result.move, undo_tmp)
-            end
-        end
-    end
-
-    if genuinely_winning || genuinely_losing
+    # ── 2. Immediate material gain ─────────────────────────────────────────────
+    # Triggers for captures or promotions. Future wins are handled in positional.
+    if genuinely_winning && (is_cap || is_pr)
         # Check if a queen or rook is actually captured or lost in the PV.
-        pv_queen = false
-        pv_rook  = false
-        undos_pv = UndoInfo[]
+        pv_queen = false; pv_rook = false; undos_pv = UndoInfo[]
         for m_pv in result.pv
             pk = b.piece_on[to_sq(m_pv)+1].kind
-            if (is_capture(m_pv) && pk == Queen) || (is_promo(m_pv) && promo_kind(m_pv) == Queen)
-                pv_queen = true
-            end
-            if (is_capture(m_pv) && pk == Rook) || (is_promo(m_pv) && promo_kind(m_pv) == Rook)
-                pv_rook = true
-            end
+            if (is_capture(m_pv) && pk == Queen) || (is_promo(m_pv) && promo_kind(m_pv) == Queen); pv_queen = true; end
+            if (is_capture(m_pv) && pk == Rook)  || (is_promo(m_pv) && promo_kind(m_pv) == Rook);  pv_rook = true;  end
             push!(undos_pv, make_move!(b, m_pv))
         end
         for i in length(undos_pv):-1:1; unmake_move!(b, result.pv[i], undos_pv[i]); end
@@ -551,29 +479,17 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
         # 2a. Fork check: do we simultaneously threaten 2+ profitable targets?
         forks = _fork_targets(b, result.move, our_val)
         if length(forks) >= 2
-            n1   = _piece_name(forks[1][1])
-            n2   = _piece_name(forks[2][1])
+            n1   = _piece_name(forks[1][1]); n2 = _piece_name(forks[2][1])
             what = _describe_material(swing, pv_queen, pv_rook)
             return "I played $our_san — forking your $n1 and $n2, winning $what. $note"
         end
 
-        # 2b. Non-fork material gain / loss.
         what = _describe_material(swing, pv_queen, pv_rook)
-        if genuinely_winning
-            return "I played $our_san — winning $what. $note"
-        else
-            # If the current move is a capture, the loss is direct ("I took and lost").
-            # If it's a quiet move the loss happens later in the PV — attribute it clearly.
-            cap_move = is_capture(result.move) || is_ep(result.move)
-            return cap_move ?
-                "I played $our_san — losing $what, but it's the best I can do. $note" :
-                "I played $our_san — my best move, though it leads to losing $what. $note"
-        end
+        return "I played $our_san — winning $what. $note"
     end
 
-    # ── 4. Tactical / Immediate ───────────────────────────────────────────────
-    # These take priority over general positional improvements when no material
-    # is immediately won/lost.
+    # ── 3. Tactical motifs ─────────────────────────────────────────────────────
+    # Pins, discoveries, and traps taking priority over defense/positional.
 
     # Escaping a pin
     pinned_before = _pinned_mask(b, my_color)
@@ -597,6 +513,94 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
 
     if _is_trapping(b, result.move)
         return "I played $our_san — trapping your piece. $note"
+    end
+
+    # ── 4. Defense / Material Loss ──────────────────────────────────────────────
+    if genuinely_losing
+        pv_queen = false; pv_rook = false; undos_pv = UndoInfo[]
+        for m_pv in result.pv
+            pk = b.piece_on[to_sq(m_pv)+1].kind
+            if (is_capture(m_pv) && pk == Queen) || (is_promo(m_pv) && promo_kind(m_pv) == Queen); pv_queen = true; end
+            if (is_capture(m_pv) && pk == Rook)  || (is_promo(m_pv) && promo_kind(m_pv) == Rook);  pv_rook = true;  end
+            push!(undos_pv, make_move!(b, m_pv))
+        end
+        for i in length(undos_pv):-1:1; unmake_move!(b, result.pv[i], undos_pv[i]); end
+        what = _describe_material(swing, pv_queen, pv_rook)
+        return is_cap ?
+            "I played $our_san — losing $what, but it's the best I can do. $note" :
+            "I played $our_san — my best move, though it leads to losing $what. $note"
+    end
+
+    if !is_recap && last_opp_move !== nothing
+        opp_fr = from_sq(last_opp_move)
+        opp_to = to_sq(last_opp_move)
+        opp_k  = b.piece_on[opp_to+1].kind
+
+        # Did the opponent just attack something?
+        occ_before = all_occ(b)
+        atk_before = let k = opp_k
+            k == Pawn   ? pawn_attacks(opp_to, other(my_color))   :
+            k == Knight ? knight_attacks(opp_to)                  :
+            k == Bishop ? bishop_attacks(opp_to, occ_before)      :
+            k == Rook   ? rook_attacks(opp_to, occ_before)        :
+            k == Queen  ? queen_attacks(opp_to, occ_before)       : BB(0)
+        end
+        threatened = atk_before & b.occ[Int(my_color)+1]
+
+        if threatened != 0
+            # 1. Is the moving piece one of the threatened ones? (Moving to safety)
+            if (sq_bb(our_fr) & threatened) != 0
+                # Check if it's actually safer now (not attacked or well-defended).
+                undo_tmp = make_move!(b, result.move)
+                is_safe = !sq_attacked_by(b, to_sq(result.move), other(my_color), all_occ(b)) ||
+                          _is_defended(b, to_sq(result.move), my_color)
+                unmake_move!(b, result.move, undo_tmp)
+                if is_safe
+                    return "I played $our_san — moving my $(_piece_name(our_k)) to safety. $note"
+                end
+            end
+
+            # 2. Does the move protect one of the threatened pieces?
+            # Refinement: Only claim if it was HANGING (undefended) before.
+            undo_tmp = make_move!(b, result.move)
+            for s in BitIter(threatened)
+                if b.piece_on[s+1].kind != NoPiece && !_is_defended(b, s, my_color; ignore_sq=our_fr)
+                    if _is_defended(b, s, my_color) # now it is defended
+                        name = _piece_name(b.piece_on[s+1].kind)
+                        unmake_move!(b, result.move, undo_tmp)
+                        return "I played $our_san — protecting my $name. $note"
+                    end
+                end
+            end
+            unmake_move!(b, result.move, undo_tmp)
+        end
+
+        # Removing the defender: did we just capture a piece that was defending another target?
+        if is_capture(result.move)
+            cap_sq   = to_sq(result.move)
+            cap_kind = b.piece_on[cap_sq+1].kind
+            occ_before = all_occ(b)
+            atk_by_victim = let k = cap_kind
+                k == Pawn   ? pawn_attacks(cap_sq, other(my_color))   :
+                k == Knight ? knight_attacks(cap_sq)                  :
+                k == Bishop ? bishop_attacks(cap_sq, occ_before)      :
+                k == Rook   ? rook_attacks(cap_sq, occ_before)        :
+                k == Queen  ? queen_attacks(cap_sq, occ_before)       : BB(0)
+            end
+            targets = atk_by_victim & b.occ[Int(other(my_color))+1]
+
+            if targets != 0
+                undo_tmp = make_move!(b, result.move)
+                for s in BitIter(targets)
+                    if !_is_defended(b, s, other(my_color))
+                        name = _piece_name(b.piece_on[s+1].kind)
+                        unmake_move!(b, result.move, undo_tmp)
+                        return "I played $our_san — removing the defender of your $name. $note"
+                    end
+                end
+                unmake_move!(b, result.move, undo_tmp)
+            end
+        end
     end
 
     # ── 5. Positional improvements ─────────────────────────────────────────────
