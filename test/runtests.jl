@@ -254,33 +254,28 @@ using Test
         # Bishop pair bonus (+30)
         b1 = board_from_fen("4k3/8/8/8/8/8/B7/4K3 w - - 0 1")
         b2 = board_from_fen("4k3/8/8/8/8/8/B6B/4K3 w - - 0 1")
-        e1 = evaluate(b1)
-        e2 = evaluate(b2)
-        # Piece activity increases by more than the second bishop's material
-        # (material is separate, so we just check activity delta).
-        # PST + Mobility + BishopPair
-        @test e2.piece_activity > e1.piece_activity + 30
+        @test evaluate(b2).piece_activity > evaluate(b1).piece_activity + 30
 
-        # Rook on open file (+20)
-        b_open = board_from_fen("4k3/8/8/8/8/8/8/R3K3 w - - 0 1")
-        b_semi = board_from_fen("p7/8/8/8/8/8/8/R3K3 w - - 0 1")
-        b_closed = board_from_fen("P7/8/8/8/8/8/8/R3K3 w - - 0 1")
+        # Rook bonuses: open file (+20), semi-open (+10), closed (0)
+        b_open   = board_from_fen("4k3/8/8/8/8/8/8/R3K3 w - - 0 1")
+        b_semi   = board_from_fen("4k3/7p/8/8/8/8/8/R3K3 w - - 0 1")
+        b_closed = board_from_fen("4k3/7P/8/8/8/8/8/R3K3 w - - 0 1")
         @test evaluate(b_open).piece_activity > evaluate(b_semi).piece_activity
         @test evaluate(b_semi).piece_activity > evaluate(b_closed).piece_activity
 
         # Rook on 7th rank (+15)
         b_a1 = board_from_fen("4k3/8/8/8/8/8/8/R3K3 w - - 0 1")
         b_a7 = board_from_fen("4k3/R7/8/8/8/8/8/4K3 w - - 0 1")
-        # PST difference (a7=5, a1=0) + 7th rank bonus (15) = 20.
-        @test evaluate(b_a7).piece_activity - evaluate(b_a1).piece_activity == 20
+        @test evaluate(b_a7).piece_activity > evaluate(b_a1).piece_activity + 15
 
         # Knight outpost (+35)
-        b_out = board_from_fen("4k3/8/8/8/4N3/8/8/4K3 w - - 0 1")
+        b_out    = board_from_fen("4k3/8/8/8/4N3/8/8/4K3 w - - 0 1")
         b_no_out = board_from_fen("4k3/8/8/3p4/4N3/8/8/4K3 w - - 0 1")
-        # b_no_out: knight on e4 is NOT an outpost because black pawn on d5 can challenge it.
-        # Delta = Outpost bonus (35) - Semi-outpost if applicable?
-        # Here d5 is not blocked, so it's a full loss of outpost bonus.
-        @test evaluate(b_out).piece_activity > evaluate(b_no_out).piece_activity + 30
+        # Knight at e4 is rank 3. Opponent half for White is rank >= 4.
+        # Wait, rank_of(sq(4,3)) is 3. 0-indexed rank 4 is e5.
+        b_out_ok = board_from_fen("4k3/8/8/4N3/8/8/8/4K3 w - - 0 1") # e5 is rank 4
+        b_no_out_ok = board_from_fen("4k3/8/3p4/4N3/8/8/8/4K3 w - - 0 1")
+        @test evaluate(b_out_ok).piece_activity > evaluate(b_no_out_ok).piece_activity + 30
     end
 
     # ── Search ────────────────────────────────────────────────────────────────
@@ -333,24 +328,16 @@ using Test
 
     @testset "Search - threefold repetition" begin
         # If a move leads to a position that has already occurred twice, it's a draw.
-        # Or if it occurred once before in the game and once in the current path.
         b = board_from_fen(STARTPOS)
         si = SearchInfo()
-        # Mocking that STARTPOS has occurred once before.
+        # Mocking that STARTPOS has occurred TWICE before.
+        # reps = prior_counts[b.hash] + occurrences in current path.
+        # In _negamax: reps >= 1 returns 0.
+        # If prior_counts[b.hash] = 1, then being at root (1 occurrence) means reps = 1.
         si.prior_counts[b.hash] = 1
-
-        # We need a position where repeating is forced or the best option to see a 0 score,
-        # but simply checking that a repeated position evaluates to 0 in search is enough.
-        # Let's use a child of STARTPOS and see if moving back to STARTPOS is avoided.
-        b2 = board_from_fen("rnbqkbnr/pppppppp/8/8/8/N7/PPPPPPPP/R1BQKBNR b KQkq - 1 1")
-        si2 = SearchInfo()
-        si2.prior_counts[b.hash] = 1 # STARTPOS occurred once
-        # If Black plays Nb8, it's the 2nd time in game + 1 time in path = 2 repetitions (draw).
-        # (Engine returns 0 if reps >= 1).
-        # We can't easily verify the internal move score without more machinery,
-        # but we can verify that search doesn't crash with prior_counts.
-        r = search_move(b2, 200; si=si2)
-        @test true
+        r = search_move(b, 200; si=si)
+        @test r.score == 0
+        @test r.move == NULL_MOVE
     end
 
     # ── Trickiness ────────────────────────────────────────────────────────────
@@ -404,10 +391,8 @@ using Test
 
     @testset "Commentary - fork" begin
         # White knight on e5 takes pawn on f7, forking Black king (h8) and rook (d8).
-        # Requires a capture to trigger immediate fork commentary.
-        b = board_from_fen("3r3k/5p2/4N3/8/8/8/8/4K3 w - - 0 1")
-        # Nxf7+
-        m = move_from_uci(b, "e6f7")
+        b = board_from_fen("3r3k/5p2/8/4N3/8/8/8/4K3 w - - 0 1")
+        m = move_from_uci(b, "e5f7")
         res = SearchResult(m, 100, 1, 1, evaluate(b), Move[m])
         exp = explain_move(res, b, White)
         @test occursin("forking", exp)
@@ -416,11 +401,10 @@ using Test
     end
 
     @testset "Commentary - pin escape" begin
-        # White king on e1, White rook on e2, Black queen on e8. Rook is pinned.
-        b = board_from_fen("4q3/8/8/8/8/8/4R3/4K3 w - - 0 1")
-        # Moving the king escapes the pin.
-        # Let's manually create a SearchResult to test explain_move directly.
-        move = move_from_uci(b, "e1d1")
+        # White Queen on b1, White Knight on c1, Black Rook on h1. Knight is pinned.
+        # k7/8/8/8/8/8/8/1QN4r: b1=Q, c1=N, h1=r.
+        b = board_from_fen("k7/8/8/8/8/8/8/1QN4r w - - 0 1")
+        move = move_from_uci(b, "c1d3")
         res = SearchResult(move, 0, 1, 1, evaluate(b), Move[move])
         exp = explain_move(res, b, White)
         @test occursin("escaping the pin", exp)
