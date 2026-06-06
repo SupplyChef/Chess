@@ -148,18 +148,18 @@ const BISHOP_MAGICS = zeros(UInt64, 64)
 const BISHOP_TABLE  = zeros(BB, 512, 64)
 const BISHOP_SHIFT  = 55
 
-@inline function rook_attacks(s::Square, occ::BB)::BB
+@inline function rook_attacks(s::Square, occ::UInt64)::UInt64
     @inbounds m = ROOK_MASKS[s+1]
     @inbounds magic = ROOK_MAGICS[s+1]
-    idx = ((occ & m) * magic) >> ROOK_SHIFT
-    @inbounds ROOK_TABLE[idx + 1, s+1]
+    idx = (UInt64(occ & m) * magic) >> ROOK_SHIFT
+    @inbounds ROOK_TABLE[Int(idx) + 1, s+1]
 end
 
-@inline function bishop_attacks(s::Square, occ::BB)::BB
+@inline function bishop_attacks(s::Square, occ::UInt64)::UInt64
     @inbounds m = BISHOP_MASKS[s+1]
     @inbounds magic = BISHOP_MAGICS[s+1]
-    idx = ((occ & m) * magic) >> BISHOP_SHIFT
-    @inbounds BISHOP_TABLE[idx + 1, s+1]
+    idx = (UInt64(occ & m) * magic) >> BISHOP_SHIFT
+    @inbounds BISHOP_TABLE[Int(idx) + 1, s+1]
 end
 
 # Flexible integer versions to avoid MethodErrors
@@ -284,7 +284,7 @@ function _init_sliding_attacks!()
         subsets = BB[]; attacks = BB[]; curr = BB(0)
         while true
             push!(subsets, curr); push!(attacks, _rook_attacks_slow(s, curr))
-            curr = (curr - mask) & mask
+            curr = (curr - 1) & mask
             curr == 0 && break
         end
         found = false
@@ -313,7 +313,7 @@ function _init_sliding_attacks!()
         subsets = BB[]; attacks = BB[]; curr = BB(0)
         while true
             push!(subsets, curr); push!(attacks, _bishop_attacks_slow(s, curr))
-            curr = (curr - mask) & mask
+            curr = (curr - 1) & mask
             curr == 0 && break
         end
         found = false
