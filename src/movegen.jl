@@ -206,14 +206,98 @@ function generate_moves!(ml::MoveList, b::Board)
 
     reset!(ml)
 
-    _gen_pawn_moves!(ml, b, us, them, their_occ, empty)
-    _gen_knight_moves!(ml, b, us, our_occ, their_occ)
-    _gen_bishop_moves!(ml, b, us, our_occ, their_occ, occ)
-    _gen_rook_moves!(ml, b, us, our_occ, their_occ, occ)
-    _gen_queen_moves!(ml, b, us, our_occ, their_occ, occ)
-    _gen_king_moves!(ml, b, us, our_occ, their_occ, occ)
+    # Pre-calculating masks allows us to generate only evasions when in check,
+    # which is much faster than generating all moves and filtering them later.
+    pin_mask, check_mask = get_pin_and_checker_masks(b, us)
+    num_checkers = count_bits(check_mask)
 
-    _filter_legal!(ml, b)
+    if num_checkers >= 2
+        # Double check: only king moves are possible
+        _gen_king_moves!(ml, b, us, our_occ, their_occ, occ)
+    else
+        _gen_pawn_moves!(ml, b, us, them, their_occ, empty)
+        _gen_knight_moves!(ml, b, us, our_occ, their_occ)
+        _gen_bishop_moves!(ml, b, us, our_occ, their_occ, occ)
+        _gen_rook_moves!(ml, b, us, our_occ, their_occ, occ)
+        _gen_queen_moves!(ml, b, us, our_occ, their_occ, occ)
+        _gen_king_moves!(ml, b, us, our_occ, their_occ, occ)
+    end
+
+    _filter_legal_precalculated!(ml, b, pin_mask, check_mask)
+end
+
+# In-place compaction using pre-calculated masks for O(1) legality verification.
+function _filter_legal_precalculated!(ml::MoveList, b::Board, pin_mask::BB, check_mask::BB)
+    us = b.side
+    num_checkers = count_bits(check_mask)
+    ks = lsb(bb(b, us, King))
+
+    write_idx = 0
+    for i in 1:ml.count[]
+        m = ml.moves[i]
+        fr = from_sq(m); to = to_sq(m); fl = flags(m)
+        moving_kind = b.piece_on[fr+1].kind
+
+        if moving_kind == King
+            undo = make_move!(b, m)
+            legal = !king_in_check(b, us)
+            unmake_move!(b, m, undo)
+            if legal
+                write_idx += 1; ml.moves[write_idx] = m
+            end
+            continue
+        end
+
+        num_checkers >= 2 && continue
+
+        if num_checkers == 1
+            if fl == MF_EP
+                undo = make_move!(b, m)
+                legal = !king_in_check(b, us)
+                unmake_move!(b, m, undo)
+                if legal
+                    write_idx += 1; ml.moves[write_idx] = m
+                end
+                continue
+            end
+
+            pinner_sq = lsb(check_mask)
+            target_mask = sq_bb(pinner_sq)
+            pk = b.piece_on[pinner_sq+1].kind
+            if pk == Rook || pk == Bishop || pk == Queen
+                f, r = file_of(ks), rank_of(ks)
+                pf, pr = file_of(pinner_sq), rank_of(pinner_sq)
+                mask = if f == pf; FILE_MASK[f+1]
+                       elseif r == pr; RANK_MASK[r+1]
+                       elseif f - r == pf - pr; DIAG_MASK[ks+1]
+                       else ADIAG_MASK[ks+1]
+                       end
+                target_mask |= _slider_attacks(ks, sq_bb(pinner_sq), mask) & _slider_attacks(pinner_sq, sq_bb(ks), mask)
+            end
+            if (sq_bb(to) & target_mask) == 0; continue; end
+        end
+
+        if (sq_bb(fr) & pin_mask) != 0
+            f, r = file_of(ks), rank_of(ks)
+            ff, rr = file_of(fr), rank_of(fr)
+            pin_ray = if f == ff; FILE_MASK[f+1]
+                      elseif r == rr; RANK_MASK[r+1]
+                      elseif f - r == ff - rr; DIAG_MASK[ks+1]
+                      else ADIAG_MASK[ks+1]
+                      end
+            if (sq_bb(to) & pin_ray) == 0; continue; end
+        end
+
+        if fl == MF_EP
+            undo = make_move!(b, m)
+            legal = !king_in_check(b, us)
+            unmake_move!(b, m, undo)
+            if !legal; continue; end
+        end
+
+        write_idx += 1; ml.moves[write_idx] = m
+    end
+    ml.count[] = write_idx
 end
 
 # ─── Pawn moves ───────────────────────────────────────────────────────────────
@@ -388,63 +472,166 @@ function _gen_king_moves!(ml, b, us, our_occ, their_occ, occ)
     end
 end
 
+# ─── Legality helpers ─────────────────────────────────────────────────────────
+
+# Find all pieces of color `us` that are pinned against their king.
+# Also returns the bitboard of squares that check the king (check_mask).
+# If 0 bits: not in check. 1 bit: single check. 2+ bits: double check.
+function get_pin_and_checker_masks(b::Board, us::Color)
+    them = other(us)
+    ks   = lsb(bb(b, us, King))
+    occ  = all_occ(b)
+
+    pin_mask   = BB(0)
+    check_mask = BB(0)
+
+    # 1. Checkers
+    # Use symmetry: a piece checks the king if the king attacks that piece
+    # as if the king were that piece type.
+
+    # Knights
+    check_mask |= knight_attacks(ks) & bb(b, them, Knight)
+
+    # Pawns
+    check_mask |= pawn_attacks(ks, us) & bb(b, them, Pawn)
+
+    # Sliders
+    # We use a combined mask for speed; _slider_attacks is cheap.
+    rooks   = bb(b, them, Rook)   | bb(b, them, Queen)
+    bishops = bb(b, them, Bishop) | bb(b, them, Queen)
+
+    # Scan only rays that actually contain a slider
+    # Rook rays
+    if (FILE_MASK[file_of(ks)+1] & rooks) != 0
+        check_mask |= rook_attacks(ks, occ) & rooks
+    end
+    if (RANK_MASK[rank_of(ks)+1] & rooks) != 0
+        check_mask |= rook_attacks(ks, occ) & rooks
+    end
+    # Bishop rays
+    if (DIAG_MASK[ks+1] & bishops) != 0
+        check_mask |= bishop_attacks(ks, occ) & bishops
+    end
+    if (ADIAG_MASK[ks+1] & bishops) != 0
+        check_mask |= bishop_attacks(ks, occ) & bishops
+    end
+
+    # 2. Pinned pieces
+    # A piece is pinned if it's the lone blocker on a ray between an enemy
+    # slider and our king.
+
+    # Potential pinners: enemy sliders that share a file/rank/diagonal with king
+    pinners = (rook_attacks(ks, 0) & rooks) | (bishop_attacks(ks, 0) & bishops)
+
+    for ps in BitIter(pinners)
+        # Ray between king and pinner (exclusive of both)
+        f, r = file_of(ks), rank_of(ks)
+        pf, pr = file_of(ps), rank_of(ps)
+
+        mask = if f == pf; FILE_MASK[f+1]
+               elseif r == pr; RANK_MASK[r+1]
+               elseif f - r == pf - pr; DIAG_MASK[ks+1]
+               else ADIAG_MASK[ks+1]
+               end
+
+        # Squares strictly between ks and ps
+        between = _slider_attacks(ks, sq_bb(ps), mask) & _slider_attacks(ps, sq_bb(ks), mask)
+        blockers = between & occ
+
+        if count_bits(blockers) == 1 && (blockers & b.occ[Int(us)+1]) != 0
+            pin_mask |= blockers
+        end
+    end
+
+    pin_mask, check_mask
+end
+
 # ─── Legality filter ──────────────────────────────────────────────────────────
-# In-place compaction: overwrite illegal moves with the next legal move using
-# a write pointer.  Avoids a second allocation and keeps the MoveList self-
-# contained.
 function _filter_legal!(ml::MoveList, b::Board)
     us = b.side; them = other(us)
+    pin_mask, check_mask = get_pin_and_checker_masks(b, us)
+    num_checkers = count_bits(check_mask)
+    ks = lsb(bb(b, us, King))
+
     write_idx = 0
-    in_check = king_in_check(b, us)
-
-    # Pre-calculate pin mask for more efficient legality filtering.
-    # A piece is pinned if removing it from a ray through our king reveals an
-    # attack from an enemy slider on the same ray.
-    ks      = lsb(bb(b, us, King))
-    occ     = all_occ(b)
-    pin_mask = BB(0)
-
-    # Rooks/Queens on files/ranks
-    for s in BitIter(bb(b, them, Rook) | bb(b, them, Queen))
-        sf = file_of(s); sr = rank_of(s); kf = file_of(ks); kr = rank_of(ks)
-        if sf == kf || sr == kr
-            ray = sf == kf ? FILE_MASK[sf+1] : RANK_MASK[sr+1]
-            between = _slider_attacks(s, sq_bb(ks), ray) & _slider_attacks(ks, sq_bb(s), ray)
-            if count_bits(between & occ) == 1 && (between & b.occ[Int(us)+1]) != 0
-                pin_mask |= (between & b.occ[Int(us)+1])
-            end
-        end
-    end
-    # Bishops/Queens on diagonals
-    for s in BitIter(bb(b, them, Bishop) | bb(b, them, Queen))
-        if (DIAG_MASK[s+1] & sq_bb(ks)) != 0 || (ADIAG_MASK[s+1] & sq_bb(ks)) != 0
-            ray = (DIAG_MASK[s+1] & sq_bb(ks)) != 0 ? DIAG_MASK[s+1] : ADIAG_MASK[s+1]
-            between = _slider_attacks(s, sq_bb(ks), ray) & _slider_attacks(ks, sq_bb(s), ray)
-            if count_bits(between & occ) == 1 && (between & b.occ[Int(us)+1]) != 0
-                pin_mask |= (between & b.occ[Int(us)+1])
-            end
-        end
-    end
-
     for i in 1:ml.count[]
         m = ml.moves[i]
-        fr = from_sq(m); fl = flags(m)
+        fr = from_sq(m); to = to_sq(m); fl = flags(m)
+        moving_kind = b.piece_on[fr+1].kind
 
-        # Most moves are legal if we aren't in check and the piece isn't pinned.
-        # Exceptions: king moves and en-passant (which can reveal a check on the rank).
-        if !in_check && (sq_bb(fr) & pin_mask) == 0 && b.piece_on[fr+1].kind != King && fl != MF_EP
-            write_idx += 1
-            ml.moves[write_idx] = m
+        # 1. King moves: must not land on attacked square
+        if moving_kind == King
+            # For castling, make_move! already checks path attacks, but we need
+            # to be sure the landing square is safe.
+            undo = make_move!(b, m)
+            legal = !king_in_check(b, us)
+            unmake_move!(b, m, undo)
+            if legal
+                write_idx += 1
+                ml.moves[write_idx] = m
+            end
             continue
         end
 
-        undo = make_move!(b, m)
-        legal = !king_in_check(b, us)
-        unmake_move!(b, m, undo)
-        if legal
-            write_idx += 1
-            ml.moves[write_idx] = m
+        # 2. Double check: only king moves are legal
+        num_checkers >= 2 && continue
+
+        # 3. Single check: must block or capture
+        if num_checkers == 1
+            # Special case: en-passant might capture the checker OR reveal a ray
+            if fl == MF_EP
+                undo = make_move!(b, m)
+                legal = !king_in_check(b, us)
+                unmake_move!(b, m, undo)
+                if legal
+                    write_idx += 1
+                    ml.moves[write_idx] = m
+                end
+                continue
+            end
+
+            # Non-EP move must land on check_mask (capture) or between king and pinner (block)
+            pinner_sq = lsb(check_mask)
+            target_mask = sq_bb(pinner_sq)
+            pk = b.piece_on[pinner_sq+1].kind
+            if pk == Rook || pk == Bishop || pk == Queen
+                # Add squares between king and slider
+                f, r = file_of(ks), rank_of(ks)
+                pf, pr = file_of(pinner_sq), rank_of(pinner_sq)
+                mask = if f == pf; FILE_MASK[f+1]
+                       elseif r == pr; RANK_MASK[r+1]
+                       elseif f - r == pf - pr; DIAG_MASK[ks+1]
+                       else ADIAG_MASK[ks+1]
+                       end
+                target_mask |= _slider_attacks(ks, sq_bb(pinner_sq), mask) & _slider_attacks(pinner_sq, sq_bb(ks), mask)
+            end
+
+            if (sq_bb(to) & target_mask) == 0; continue; end
         end
+
+        # 4. Pinned pieces: must move along the pin ray
+        if (sq_bb(fr) & pin_mask) != 0
+            f, r = file_of(ks), rank_of(ks)
+            ff, rr = file_of(fr), rank_of(fr)
+            pin_ray = if f == ff; FILE_MASK[f+1]
+                      elseif r == rr; RANK_MASK[r+1]
+                      elseif f - r == ff - rr; DIAG_MASK[ks+1]
+                      else ADIAG_MASK[ks+1]
+                      end
+            if (sq_bb(to) & pin_ray) == 0; continue; end
+        end
+
+        # 5. En-passant special case (revealed check on rank)
+        if fl == MF_EP
+            undo = make_move!(b, m)
+            legal = !king_in_check(b, us)
+            unmake_move!(b, m, undo)
+            if !legal; continue; end
+        end
+
+        # Move is legal!
+        write_idx += 1
+        ml.moves[write_idx] = m
     end
     ml.count[] = write_idx
 end
@@ -506,22 +693,30 @@ function generate_captures!(ml::MoveList, b::Board)
 
     reset!(ml)
 
-    _gen_pawn_captures_promos!(ml, b, us, their_occ, ~occ)
+    pin_mask, check_mask = get_pin_and_checker_masks(b, us)
+    num_checkers = count_bits(check_mask)
 
-    for fr in BitIter(bb(b, us, Knight))
-        for to in BitIter(knight_attacks(fr) & their_occ); push!(ml, Move(fr, to, MF_CAPTURE)); end
-    end
-    for fr in BitIter(bb(b, us, Bishop))
-        for to in BitIter(bishop_attacks(fr, occ) & their_occ); push!(ml, Move(fr, to, MF_CAPTURE)); end
-    end
-    for fr in BitIter(bb(b, us, Rook))
-        for to in BitIter(rook_attacks(fr, occ) & their_occ); push!(ml, Move(fr, to, MF_CAPTURE)); end
-    end
-    for fr in BitIter(bb(b, us, Queen))
-        for to in BitIter(queen_attacks(fr, occ) & their_occ); push!(ml, Move(fr, to, MF_CAPTURE)); end
-    end
-    ks = lsb(bb(b, us, King))
-    for to in BitIter(king_attacks(ks) & their_occ); push!(ml, Move(ks, to, MF_CAPTURE)); end
+    if num_checkers >= 2
+        ks = lsb(bb(b, us, King))
+        for to in BitIter(king_attacks(ks) & their_occ); push!(ml, Move(ks, to, MF_CAPTURE)); end
+    else
+        _gen_pawn_captures_promos!(ml, b, us, their_occ, ~occ)
 
-    _filter_legal!(ml, b)
+        for fr in BitIter(bb(b, us, Knight))
+            for to in BitIter(knight_attacks(fr) & their_occ); push!(ml, Move(fr, to, MF_CAPTURE)); end
+        end
+        for fr in BitIter(bb(b, us, Bishop))
+            for to in BitIter(bishop_attacks(fr, occ) & their_occ); push!(ml, Move(fr, to, MF_CAPTURE)); end
+        end
+        for fr in BitIter(bb(b, us, Rook))
+            for to in BitIter(rook_attacks(fr, occ) & their_occ); push!(ml, Move(fr, to, MF_CAPTURE)); end
+        end
+        for fr in BitIter(bb(b, us, Queen))
+            for to in BitIter(queen_attacks(fr, occ) & their_occ); push!(ml, Move(fr, to, MF_CAPTURE)); end
+        end
+        ks = lsb(bb(b, us, King))
+        for to in BitIter(king_attacks(ks) & their_occ); push!(ml, Move(ks, to, MF_CAPTURE)); end
+    end
+
+    _filter_legal_precalculated!(ml, b, pin_mask, check_mask)
 end

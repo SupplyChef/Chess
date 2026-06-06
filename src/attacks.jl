@@ -1,3 +1,4 @@
+using Random
 # Pre-computed attack tables for all piece types.
 #
 # Non-sliding pieces (knight, king, pawn) have fixed attack sets that depend
@@ -136,16 +137,29 @@ end
     fwd ⊻ rev
 end
 
+# Magic Bitboards
+const ROOK_MASKS   = zeros(BB, 64)
+const ROOK_MAGICS  = zeros(UInt64, 64)
+const ROOK_TABLE   = zeros(BB, 4096, 64)
+const ROOK_SHIFT   = 52
+
+const BISHOP_MASKS  = zeros(BB, 64)
+const BISHOP_MAGICS = zeros(UInt64, 64)
+const BISHOP_TABLE  = zeros(BB, 512, 64)
+const BISHOP_SHIFT  = 55
+
 @inline function rook_attacks(s::Square, occ::BB)::BB
-    @inbounds _slider_attacks(s, occ, FILE_MASK[file_of(s)+1]) |
-              _slider_attacks(s, occ, RANK_MASK[rank_of(s)+1])
+    @inbounds m = ROOK_MASKS[s+1]
+    @inbounds magic = ROOK_MAGICS[s+1]
+    idx = ((occ & m) * magic) >> ROOK_SHIFT
+    @inbounds ROOK_TABLE[idx + 1, s+1]
 end
 
 @inline function bishop_attacks(s::Square, occ::BB)::BB
-    # Apply the formula to each diagonal independently: DIAG_MASK (NE, /)
-    # and ADIAG_MASK (NW, \).  A queen is just the union of both.
-    @inbounds _slider_attacks(s, occ, DIAG_MASK[s+1]) |
-              _slider_attacks(s, occ, ADIAG_MASK[s+1])
+    @inbounds m = BISHOP_MASKS[s+1]
+    @inbounds magic = BISHOP_MAGICS[s+1]
+    idx = ((occ & m) * magic) >> BISHOP_SHIFT
+    @inbounds BISHOP_TABLE[idx + 1, s+1]
 end
 
 @inline queen_attacks(s::Square, occ::BB)::BB = rook_attacks(s, occ) | bishop_attacks(s, occ)
@@ -190,7 +204,137 @@ end
     ) != 0
 end
 
+function _rook_attacks_slow(s::Square, occ::BB)
+    f, r = file_of(s), rank_of(s)
+    atk = BB(0)
+    for (df, dr) in ((0,1), (0,-1), (1,0), (-1,0))
+        ff, rr = f+df, r+dr
+        while 0 <= ff <= 7 && 0 <= rr <= 7
+            target = sq_bb(sq(ff, rr))
+            atk |= target
+            (occ & target) != 0 && break
+            ff += df; rr += dr
+        end
+    end
+    atk
+end
+
+function _bishop_attacks_slow(s::Square, occ::BB)
+    f, r = file_of(s), rank_of(s)
+    atk = BB(0)
+    for (df, dr) in ((1,1), (1,-1), (-1,1), (-1,-1))
+        ff, rr = f+df, r+dr
+        while 0 <= ff <= 7 && 0 <= rr <= 7
+            target = sq_bb(sq(ff, rr))
+            atk |= target
+            (occ & target) != 0 && break
+            ff += df; rr += dr
+        end
+    end
+    atk
+end
+
+function _rook_mask(s::Square)
+    f, r = file_of(s), rank_of(s)
+    mask = BB(0)
+    for rr in (r+1):6; mask |= sq_bb(sq(f, rr)); end
+    for rr in (r-1):-1:1; mask |= sq_bb(sq(f, rr)); end
+    for ff in (f+1):6; mask |= sq_bb(sq(ff, r)); end
+    for ff in (f-1):-1:1; mask |= sq_bb(sq(ff, r)); end
+    mask
+end
+
+function _bishop_mask(s::Square)
+    f, r = file_of(s), rank_of(s)
+    mask = BB(0)
+    for d in 1:7
+        ff, rr = f+d, r+d
+        (ff >= 7 || rr >= 7) && break
+        mask |= sq_bb(sq(ff, rr))
+    end
+    for d in 1:7
+        ff, rr = f-d, r+d
+        (ff <= 0 || rr >= 7) && break
+        mask |= sq_bb(sq(ff, rr))
+    end
+    for d in 1:7
+        ff, rr = f+d, r-d
+        (ff >= 7 || rr <= 0) && break
+        mask |= sq_bb(sq(ff, rr))
+    end
+    for d in 1:7
+        ff, rr = f-d, r-d
+        (ff <= 0 || rr <= 0) && break
+        mask |= sq_bb(sq(ff, rr))
+    end
+    mask
+end
+
+function _init_sliding_attacks!()
+    Random.seed!(42)
+    for s in 0:63
+        # Rook
+        mask = _rook_mask(s)
+        ROOK_MASKS[s+1] = mask
+        subsets = BB[]; attacks = BB[]; curr = BB(0)
+        while true
+            push!(subsets, curr); push!(attacks, _rook_attacks_slow(s, curr))
+            curr = (curr - mask) & mask
+            curr == 0 && break
+        end
+        found = false
+        for _ in 1:100000
+            magic = rand(UInt64) & rand(UInt64) & rand(UInt64)
+            fill!(view(ROOK_TABLE, :, s+1), 0)
+            fail = false
+            for i in 1:length(subsets)
+                idx = ((subsets[i] * magic) >> ROOK_SHIFT) + 1
+                if ROOK_TABLE[idx, s+1] == 0
+                    ROOK_TABLE[idx, s+1] = attacks[i]
+                elseif ROOK_TABLE[idx, s+1] != attacks[i]
+                    fail = true; break
+                end
+            end
+            if !fail
+                ROOK_MAGICS[s+1] = magic
+                found = true; break
+            end
+        end
+        !found && error("Failed to find rook magic for square $s")
+
+        # Bishop
+        mask = _bishop_mask(s)
+        BISHOP_MASKS[s+1] = mask
+        subsets = BB[]; attacks = BB[]; curr = BB(0)
+        while true
+            push!(subsets, curr); push!(attacks, _bishop_attacks_slow(s, curr))
+            curr = (curr - mask) & mask
+            curr == 0 && break
+        end
+        found = false
+        for _ in 1:100000
+            magic = rand(UInt64) & rand(UInt64) & rand(UInt64)
+            fill!(view(BISHOP_TABLE, :, s+1), 0)
+            fail = false
+            for i in 1:length(subsets)
+                idx = ((subsets[i] * magic) >> BISHOP_SHIFT) + 1
+                if BISHOP_TABLE[idx, s+1] == 0
+                    BISHOP_TABLE[idx, s+1] = attacks[i]
+                elseif BISHOP_TABLE[idx, s+1] != attacks[i]
+                    fail = true; break
+                end
+            end
+            if !fail
+                BISHOP_MAGICS[s+1] = magic
+                found = true; break
+            end
+        end
+        !found && error("Failed to find bishop magic for square $s")
+    end
+end
+
 function _init_attacks!()
     _init_masks!()
     _init_nonsliding_attacks!()
+    _init_sliding_attacks!()
 end
