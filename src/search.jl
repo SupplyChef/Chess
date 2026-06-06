@@ -106,9 +106,10 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
 end
 
 # Fill ml.scores with move ordering scores (parallel to ml.moves).
-function _score_moves!(ml::MoveList, b::Board, hash_move::Move,
-                       killers::Matrix{Move}, history::Matrix{Int32}, ply::Int)
-    @inbounds for i in 1:length(ml)
+@inline function _score_moves!(ml::MoveList, b::Board, hash_move::Move,
+                               killers::Matrix{Move}, history::Matrix{Int32},
+                               ply::Int, start_idx::Int=1)
+    @inbounds for i in start_idx:length(ml)
         ml.scores[i] = _move_score(ml[i], b, hash_move, killers, history, ply)
     end
 end
@@ -251,7 +252,7 @@ end
 # This score is a lower bound on what the side to move can achieve — they can
 # always "stand pat" and decline all captures.  If stand_pat >= beta we prune
 # immediately (the opponent already had a better alternative earlier).
-# If stand_pat > alpha we raise alpha (we found a quiet baseline that beats the
+# If stand_pat > alpha we raise alpha ( we found a quiet baseline that beats the
 # previous best).  Searching captures then looks for something better.
 #
 # When in check we cannot stand pat (the king may be lost) and must consider
@@ -261,6 +262,25 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
 
     # A capture might reduce material to a theoretically drawn endgame.
     _is_insufficient_material(b) && return 0
+
+    # TT Probe
+    tte = _tt_get(si.tt, b.hash)
+    if tte.key == b.hash
+        sc = Int(tte.score)
+        if sc > MATE_SCORE - MOVE_STACK_SIZE
+            sc -= ply
+        elseif sc < -(MATE_SCORE - MOVE_STACK_SIZE)
+            sc += ply
+        end
+        if tte.flag == TT_EXACT
+            return sc
+        elseif tte.flag == TT_LOWER
+            alpha = max(alpha, sc)
+        else
+            beta = min(beta, sc)
+        end
+        alpha >= beta && return sc
+    end
 
     in_check = king_in_check(b, b.side)
 
@@ -278,7 +298,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     # return alpha (= stand_pat).  In check with no evasions: checkmate.
     length(ml) == 0 && return in_check ? -(MATE_SCORE - ply) : alpha
 
-    _score_moves!(ml, b, NULL_MOVE, si.killers, si.history, ply)
+    _score_moves!(ml, b, NULL_MOVE, si.killers, si.history, ply, 1)
 
     best      = in_check ? -(MATE_SCORE - ply) : alpha
     best_move = NULL_MOVE
@@ -452,22 +472,69 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         return in_check ? -(MATE_SCORE - ply) : 0
     end
 
-    _score_moves!(ml, b, hash_move, si.killers, si.history, ply)
-
     orig_alpha = alpha
     best_score = -(MATE_SCORE + 1)
     best_move  = NULL_MOVE
 
-    for i in 1:length(ml)
+    # 1. Try hash move first
+    tried_hash = false
+    if hash_move != NULL_MOVE
+        for i in 1:length(ml)
+            if ml.moves[i] == hash_move
+                tried_hash = true
+                # Swap hash move to front
+                ml.moves[i], ml.moves[1] = ml.moves[1], ml.moves[i]
+
+                m  = ml.moves[1]
+                fl = flags(m)
+                is_capture = (fl & MF_CAPTURE) != 0 || fl == MF_EP
+                is_promo   = (fl & MF_PROMO)   != 0
+
+                # Futility pruning on hash move
+                if futility_ok && !is_capture && !is_promo
+                    best_score = max(best_score, static_eval)
+                else
+                    push!(si.path, b.hash)
+                    undo = make_move!(b, m)
+                    gives_check = king_in_check(b, b.side)
+                    extension = (cfg.check_extensions && gives_check) ? 1 : 0
+
+                    # Hash move is never reduced (i=1)
+                    score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false)
+
+                    unmake_move!(b, m, undo)
+                    pop!(si.path)
+
+                    if si.stop; return 0; end
+
+                    if score > best_score
+                        best_score = score
+                        best_move  = m
+                        if score > alpha
+                            alpha = score
+                            if alpha >= beta
+                                # No need to update killers for hash move
+                                return best_score
+                            end
+                        end
+                    end
+                end
+                break
+            end
+        end
+    end
+
+    # 2. Score remaining moves
+    _score_moves!(ml, b, hash_move, si.killers, si.history, ply, tried_hash ? 2 : 1)
+
+    # 3. Search remaining moves
+    for i in (tried_hash ? 2 : 1):length(ml)
         m  = _pick_move!(ml, i)
         fl = flags(m)
         is_capture = (fl & MF_CAPTURE) != 0 || fl == MF_EP
         is_promo   = (fl & MF_PROMO)   != 0
 
         # Futility: skip quiet moves when we're too far below alpha to recover.
-        # Raise the best_score floor to static_eval so that if every move is
-        # pruned here, we return the static eval (fail-low) rather than the
-        # -(MATE_SCORE+1) sentinel, which would corrupt the TT when ply-adjusted.
         if futility_ok && !is_capture && !is_promo
             best_score = max(best_score, static_eval)
             continue
@@ -475,20 +542,12 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
 
         push!(si.path, b.hash)
         undo        = make_move!(b, m)
-        gives_check = king_in_check(b, b.side)   # did this move give check?
+        gives_check = king_in_check(b, b.side)
 
         # ── Extensions and Late Move Reductions ──────────────────────────────
-        # Check extension: moves that give check are searched one ply deeper.
-        # Checking moves lead to forced sequences (the opponent must evade), so
-        # the resulting subtree is narrow and cheap to explore.  Extending ensures
-        # we don't miss a forced mate that LMR would otherwise reduce away.
         extension = (cfg.check_extensions && gives_check) ? 1 : 0
 
         # LMR: after the first 3 moves, reduce quiet non-checking moves.
-        # Good moves appear early in the sorted list; late moves are usually
-        # noise and tolerate reduced depth.  If the reduced search beats alpha
-        # we re-search at full depth — LMR only saves work on unsound moves.
-        # Extra reduction for very late moves (index > 8).
         reduction = 0
         if cfg.lmr && depth >= 3 && i > 3 && !is_capture && !is_promo && !gives_check && !in_check
             reduction = i > 8 ? 2 : 1
@@ -496,7 +555,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
 
         score = -_negamax(b, depth - 1 + extension - reduction, -beta, -alpha, ply + 1, si, false)
 
-        # Re-search at full (+ extension) depth if the reduced search beat alpha.
+        # Re-search at full depth if the reduced search beat alpha.
         if reduction > 0 && score > alpha && !si.stop
             score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false)
         end
@@ -512,8 +571,6 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             if score > alpha
                 alpha = score
                 if alpha >= beta
-                    # Beta cutoff: record this quiet move in killers and history
-                    # so it gets tried early in sibling and future nodes.
                     if !is_capture && !is_promo
                         _update_killers!(si.killers, ply, m)
                         _update_history!(si.history, m, depth)
@@ -625,7 +682,7 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
     end
 
     empty!(si.root_moves)
-    _score_moves!(ml, b, hash_move, si.killers, si.history, 1)
+    _score_moves!(ml, b, hash_move, si.killers, si.history, 1, 1)
     for i in 1:length(ml)
         m = _pick_move!(ml, i)
         push!(si.path, b.hash)
