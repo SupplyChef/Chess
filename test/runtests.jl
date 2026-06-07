@@ -261,10 +261,15 @@ using Test
         # PST + Mobility + BishopPair
         @test e2.piece_activity > e1.piece_activity + 30
 
-        # Rook on open file (+20)
-        b_open = board_from_fen("4k3/8/8/8/8/8/8/R3K3 w - - 0 1")
-        b_semi = board_from_fen("p7/8/8/8/8/8/8/R3K3 w - - 0 1")
-        b_closed = board_from_fen("P7/8/8/8/8/8/8/R3K3 w - - 0 1")
+        # Rook on open file (+20) / semi-open (+10) / closed (0).
+        # Both kings present; pawns on rank 3 block each other (neither is a passer)
+        # so the rook-behind-passer bonus doesn't distort the comparison.
+        # b_semi: black pawn a3 on file a (semi-open for white); white pawn b2
+        #   prevents a3 from being a passer (_PASSED_B blocked by b2).
+        # b_closed: white pawn a2 added so file a is fully closed; a2/a3 block each other.
+        b_open   = board_from_fen("4k3/8/8/8/8/8/8/R3K3 w - - 0 1")
+        b_semi   = board_from_fen("4k3/8/8/8/8/p7/1P6/R3K3 w - - 0 1")
+        b_closed = board_from_fen("4k3/8/8/8/8/p7/P7/R3K3 w - - 0 1")
         @test evaluate(b_open).piece_activity > evaluate(b_semi).piece_activity
         @test evaluate(b_semi).piece_activity > evaluate(b_closed).piece_activity
 
