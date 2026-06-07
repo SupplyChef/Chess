@@ -216,7 +216,7 @@ using Test
         # White has an extra queen.
         b = board_from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
         e = evaluate(b)
-        @test e.material == 900
+        @test e.material == 1000
         @test total(e) > 800
     end
 
@@ -381,7 +381,7 @@ using Test
 
     @testset "Trickiness - does not override clearly better move" begin
         # The maximum trickiness bonus is TRICKINESS_WEIGHT × 200 ≈ 20cp.
-        # A move winning a free queen (+900cp) cannot be displaced by trickiness.
+        # A move winning a free queen (+1000cp) cannot be displaced by trickiness.
         b = board_from_fen("7k/8/8/3q4/8/8/8/3R3K w - - 0 1")
         r = search_move(b, 500)
         @test move_to_uci(r.move) == "d1d5"
