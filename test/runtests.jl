@@ -261,25 +261,30 @@ using Test
         # PST + Mobility + BishopPair
         @test e2.piece_activity > e1.piece_activity + 30
 
-        # Rook on open file (+20)
-        b_open = board_from_fen("4k3/8/8/8/8/8/8/R3K3 w - - 0 1")
-        b_semi = board_from_fen("p7/8/8/8/8/8/8/R3K3 w - - 0 1")
-        b_closed = board_from_fen("P7/8/8/8/8/8/8/R3K3 w - - 0 1")
+        # Rook on open file (+20) / semi-open (+10) / closed (0).
+        # Both kings present; pawns on rank 3 block each other (neither is a passer)
+        # so the rook-behind-passer bonus doesn't distort the comparison.
+        # b_semi: black pawn a3 on file a (semi-open for white); white pawn b2
+        #   prevents a3 from being a passer (_PASSED_B blocked by b2).
+        # b_closed: white pawn a2 added so file a is fully closed; a2/a3 block each other.
+        b_open   = board_from_fen("4k3/8/8/8/8/8/8/R3K3 w - - 0 1")
+        b_semi   = board_from_fen("4k3/8/8/8/8/p7/1P6/R3K3 w - - 0 1")
+        b_closed = board_from_fen("4k3/8/8/8/8/p7/P7/R3K3 w - - 0 1")
         @test evaluate(b_open).piece_activity > evaluate(b_semi).piece_activity
         @test evaluate(b_semi).piece_activity > evaluate(b_closed).piece_activity
 
         # Rook on 7th rank (+15)
         b_a1 = board_from_fen("4k3/8/8/8/8/8/8/R3K3 w - - 0 1")
         b_a7 = board_from_fen("4k3/R7/8/8/8/8/8/4K3 w - - 0 1")
-        # PST difference (a7=5, a1=0) + 7th rank bonus (15) = 20.
-        @test evaluate(b_a7).piece_activity - evaluate(b_a1).piece_activity == 20
+        # PST difference (a7=5, a1=0) + 7th rank bonus (15) + mobility difference (16) = 36.
+        # a7 rook reaches 14 safe squares vs 10 for a1 rook; at 4cp each that adds 16cp.
+        @test evaluate(b_a7).piece_activity - evaluate(b_a1).piece_activity == 36
 
-        # Knight outpost (+35)
-        b_out = board_from_fen("4k3/8/8/8/4N3/8/8/4K3 w - - 0 1")
-        b_no_out = board_from_fen("4k3/8/8/3p4/4N3/8/8/4K3 w - - 0 1")
-        # b_no_out: knight on e4 is NOT an outpost because black pawn on d5 can challenge it.
-        # Delta = Outpost bonus (35) - Semi-outpost if applicable?
-        # Here d5 is not blocked, so it's a full loss of outpost bonus.
+        # Knight outpost (+35): knight must be on rank 5+ (0-indexed rank >= 4) for White.
+        # e5 = rank 4 (0-indexed) qualifies; e4 = rank 3 does not.
+        b_out = board_from_fen("4k3/8/8/4N3/8/8/8/4K3 w - - 0 1")
+        b_no_out = board_from_fen("4k3/8/3p4/4N3/8/8/8/4K3 w - - 0 1")
+        # b_no_out: knight on e5 is NOT an outpost because black pawn on d6 can advance to challenge.
         @test evaluate(b_out).piece_activity > evaluate(b_no_out).piece_activity + 30
     end
 
