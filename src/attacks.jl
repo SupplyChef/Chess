@@ -343,3 +343,4 @@ function _init_attacks!()
     _init_nonsliding_attacks!()
     _init_sliding_attacks!()
 end
+_init_attacks!()

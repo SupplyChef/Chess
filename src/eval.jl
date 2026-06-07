@@ -965,3 +965,4 @@ function explain(e::EvalBreakdown; io::IO = stdout)
     println(io, "  Space:          $(e.space > 0 ? "+" : "")$(e.space)")
     println(io, "  Tempo:          $(e.tempo > 0 ? "+" : "")$(e.tempo)")
 end
+_init_eval!()

@@ -631,3 +631,4 @@ function generate_captures!(ml::MoveList, b::Board)
 
     _filter_legal_precalculated!(ml, b, pin_mask, check_mask)
 end
+_init_castling_masks!()

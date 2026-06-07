@@ -40,3 +40,4 @@ function compute_hash(b::Board)::UInt64
     b.ep_square != -1 && (h ⊻= zob_ep(b.ep_square))
     h
 end
+_init_zobrist!()
