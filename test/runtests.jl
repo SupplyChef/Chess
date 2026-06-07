@@ -405,9 +405,9 @@ using Test
     @testset "Commentary - fork" begin
         # White knight on e5 takes pawn on f7, forking Black king (h8) and rook (d8).
         # Requires a capture to trigger immediate fork commentary.
-        b = board_from_fen("3r3k/5p2/4N3/8/8/8/8/4K3 w - - 0 1")
+        b = board_from_fen("3r3k/5p2/8/4N3/8/8/8/4K3 w - - 0 1")
         # Nxf7+
-        m = move_from_uci(b, "e6f7")
+        m = move_from_uci(b, "e5f7")
         res = SearchResult(m, 100, 1, 1, evaluate(b), Move[m])
         exp = explain_move(res, b, White)
         @test occursin("forking", exp)

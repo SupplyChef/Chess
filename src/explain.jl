@@ -209,16 +209,23 @@ function _is_discovery(b::Board, m::Move)::Bool
 
         # Now check if moving the piece at fr reveals an attack on something valuable
         # We check if the slider `s` now attacks anything it didn't before.
-        # Simplest check: does the slider now attack an enemy piece?
+        # Check if the slider already attacked an enemy piece before the move.
+        atk_before = _is_slider(b.piece_on[s+1].kind) ? (
+            b.piece_on[s+1].kind == Rook ? rook_attacks(s, occ) :
+            b.piece_on[s+1].kind == Bishop ? bishop_attacks(s, occ) :
+            queen_attacks(s, occ)
+        ) : BB(0)
+        already_attacking = (atk_before & b.occ[Int(them)+1]) != 0
+
         undo = make_move!(b, m)
         new_occ = all_occ(b)
-        atk = _is_slider(b.piece_on[s+1].kind) ? (
+        atk_after = _is_slider(b.piece_on[s+1].kind) ? (
             b.piece_on[s+1].kind == Rook ? rook_attacks(s, new_occ) :
             b.piece_on[s+1].kind == Bishop ? bishop_attacks(s, new_occ) :
             queen_attacks(s, new_occ)
         ) : BB(0)
 
-        discovered = (atk & b.occ[Int(them)+1]) != 0
+        discovered = (atk_after & b.occ[Int(them)+1]) != 0 && !already_attacking
         unmake_move!(b, m, undo)
         discovered && return true
     end
@@ -491,15 +498,23 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
     # ── 3. Tactical motifs ─────────────────────────────────────────────────────
     # Pins, discoveries, and traps taking priority over defense/positional.
 
-    # Escaping a pin
+    # Escaping a pin: check if any of our pieces were pinned before but are not anymore.
     pinned_before = _pinned_mask(b, my_color)
-    if (sq_bb(our_fr) & pinned_before) != 0
-        undo = make_move!(b, result.move)
-        pinned_after = _pinned_mask(b, my_color)
-        is_free = (sq_bb(to_sq(result.move)) & pinned_after) == 0
-        unmake_move!(b, result.move, undo)
-        if is_free
+    undo = make_move!(b, result.move)
+    pinned_after = _pinned_mask(b, my_color)
+    unmake_move!(b, result.move, undo)
+
+    unpinned = pinned_before & ~pinned_after
+    if unpinned != 0
+        # If the piece that was unpinned is the one we moved, name it.
+        # Otherwise, just report "escaping the pin".
+        if (sq_bb(our_fr) & unpinned) != 0
             return "I played $our_san — escaping the pin on my $(_piece_name(our_k)). $note"
+        else
+            # Find which piece was unpinned to describe it.
+            unpinned_sq = lsb(unpinned)
+            unpinned_k  = b.piece_on[unpinned_sq+1].kind
+            return "I played $our_san — escaping the pin on my $(_piece_name(unpinned_k)). $note"
         end
     end
 
