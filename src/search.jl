@@ -826,13 +826,18 @@ function search_move(b::Board, time_ms::Int;
         verbose && @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  pv %s\n",
                            depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, pv_str)
 
-        # Only stop early if the mate distance (in half-moves) is within the
-        # current search depth.  A "mate in 17" found at depth 3 via a TT
-        # entry is unverified — the engine would cycle if we stopped here.
-        # Continuing until depth ≥ mate_dist proves the sequence is real.
+        # Only stop early if the mate distance (in half-moves) is strictly less
+        # than the current search depth.  Using < instead of <= gives one extra
+        # depth of verification beyond the minimum needed to *find* the mate.
+        # This prevents a false-mate broadcast when check extensions made the
+        # mating line appear forced at depth D but the refutation requires D+1:
+        # the extension keeps depth the same at the checked node, so the opponent's
+        # evasions are only searched at depth D-1 rather than D, and a quiet king
+        # escape requiring full depth can be missed.  The extra iteration is cheap
+        # (mate sequences are short) and eliminates spurious "checkmate in N" chat.
         if abs(score) >= MATE_SCORE - MAX_PLY
             mate_dist = MATE_SCORE - abs(score)
-            mate_dist <= depth && break
+            mate_dist < depth && break
         end
     end
 
