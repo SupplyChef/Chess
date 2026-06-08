@@ -4,8 +4,8 @@
 # ── Constants ─────────────────────────────────────────────────────────────────
 const MATE_SCORE = 30_000   # a forced mate scores MATE_SCORE - ply
 const MAX_PLY    = 64
-const TT_BITS    = 20
-const TT_SIZE    = 1 << TT_BITS   # ~1M entries
+const TT_BITS    = 22
+const TT_SIZE    = 1 << TT_BITS   # ~4M entries
 
 # TT flag meanings (from the perspective of the side to move at that node):
 #   EXACT  — the stored score is the true minimax value (alpha was raised and
@@ -48,7 +48,10 @@ end
                            depth::Int, score::Int, flag::UInt8, move::Move)
     idx = (hash & (TT_SIZE - 1)) + 1
     @inbounds e = tt[idx]
-    if e.key == 0 || e.depth <= depth
+    # Replace if: empty slot, different position (hash collision — stale entry),
+    # or same position at shallower depth.  Crucially, same-key deeper entries
+    # are preserved so a depth-3 re-search can't destroy a depth-17 result.
+    if e.key == 0 || e.key != hash || e.depth <= depth
         @inbounds tt[idx] = TTEntry(hash, Int32(score), Int16(depth), flag, move)
     end
 end
@@ -162,6 +165,11 @@ const ASPIRATION_DELTA  = 75             # initial aspiration window half-width 
 # plus this margin is still below alpha, quiet moves cannot improve the position
 # and are skipped.  Roughly: 1 pawn at depth 1, 2 pawns at depth 2.
 const FUTILITY_MARGIN = (0, 150, 300)
+
+# Delta pruning margin for quiescence search (centipawns).  A capture whose
+# maximum material gain (captured piece value) plus this margin still falls
+# below alpha is futile and can be skipped without searching it.
+const DELTA_MARGIN = 200
 
 mutable struct SearchInfo
     tt          ::Vector{TTEntry}
@@ -304,6 +312,15 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     best_move = NULL_MOVE
     for i in 1:length(ml)
         m = _pick_move!(ml, i)
+
+        # Delta pruning: skip captures that can't raise alpha even in the best case.
+        # Guard: only when not in check (stand_pat is defined) and not a promotion
+        # (the queen upgrade adds ~800 cp that isn't reflected in the captured piece value).
+        if !in_check && !is_promo(m)
+            fl_m     = flags(m)
+            cap_kind = fl_m == MF_EP ? Pawn : b.piece_on[to_sq(m)+1].kind
+            @inbounds PIECE_VALUE[Int(cap_kind)+1] + stand_pat + DELTA_MARGIN <= alpha && continue
+        end
 
         undo  = make_move!(b, m)
         score = -_quiesce(b, -beta, -alpha, ply + 1, si)
@@ -548,9 +565,12 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         extension = (cfg.check_extensions && gives_check) ? 1 : 0
 
         # LMR: after the first 3 moves, reduce quiet non-checking moves.
+        # Log-based formula: reduction grows with both depth and move index,
+        # giving larger cuts at high depth where re-search cost is highest.
+        # Capped at depth-2 so the reduced search is always at least depth 1.
         reduction = 0
         if cfg.lmr && depth >= 3 && i > 3 && !is_capture && !is_promo && !gives_check && !in_check
-            reduction = i > 8 ? 2 : 1
+            reduction = clamp(1 + floor(Int, log(depth) * log(i) / 2.0), 0, depth - 2)
         end
 
         score = -_negamax(b, depth - 1 + extension - reduction, -beta, -alpha, ply + 1, si, false)
@@ -749,6 +769,10 @@ function search_move(b::Board, time_ms::Int;
 
     prev_score = 0
     for depth in 1:MAX_PLY
+        # Age history scores so data from the most-recent iteration carries more
+        # weight than data from shallow early iterations.
+        si.history .÷= 2
+
         # Aspiration windows: search with a narrow window centred on the previous
         # iteration's score.  If the true score lies outside, we get a fail-low
         # (score ≤ α) or fail-high (score ≥ β) and must re-search with a wider
