@@ -1,8 +1,8 @@
 # Static evaluation. Positive = White is better (centipawns).
 
 # ── Piece values ───────────────────────────────────────────────────────────────
-# Indexed by Int(kind)+1: NoPiece=0 Pawn=100 Knight=320 Bishop=330 Rook=500 Queen=900 King=20000
-const PIECE_VALUE = (0, 100, 320, 330, 500, 900, 20_000)
+# Indexed by Int(kind)+1: NoPiece=0 Pawn=100 Knight=320 Bishop=330 Rook=500 Queen=1000 King=20000
+const PIECE_VALUE = (0, 100, 320, 330, 500, 1000, 20_000)
 
 # ── Piece-square tables ────────────────────────────────────────────────────────
 # 64 entries written rank-8 → rank-1, file-a → file-h (visual board order).
@@ -265,7 +265,7 @@ const (_BACKWARD_W, _BACKWARD_B) = _build_backward_masks()
 # Bonus in centipawns for a passed pawn based on how far advanced it is.
 # Indexed by rank_of(s)+1 (1=rank1 … 8=rank8); ranks 1 and 8 unused for pawns.
 # Growth is intentionally steep: a pawn on rank 7 is one move from a queen
-# (~900 cp swing) so even a 120 cp bonus still heavily undersells the threat.
+# (~1000 cp swing) so even a 120 cp bonus still heavily undersells the threat.
 # The gap between rank 6 and rank 5 reflects that a 7th-rank pawn often queens
 # immediately regardless of what the opponent does.
 const PASSED_BONUS_W = (0, 0, 15, 30, 55, 85, 120, 0)
@@ -425,7 +425,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 atk  = knight_attacks(s) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
                 unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 6 + unsf * 2)
+                score += sign * (safe * 3 + unsf * 1)
                 # Trapped knight penalty
                 safe == 0 && (score -= sign * 100)
                 safe == 1 && (score -= sign * 50)
@@ -434,7 +434,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 atk  = bishop_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
                 unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 5 + unsf * 2)
+                score += sign * (safe * 3 + unsf * 1)
                 # Trapped bishop penalty
                 safe == 0 && (score -= sign * 100)
                 safe == 1 && (score -= sign * 50)
@@ -443,7 +443,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 atk  = rook_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
                 unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 4 + unsf * 1)
+                score += sign * (safe * 2 + unsf * 1)
                 # Trapped rook penalty (e.g. cornered by pawns)
                 safe == 0 && (score -= sign * 100)
             end
@@ -451,7 +451,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 atk  = queen_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
                 unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 2 + unsf * 1)
+                score += sign * (safe * 4 + unsf * 2)
             end
         end
     end
@@ -817,12 +817,13 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             end
             for s in BitIter(bb(b, them, Queen))
                 if (queen_attacks(s, occ) & king_zone) != 0
-                    enemy_atk_count += 1; enemy_atk_weight += 5
+                    enemy_atk_count += 1; enemy_atk_weight += 10
                 end
             end
 
-            if enemy_atk_count >= 2
+            if enemy_atk_count >= 1
                 # Scale by phase: full strength at ph=24, vanishes at ph=0.
+                # Penalty is weighted by (count * weight) to reflect pressure.
                 penalty = (enemy_atk_weight * enemy_atk_count * ph) ÷ 24
                 score -= sign * penalty
             end

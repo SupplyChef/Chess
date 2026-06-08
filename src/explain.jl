@@ -47,14 +47,14 @@ end
 
 function _describe_material(swing::Int, queen_involved::Bool, rook_involved::Bool)::String
     s = abs(swing)
-    s >= 750 && queen_involved ? "the queen" :
-    s >= 750                  ? "significant material" :
+    s >= 850 && queen_involved ? "the queen" :
+    s >= 850                  ? "significant material" :
     s >= 450 && rook_involved ? "a rook" :
     s >= 450                  ? "significant material" :
     s >= 210                  ? "a piece" :
     s >= 150 && rook_involved ? "the exchange" :
     s >= 150                  ? "material" :
-    s >=  80                  ? "a pawn" : ""
+    s >= 95                  ? "a pawn" : ""
 end
 
 # ── Material swing over the PV ────────────────────────────────────────────────
@@ -341,7 +341,7 @@ function _key_move_concept(b::Board, m::Move, our_k::PieceKind,
             # A recapture follows: determine if the net exchange is favorable.
             # (Note: b is the board before m).
             net = cap_val - our_val
-            if net >= 80
+            if net >= 95
                 any_queen = (bb(b, White, Queen) | bb(b, Black, Queen)) != BB(0)
                 any_rook  = (bb(b, White, Rook)  | bb(b, Black, Rook))  != BB(0)
                 # In a recapture, we know exactly which pieces were involved.
@@ -467,8 +467,8 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
     # Score gate: only claim net "win" if the engine's score confirms it.
     is_cap            = is_capture(result.move) || is_ep(result.move)
     is_pr             = is_promo(result.move)
-    genuinely_winning = swing >=  90 && !is_recap && result.score >= 50
-    genuinely_losing  = swing <= -90 && !is_recap && result.score <= -60
+    genuinely_winning = swing >= 95 && !is_recap && result.score >= 50
+    genuinely_losing  = swing <= -95 && !is_recap && result.score <= -60
 
     # ── 2. Immediate material gain ─────────────────────────────────────────────
     # Triggers for captures or promotions. Future wins are handled in positional.
@@ -885,7 +885,7 @@ function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::St
     # opponent reply.  On quiet moves the opponent deviates at n=2 ~57% of the
     # time, making the endpoint description unreliable.
     # • Check:           opponent must escape — very few legal replies.
-    # • Winning capture: material swing ≥ 80cp means the opponent can't simply
+    # • Winning capture: material swing ≥ 95cp means the opponent can't simply
     #                    ignore the capture, so a recapture response is likely.
     undo_gate    = make_move!(b, result.pv[1])
     opp_in_check = king_in_check(b, them)
@@ -893,7 +893,7 @@ function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::St
     is_cap = is_capture(result.pv[1]) || is_ep(result.pv[1])
     if !opp_in_check
         is_cap || return ""
-        _pv_material_swing(result.pv, b) < 80 && return ""
+        _pv_material_swing(result.pv, b) < 95 && return ""
     end
 
     # ── Play through PV; collect endpoint snapshots ────────────────────────────
@@ -945,8 +945,8 @@ function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::St
     rook_won   = ep_them_rooks < rp_them_rooks
     rook_lost  = ep_we_rooks < rp_we_rooks
 
-    mat_gain   = Δmat >= 80  ? _describe_material(Δmat,  queen_won,  rook_won)  : ""
-    mat_loss   = Δmat <= -80 ? _describe_material(Δmat, queen_lost, rook_lost) : ""
+    mat_gain   = Δmat >= 95 ? _describe_material(Δmat,  queen_won,  rook_won)  : ""
+    mat_loss   = Δmat <= -95 ? _describe_material(Δmat, queen_lost, rook_lost) : ""
 
     # ── Named structural changes (sorted by chess importance) ─────────────────
     # Each entry is (priority::Int, text::String); lower priority = report first.
