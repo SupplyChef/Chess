@@ -104,11 +104,16 @@ function apply_moves!(board::Board, moves_str::AbstractString,
     played
 end
 
-# Spend 1/60 of remaining time per move (geometric decay: remaining(n) = R*(59/60)^n,
-# which never reaches zero).  No "expected moves" estimate that breaks in long games.
+# Spend 1/60 of remaining time per move.  The recurrence is:
+#   R[n+1] = R[n]*(59/60) + increment
+# which has fixed point R* = 60*increment.  For 3+2 that is 2 minutes —
+# the clock stabilises there and never flags.  Adding an extra increment
+# bonus would double-count it (it already appears in the recurrence) and
+# would push the fixed point down to 15*increment ≈ 30 s, causing time
+# trouble in long games.  No "expected moves" estimate that breaks in endgames.
 # Max cap at 4% of remaining keeps us safe if a single position explodes.
 function time_for_move(remaining_ms::Int, increment_ms::Int, ::Int)::Int
-    base_ms = remaining_ms ÷ 60 + increment_ms * 3 ÷ 4
+    base_ms = remaining_ms ÷ 60
     max_ms  = max(min(remaining_ms * 4 ÷ 100, remaining_ms - 500), 50)
     clamp(base_ms, 50, max_ms)
 end
