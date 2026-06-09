@@ -384,22 +384,25 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # Insufficient material: neither side can force checkmate.
     _is_insufficient_material(b) && return 0
 
-    # Repetition detection using 3-fold-repetition semantics:
-    #   reps = prior_counts[hash] + occurrences-in-search-path
-    #   current visit adds +1 implicitly, so total occurrences = reps + 1.
-    # We return 0 (draw) when reps >= 2, i.e. this would be the 3rd occurrence.
+    # Repetition detection with separate thresholds for two distinct cases:
     #
-    # reps >= 1 would be over-conservative: it would treat any position seen
-    # once in game history as an instant draw during search.  In long games
-    # this "poisons" most winning queen paths (all the positions just played
-    # during a check sequence appear in prior_counts with count 1) and pushes
-    # the engine toward fresh endgames like K+N+B vs K that score positively
-    # — causing phantom material sacrifices.  reps >= 2 is the correct
-    # threshold: it returns 0 only when this visit would genuinely be the
-    # third occurrence of the position.
-    let reps = get(si.prior_counts, b.hash, 0)
-        for h in si.path; h == b.hash && (reps += 1); end
-        reps >= 2 && return 0
+    # 1. Search-path cycle (position appears in si.path ≥ once): return 0.
+    #    This is the old behaviour preserved: a cycle within the current search
+    #    branch can never be the engine's best choice, so we cut it off quickly.
+    #
+    # 2. Game-history repetition (prior_counts ≥ 2): return 0.
+    #    prior_counts[h] is the number of times position h was seen in the
+    #    actual game before this move.  If it was seen TWICE already, this
+    #    visit is the third occurrence → forced draw, return 0.
+    #    We do NOT return 0 when prior_counts = 1 (only seen once before), because
+    #    that would be over-conservative: it would treat every position touched
+    #    once during a recent check sequence as an instant phantom draw, pushing
+    #    the engine away from winning continuations and toward fresh (but worse)
+    #    endgames — exactly the bug that caused a queen sacrifice to reach K+N+B.
+    let path_reps = 0
+        game_reps  = get(si.prior_counts, b.hash, 0)
+        for h in si.path; h == b.hash && (path_reps += 1); end
+        (path_reps >= 1 || game_reps >= 2) && return 0
     end
 
     # TT probe: if we have previously searched this position at sufficient depth,

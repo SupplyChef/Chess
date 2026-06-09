@@ -336,26 +336,90 @@ using Test
         @test r.score == 0
     end
 
-    @testset "Search - threefold repetition" begin
-        # If a move leads to a position that has already occurred twice, it's a draw.
-        # Or if it occurred once before in the game and once in the current path.
-        b = board_from_fen(STARTPOS)
+    @testset "Repetition detection - genuine 3-fold (game_reps=2) scores as draw" begin
+        # A position that has been seen TWICE in game history (prior_counts=2) is the
+        # third occurrence when visited during search → forced draw → score 0.
+        # We verify this by marking all positions reachable in one move as seen twice,
+        # so every white move immediately returns 0 from _negamax.
+        b = board_from_fen("4k3/8/8/8/8/8/Q7/4K3 w - - 0 1")
+        ml = MoveList()
+        generate_moves!(ml, b)
         si = SearchInfo()
-        # Mocking that STARTPOS has occurred once before.
-        si.prior_counts[b.hash] = 1
+        for i in 1:length(ml)
+            undo = make_move!(b, ml.moves[i])
+            si.prior_counts[b.hash] = 2   # 3rd occurrence would be a draw
+            unmake_move!(b, ml.moves[i], undo)
+        end
+        r = search_move(b, 500; si=si)
+        @test r.score == 0
+    end
 
-        # We need a position where repeating is forced or the best option to see a 0 score,
-        # but simply checking that a repeated position evaluates to 0 in search is enough.
-        # Let's use a child of STARTPOS and see if moving back to STARTPOS is avoided.
-        b2 = board_from_fen("rnbqkbnr/pppppppp/8/8/8/N7/PPPPPPPP/R1BQKBNR b KQkq - 1 1")
-        si2 = SearchInfo()
-        si2.prior_counts[b.hash] = 1 # STARTPOS occurred once
-        # If Black plays Nb8, it's the 2nd time in game + 1 time in path = 2 repetitions (draw).
-        # (Engine returns 0 if reps >= 1).
-        # We can't easily verify the internal move score without more machinery,
-        # but we can verify that search doesn't crash with prior_counts.
-        r = search_move(b2, 200; si=si2)
-        @test true
+    @testset "Repetition detection - second occurrence (game_reps=1) is NOT an instant draw" begin
+        # The fix: a position seen ONCE in game history (prior_counts=1) is only the
+        # second occurrence — not yet a draw.  The engine must search it normally.
+        # We mark all depth-1 positions as seen once and verify the engine still finds
+        # a winning score (K+Q vs K is clearly +900cp of material, not 0).
+        # Under the old (broken) threshold of reps>=1 this would return 0 for every
+        # move and the engine would report score=0 (phantom draw).
+        b = board_from_fen("4k3/8/8/8/8/8/Q7/4K3 w - - 0 1")
+        ml = MoveList()
+        generate_moves!(ml, b)
+        si = SearchInfo()
+        for i in 1:length(ml)
+            undo = make_move!(b, ml.moves[i])
+            si.prior_counts[b.hash] = 1   # seen once — second occurrence, not drawn
+            unmake_move!(b, ml.moves[i], undo)
+        end
+        r = search_move(b, 500; si=si)
+        # With the fix the engine searches through those positions and finds the win.
+        @test r.score > 500
+    end
+
+    @testset "Regression - no phantom queen sacrifice via prior_counts poisoning" begin
+        # Reproduces the class of bug that caused the engine to sacrifice its queen
+        # to reach a K+N+B vs K endgame during a long game.
+        #
+        # Setup: position resembling move 46 of the reported game.
+        #   White: Qa7, Be5, Nc1, Ke1 — material advantage ~+1550cp.
+        #   Black: Kb5 only.
+        #
+        # The bug: after a check sequence on moves 43–45, the positions that the
+        # queen just visited (Qa6+, Qa7+, etc.) are in prior_counts with count=1.
+        # Under the old threshold (reps>=1) every one of those queen continuations
+        # returned 0 immediately (phantom draw).  The only "fresh" path that scored
+        # above 0 was Qb6+ → Kxb6 (king captures the undefended queen), leaving
+        # K+N+B vs K at ~+650cp — so the engine sacrificed the queen.
+        #
+        # The fix (separate thresholds: path_reps>=1 OR game_reps>=2) lets the engine
+        # search through positions seen once in game history; it then finds proper
+        # winning continuations that score well above +650cp.
+        b = board_from_fen("8/Q7/8/1k2B3/8/8/8/2N1K3 w - - 0 46")
+
+        queen_sq = lsb(bb(b, White, Queen))
+        ml = MoveList()
+        generate_moves!(ml, b)
+        si = SearchInfo()
+
+        # Mark all queen-move destinations EXCEPT Qb6+ as "seen once in game history".
+        # This makes the old code treat them as instant phantom draws (score=0),
+        # leaving Qb6+ as the only continuation that scores above zero (+650cp for
+        # the resulting K+N+B endgame).  The fix must not fall for this trap.
+        for i in 1:length(ml)
+            m = ml.moves[i]
+            if from_sq(m) == queen_sq && move_to_uci(m) != "a7b6"
+                undo = make_move!(b, m)
+                si.prior_counts[b.hash] = 1
+                unmake_move!(b, m, undo)
+            end
+        end
+
+        r = search_move(b, 2000; si=si)
+
+        # Engine must not sacrifice the queen (Qb6+ = "a7b6").
+        @test move_to_uci(r.move) != "a7b6"
+        # Engine must report a score clearly above K+N+B material (~650cp),
+        # proving it found a real winning continuation rather than a bare endgame.
+        @test r.score > 650
     end
 
     # ── Trickiness ────────────────────────────────────────────────────────────
