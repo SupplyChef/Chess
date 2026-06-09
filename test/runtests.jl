@@ -337,20 +337,20 @@ using Test
     end
 
     @testset "Repetition detection - genuine 3-fold (game_reps=2) scores as draw" begin
-        # A position that has been seen TWICE in game history (prior_counts=2) is the
-        # third occurrence when visited during search → forced draw → score 0.
-        # We verify this by marking all positions reachable in one move as seen twice,
-        # so every white move immediately returns 0 from _negamax.
+        # A position that has been seen TWICE in game history is the third occurrence
+        # when visited during search → forced draw → score 0.
+        # We verify by marking all depth-1 positions as seen twice so every white
+        # move immediately returns 0 from _negamax.
         b = board_from_fen("4k3/8/8/8/8/8/Q7/4K3 w - - 0 1")
         ml = MoveList()
         generate_moves!(ml, b)
-        si = SearchInfo()
+        pc = Dict{UInt64,Int}()
         for i in 1:length(ml)
             undo = make_move!(b, ml.moves[i])
-            si.prior_counts[b.hash] = 2   # 3rd occurrence would be a draw
+            pc[b.hash] = 2   # 3rd occurrence would be a forced draw
             unmake_move!(b, ml.moves[i], undo)
         end
-        r = search_move(b, 500; si=si)
+        r = search_move(b, 500; prior_counts=pc)
         @test r.score == 0
     end
 
@@ -364,13 +364,13 @@ using Test
         b = board_from_fen("4k3/8/8/8/8/8/Q7/4K3 w - - 0 1")
         ml = MoveList()
         generate_moves!(ml, b)
-        si = SearchInfo()
+        pc = Dict{UInt64,Int}()
         for i in 1:length(ml)
             undo = make_move!(b, ml.moves[i])
-            si.prior_counts[b.hash] = 1   # seen once — second occurrence, not drawn
+            pc[b.hash] = 1   # seen once — second occurrence, not yet drawn
             unmake_move!(b, ml.moves[i], undo)
         end
-        r = search_move(b, 500; si=si)
+        r = search_move(b, 500; prior_counts=pc)
         # With the fix the engine searches through those positions and finds the win.
         @test r.score > 500
     end
@@ -383,12 +383,12 @@ using Test
         #   White: Qa7, Be5, Nc1, Ke1 — material advantage ~+1550cp.
         #   Black: Kb5 only.
         #
-        # The bug: after a check sequence on moves 43–45, the positions that the
-        # queen just visited (Qa6+, Qa7+, etc.) are in prior_counts with count=1.
-        # Under the old threshold (reps>=1) every one of those queen continuations
-        # returned 0 immediately (phantom draw).  The only "fresh" path that scored
-        # above 0 was Qb6+ → Kxb6 (king captures the undefended queen), leaving
-        # K+N+B vs K at ~+650cp — so the engine sacrificed the queen.
+        # The bug: after a check sequence on moves 43–45, the positions the queen just
+        # visited are in prior_counts with count=1.  Under the old threshold (reps>=1)
+        # every one of those queen continuations returned 0 immediately (phantom draw).
+        # The only "fresh" path that scored above 0 was Qb6+ → Kxb6 (king captures
+        # the undefended queen), leaving K+N+B vs K at ~+650cp — so the engine
+        # sacrificed the queen.
         #
         # The fix (separate thresholds: path_reps>=1 OR game_reps>=2) lets the engine
         # search through positions seen once in game history; it then finds proper
@@ -398,7 +398,7 @@ using Test
         queen_sq = lsb(bb(b, White, Queen))
         ml = MoveList()
         generate_moves!(ml, b)
-        si = SearchInfo()
+        pc = Dict{UInt64,Int}()
 
         # Mark all queen-move destinations EXCEPT Qb6+ as "seen once in game history".
         # This makes the old code treat them as instant phantom draws (score=0),
@@ -408,12 +408,12 @@ using Test
             m = ml.moves[i]
             if from_sq(m) == queen_sq && move_to_uci(m) != "a7b6"
                 undo = make_move!(b, m)
-                si.prior_counts[b.hash] = 1
+                pc[b.hash] = 1
                 unmake_move!(b, m, undo)
             end
         end
 
-        r = search_move(b, 2000; si=si)
+        r = search_move(b, 2000; prior_counts=pc)
 
         # Engine must not sacrifice the queen (Qb6+ = "a7b6").
         @test move_to_uci(r.move) != "a7b6"
