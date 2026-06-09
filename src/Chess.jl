@@ -51,7 +51,7 @@ export
     all_occ, other,
     # fen
     board_from_fen, board_to_fen, display_board, STARTPOS,
-    move_from_uci, move_to_uci,
+    move_from_uci, move_to_uci, apply_moves!,
     # move query
     from_sq, to_sq, flags, is_capture, is_promo, is_castle, is_ep, promo_kind,
     # movegen

@@ -84,25 +84,7 @@ end
 
 # ── Board helpers ──────────────────────────────────────────────────────────────
 
-# Apply a space-separated UCI move list to board, updating position_counts.
-# Returns the list of Move objects played.
-function apply_moves!(board::Board, moves_str::AbstractString,
-                      counts::Dict{UInt64, Int})::Vector{Move}
-    played = Move[]
-    isempty(strip(moves_str)) && return played
-    for uci in split(strip(moves_str))
-        isempty(uci) && continue
-        try
-            m = move_from_uci(board, String(uci))
-            make_move!(board, m)
-            counts[board.hash] = get(counts, board.hash, 0) + 1
-            push!(played, m)
-        catch e
-            @warn "Skipping illegal move $uci: $e"
-        end
-    end
-    played
-end
+# apply_moves! is defined in Chess.fen (src/fen.jl) and exported from the module.
 
 # Spend 1/60 of remaining time per move.  The recurrence is:
 #   R[n+1] = R[n]*(59/60) + increment
