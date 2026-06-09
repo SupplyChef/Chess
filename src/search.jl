@@ -773,8 +773,16 @@ function search_move(b::Board, time_ms::Int;
     best_move       = NULL_MOVE
     best_score      = 0
     best_depth      = 0
+    best_pv         = Move[]              # PV cached after each *completed* depth
     completed_roots = Tuple{Int,Move}[]   # root_moves from last complete iteration
     pv_candidates   = Set{Move}()         # moves that were AB-best at some iteration
+
+    # Time extension state: when the position is "unstable" (score swings a lot
+    # or the best move changes), we grant a one-time extension of up to 1× the
+    # original time allocation so the engine can resolve the uncertainty.
+    time_extended    = false
+    prev_best_move   = NULL_MOVE
+    time_hard_limit  = si.time_start + time_ms * 2 / 1000.0
 
     prev_score = 0
     for depth in 1:MAX_PLY
@@ -820,17 +828,38 @@ function search_move(b::Board, time_ms::Int;
         best_move  = move
         best_score = score
         best_depth = depth
-        prev_score = score
         push!(pv_candidates, move)
         resize!(completed_roots, length(si.root_moves))
         copyto!(completed_roots, si.root_moves)
 
         elapsed_ms = round(Int, (time() - si.time_start) * 1_000)
         nps        = elapsed_ms > 0 ? si.nodes * 1_000 ÷ elapsed_ms : 0
+        # Extract the PV now, while the TT reflects a *completed* iteration.
+        # Storing it here prevents the subsequent partial depth+1 search from
+        # overwriting TT_EXACT entries with TT_UPPER entries (due to aspiration
+        # fail-low sub-trees), which would shorten the PV to a single move.
         pv_moves   = _extract_pv(b, si.tt, best_move, 8)
+        best_pv    = copy(pv_moves)
         pv_str     = join(move_to_uci.(pv_moves), " ")
         verbose && @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  pv %s\n",
                            depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, pv_str)
+
+        # Time extension: when the position is unstable — either the score swings
+        # more than 100 cp from the previous depth, or the best move changes —
+        # grant a one-time extension so the engine can resolve the uncertainty.
+        # This mirrors what adaptive-time-management engines do: spending more
+        # time on critical moves where the first answer is likely wrong.
+        # Guard: don't extend on mate scores (those converge quickly anyway).
+        if depth >= 5 && !time_extended && abs(score) < MATE_SCORE - MAX_PLY
+            score_swing  = abs(score - prev_score)
+            move_changed = (prev_best_move != NULL_MOVE && move != prev_best_move)
+            if score_swing > 100 || move_changed
+                si.time_limit = min(si.time_limit + time_ms / 1000.0, time_hard_limit)
+                time_extended = true
+            end
+        end
+        prev_score     = score
+        prev_best_move = move
 
         # Only stop early if the mate distance (in half-moves) is strictly less
         # than the current search depth.  Using < instead of <= gives one extra
@@ -857,6 +886,8 @@ function search_move(b::Board, time_ms::Int;
     # ranked 5th) was never searched as the main line — we don't know its true
     # value, so selecting it based on shallow trickiness would mean playing an
     # un-analyzed move.
+    id_best_move = best_move   # best move after ID; may be overridden by trickiness
+
     if best_depth >= 4 && length(completed_roots) >= 2 && !is_capture(best_move)
         sort!(completed_roots; by = first, rev = true)
         threshold = completed_roots[1][1] - 30
@@ -879,6 +910,12 @@ function search_move(b::Board, time_ms::Int;
         !si.stop && (best_move = trick_move)
     end
 
-    pv = _extract_pv(b, si.tt, best_move, 10)
+    # Use the PV cached from the last *completed* depth when the trickiness pass
+    # did not change the best move.  That cache was built while the TT was clean;
+    # the subsequent partial depth+1 search and the trickiness pass both write
+    # shallow TT_UPPER entries that would shorten a fresh extraction to one move.
+    # If trickiness did pick a different move, re-extract — the cached PV no
+    # longer matches the selected move and we accept a potentially shorter line.
+    pv = best_move == id_best_move ? best_pv : _extract_pv(b, si.tt, best_move, 10)
     SearchResult(best_move, best_score, best_depth, si.nodes, evaluate(b, si.config), pv)
 end
