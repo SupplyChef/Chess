@@ -384,14 +384,22 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # Insufficient material: neither side can force checkmate.
     _is_insufficient_material(b) && return 0
 
-    # Repetition: count how many times this position has been seen before —
-    # both in the game (prior_counts) and on the current search path.
-    # One prior occurrence means this is the second: we return 0 (draw value)
-    # so the engine avoids the repetition when winning and embraces it when losing.
-    # Two prior occurrences means this would be the third → forced draw, also 0.
+    # Repetition detection using 3-fold-repetition semantics:
+    #   reps = prior_counts[hash] + occurrences-in-search-path
+    #   current visit adds +1 implicitly, so total occurrences = reps + 1.
+    # We return 0 (draw) when reps >= 2, i.e. this would be the 3rd occurrence.
+    #
+    # reps >= 1 would be over-conservative: it would treat any position seen
+    # once in game history as an instant draw during search.  In long games
+    # this "poisons" most winning queen paths (all the positions just played
+    # during a check sequence appear in prior_counts with count 1) and pushes
+    # the engine toward fresh endgames like K+N+B vs K that score positively
+    # — causing phantom material sacrifices.  reps >= 2 is the correct
+    # threshold: it returns 0 only when this visit would genuinely be the
+    # third occurrence of the position.
     let reps = get(si.prior_counts, b.hash, 0)
         for h in si.path; h == b.hash && (reps += 1); end
-        reps >= 1 && return 0
+        reps >= 2 && return 0
     end
 
     # TT probe: if we have previously searched this position at sufficient depth,
