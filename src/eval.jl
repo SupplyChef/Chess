@@ -703,10 +703,10 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             n = count_bits(fp)
             # Doubled pawns: penalty per extra pawn on the same file.
             # The lead pawn is neutral; each additional pawn is a liability
-            # because it cannot protect the one ahead of it.  −25 cp reflects
+            # because it cannot protect the one ahead of it.  −12 cp reflects
             # that doubled pawns also create weaknesses on the adjacent files
             # that the opponent can target with a rook or majority.
-            n > 1 && (score += sign * (n - 1) * (-25))
+            n > 1 && (score += sign * (n - 1) * (-12))
             # Isolated pawns: no friendly pawn on either adjacent file means
             # this pawn can never be defended by another pawn.  −20 cp is larger
             # than the doubled penalty because an isolated pawn is a permanent
@@ -802,22 +802,22 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
 
             for s in BitIter(bb(b, them, Knight))
                 if (knight_attacks(s) & king_zone) != 0
-                    enemy_atk_count += 1; enemy_atk_weight += 2
+                    enemy_atk_count += 1; enemy_atk_weight += 5
                 end
             end
             for s in BitIter(bb(b, them, Bishop))
                 if (bishop_attacks(s, occ) & king_zone) != 0
-                    enemy_atk_count += 1; enemy_atk_weight += 2
+                    enemy_atk_count += 1; enemy_atk_weight += 5
                 end
             end
             for s in BitIter(bb(b, them, Rook))
                 if (rook_attacks(s, occ) & king_zone) != 0
-                    enemy_atk_count += 1; enemy_atk_weight += 3
+                    enemy_atk_count += 1; enemy_atk_weight += 8
                 end
             end
             for s in BitIter(bb(b, them, Queen))
                 if (queen_attacks(s, occ) & king_zone) != 0
-                    enemy_atk_count += 1; enemy_atk_weight += 10
+                    enemy_atk_count += 1; enemy_atk_weight += 20
                 end
             end
 
