@@ -691,6 +691,7 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
                       si::SearchInfo)::Tuple{Int,Move}
     best_score = -MATE_SCORE
     best_move  = NULL_MOVE
+    orig_alpha = alpha   # needed to distinguish exact from upper-bound results
 
     tte       = _tt_get(si.tt, b.hash)
     hash_move = tte.key == b.hash ? tte.move : NULL_MOVE
@@ -721,9 +722,13 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
         end
     end
 
-    # best_score >= beta means the true score is at least best_score (lower bound);
-    # we searched all root moves but the window was narrow (aspiration fail-high).
-    flag = best_score >= beta ? TT_LOWER : TT_EXACT
+    # Use the same three-case flag as _negamax so the entry is valid when the
+    # position is later encountered as a sub-tree node in future searches:
+    #   fail-high (best_score >= beta):  TT_LOWER  — true score ≥ best_score
+    #   inside window (> orig_alpha):    TT_EXACT  — this IS the minimax value
+    #   fail-low (never beat orig_alpha): TT_UPPER — true score ≤ best_score
+    flag = best_score >= beta      ? TT_LOWER :
+           best_score > orig_alpha ? TT_EXACT : TT_UPPER
     _tt_put!(si.tt, b.hash, depth, best_score, flag, best_move)
     (best_score, best_move)
 end
@@ -792,10 +797,7 @@ function search_move(b::Board, time_ms::Int;
             while true
                 score, move = _search_root(b, depth, α, β, si)
                 si.stop && break
-                if score <= α          # fail-low: the position is worse than expected;
-                    # keep β close to the old α (the score won't be much higher)
-                    # and widen the lower side only.
-                    β  = (α + β) ÷ 2
+                if score <= α          # fail-low: widen only the lower bound and retry.
                     α  = max(-MATE_SCORE, score - δ)
                     δ *= 3
                 elseif score >= β      # fail-high: a move scored much better than expected;

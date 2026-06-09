@@ -268,8 +268,11 @@ const (_BACKWARD_W, _BACKWARD_B) = _build_backward_masks()
 # (~1000 cp swing) so even a 120 cp bonus still heavily undersells the threat.
 # The gap between rank 6 and rank 5 reflects that a 7th-rank pawn often queens
 # immediately regardless of what the opponent does.
-const PASSED_BONUS_W = (0, 0, 15, 30, 55, 85, 120, 0)
-const PASSED_BONUS_B = (0, 120, 85, 55, 30, 15,   0, 0)
+# Ranks 3-5 are intentionally bumped so the engine correctly resists trading
+# into endgames where the opponent gets two advanced connected passers — the
+# danger of those positions was systematically underestimated at shallow depth.
+const PASSED_BONUS_W = (0, 0, 15, 40, 65, 95, 130, 0)
+const PASSED_BONUS_B = (0, 130, 95, 65, 40, 15,   0, 0)
 
 @inline _passed_bonus(s::Square, c::Color)::Int =
     c == White ? PASSED_BONUS_W[rank_of(s)+1] : PASSED_BONUS_B[rank_of(s)+1]
@@ -739,13 +742,14 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         end
 
         # Connected passed pawns: adjacent passers support each other and are
-        # very difficult to stop together.
+        # very difficult to stop together — a lone bishop cannot handle both
+        # simultaneously, so the bonus is intentionally large.
         if cfg.eval_connected_passers
             for s in BitIter(passed_bb)
                 f = file_of(s)
                 neighbor = (f > 0 ? FILE_MASK[f]   : BB(0)) |
                            (f < 7 ? FILE_MASK[f+2] : BB(0))
-                (passed_bb & neighbor) != 0 && (score += sign * 25)
+                (passed_bb & neighbor) != 0 && (score += sign * 40)
             end
         end
     end
