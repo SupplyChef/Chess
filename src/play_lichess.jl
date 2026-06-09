@@ -86,6 +86,10 @@ end
 
 # Apply a space-separated UCI move list to board, updating position_counts.
 # Returns the list of Move objects played.
+# After each irreversible move (pawn push or capture, detected by halfmove == 0)
+# the counts are cleared: positions before such a move can never repeat, so they
+# are irrelevant for repetition detection and only pollute prior_counts with
+# phantom draws.
 function apply_moves!(board::Board, moves_str::AbstractString,
                       counts::Dict{UInt64, Int})::Vector{Move}
     played = Move[]
@@ -95,6 +99,8 @@ function apply_moves!(board::Board, moves_str::AbstractString,
         try
             m = move_from_uci(board, String(uci))
             make_move!(board, m)
+            # halfmove resets to 0 on every pawn push or capture.
+            board.halfmove == 0 && empty!(counts)
             counts[board.hash] = get(counts, board.hash, 0) + 1
             push!(played, m)
         catch e

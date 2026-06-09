@@ -384,25 +384,18 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # Insufficient material: neither side can force checkmate.
     _is_insufficient_material(b) && return 0
 
-    # Repetition detection with separate thresholds for two distinct cases:
+    # Repetition detection: count occurrences both in the game (prior_counts) and
+    # on the current search path (si.path).  reps >= 1 means this position has
+    # been seen before → visiting it again creates a draw risk, so we return 0.
     #
-    # 1. Search-path cycle (position appears in si.path ≥ once): return 0.
-    #    This is the old behaviour preserved: a cycle within the current search
-    #    branch can never be the engine's best choice, so we cut it off quickly.
-    #
-    # 2. Game-history repetition (prior_counts ≥ 2): return 0.
-    #    prior_counts[h] is the number of times position h was seen in the
-    #    actual game before this move.  If it was seen TWICE already, this
-    #    visit is the third occurrence → forced draw, return 0.
-    #    We do NOT return 0 when prior_counts = 1 (only seen once before), because
-    #    that would be over-conservative: it would treat every position touched
-    #    once during a recent check sequence as an instant phantom draw, pushing
-    #    the engine away from winning continuations and toward fresh (but worse)
-    #    endgames — exactly the bug that caused a queen sacrifice to reach K+N+B.
-    let path_reps = 0
-        game_reps  = get(si.prior_counts, b.hash, 0)
-        for h in si.path; h == b.hash && (path_reps += 1); end
-        (path_reps >= 1 || game_reps >= 2) && return 0
+    # This is safe because apply_moves! empties prior_counts after every capture
+    # or pawn push.  Only positions from the current "reversible window" (since
+    # the last irreversible move) are counted, so every hash in prior_counts
+    # represents a position that could genuinely be repeated.  There are no
+    # phantom entries from a previous check sequence that ended with a capture.
+    let reps = get(si.prior_counts, b.hash, 0)
+        for h in si.path; h == b.hash && (reps += 1); end
+        reps >= 1 && return 0
     end
 
     # TT probe: if we have previously searched this position at sufficient depth,
