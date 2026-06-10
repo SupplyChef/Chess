@@ -343,6 +343,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     for c in (White, Black)
         sign        = c == White ? 1 : -1
         my_pawns    = bb(b, c, Pawn)
+        enemy_pawns = c == White ? bp : wp
         seventh     = c == White ? 6 : 1   # 0-indexed rank of the 7th rank
 
         # Rook on open file (+20) or semi-open file (+10).

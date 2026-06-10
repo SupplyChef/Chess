@@ -389,7 +389,9 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # been seen before → visiting it again creates a draw risk, so we return 0.
     #
     # Repetition is only possible if there have been at least 4 reversible plies.
-    if b.halfmove >= 4
+    # However, if prior_counts is populated, it means some positions might
+    # already be repeating even if halfmove is low at the current node.
+    if !isempty(si.prior_counts) || b.halfmove >= 4
         let reps = get(si.prior_counts, b.hash, 0)
             for h in si.path; h == b.hash && (reps += 1); end
             reps >= 1 && return 0

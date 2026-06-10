@@ -479,7 +479,9 @@ end
 # If 0 bits: not in check. 1 bit: single check. 2+ bits: double check.
 function get_pin_and_checker_masks(b::Board, us::Color)
     them = other(us)
-    ks   = lsb(bb(b, us, King))
+    k_bb = bb(b, us, King)
+    k_bb == 0 && return BB(0), BB(0)
+    ks   = lsb(k_bb)
     occ  = all_occ(b)
 
     pin_mask   = BB(0)
