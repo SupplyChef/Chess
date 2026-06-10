@@ -235,13 +235,17 @@ end
 # Reverse-lookup: does any piece of `defender` attack `sq`?
 # Uses the symmetry of attack sets: a square S attacked by a knight iff a
 # knight on S attacks a real knight of the defender, etc.
-function _is_defended(b::Board, sq::Int, defender::Color)::Bool
-    occ = all_occ(b)
-    (pawn_attacks(sq, other(defender))  & bb(b, defender, Pawn))                              != 0 && return true
-    (knight_attacks(sq)                 & bb(b, defender, Knight))                             != 0 && return true
-    (bishop_attacks(sq, occ)            & (bb(b, defender, Bishop) | bb(b, defender, Queen))) != 0 && return true
-    (rook_attacks(sq, occ)              & (bb(b, defender, Rook)   | bb(b, defender, Queen))) != 0 && return true
-    (king_attacks(sq)                   & bb(b, defender, King))                               != 0 && return true
+# `ignore_sq` (optional) treats that square as empty: the piece standing there
+# neither defends `sq` nor blocks slider lines.  Used to ask "would `sq` still
+# be defended without the piece we just moved there?".
+function _is_defended(b::Board, sq::Int, defender::Color; ignore_sq::Int = -1)::Bool
+    skip = ignore_sq >= 0 ? sq_bb(ignore_sq) : BB(0)
+    occ  = all_occ(b) & ~skip
+    (pawn_attacks(sq, other(defender))  & bb(b, defender, Pawn)   & ~skip)                             != 0 && return true
+    (knight_attacks(sq)                 & bb(b, defender, Knight) & ~skip)                             != 0 && return true
+    (bishop_attacks(sq, occ)            & (bb(b, defender, Bishop) | bb(b, defender, Queen)) & ~skip)  != 0 && return true
+    (rook_attacks(sq, occ)              & (bb(b, defender, Rook)   | bb(b, defender, Queen)) & ~skip)  != 0 && return true
+    (king_attacks(sq)                   & bb(b, defender, King)    & ~skip)                            != 0 && return true
     false
 end
 
@@ -576,10 +580,13 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
             end
 
             # 2. Does the move protect one of the threatened pieces?
-            # Refinement: Only claim if it was HANGING (undefended) before.
+            # Refinement: only claim if the piece is hanging WITHOUT the moved
+            # piece's contribution (ignore its destination square) but defended
+            # WITH it — i.e. the move itself supplied the protection.
             undo_tmp = make_move!(b, result.move)
+            our_to   = to_sq(result.move)
             for s in BitIter(threatened)
-                if b.piece_on[s+1].kind != NoPiece && !_is_defended(b, s, my_color; ignore_sq=our_fr)
+                if b.piece_on[s+1].kind != NoPiece && !_is_defended(b, s, my_color; ignore_sq=our_to)
                     if _is_defended(b, s, my_color) # now it is defended
                         name = _piece_name(b.piece_on[s+1].kind)
                         unmake_move!(b, result.move, undo_tmp)

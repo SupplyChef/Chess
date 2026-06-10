@@ -46,6 +46,26 @@ Base.@kwdef struct EngineConfig
     # Check extensions: moves that give check are searched 1 ply deeper,
     # ensuring forced mating sequences are found through LMR reductions.
 
+    pvs              ::Bool = true
+    # Principal variation search: the first move at each node is searched with
+    # the full (α, β) window; every later move gets a cheap null-window scout
+    # search (α, α+1) and is only re-searched with the full window if the scout
+    # beats α.  With good move ordering the scout almost always fails low,
+    # saving most of the work on non-PV moves.
+
+    see              ::Bool = true
+    # Static exchange evaluation: resolve the full capture sequence on the
+    # target square (with x-rays) to decide whether a capture loses material.
+    # Used to (a) order SEE-losing captures after quiet moves and (b) prune
+    # them entirely in quiescence search.
+
+    lazy_eval        ::Bool = true
+    # Lazy evaluation: when the cheap eval core (material + tapered PST +
+    # tempo) is more than LAZY_EVAL_MARGIN outside the (α, β) window, return
+    # the core directly instead of computing mobility / king safety / pawn
+    # structure.  The remaining terms cannot move the score back inside the
+    # window, so the bound-relative search result is unchanged.
+
     # ── Evaluation terms ───────────────────────────────────────────────────────
     # Each term adds a centipawn bonus/penalty to the static eval.
     # Disabling one shows how much it contributes to play quality.

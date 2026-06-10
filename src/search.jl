@@ -56,6 +56,87 @@ end
     end
 end
 
+# ── Static exchange evaluation ────────────────────────────────────────────────
+# _see_ge(b, m, threshold) answers: "does the capture sequence started by m win
+# at least `threshold` centipawns for the side to move?"  It resolves the full
+# exchange on the target square with the classic swap algorithm: both sides
+# keep recapturing with their least valuable attacker (x-ray attackers behind
+# the piece that just captured are added as the occupancy shrinks) and each
+# side may stop as soon as continuing would lose material.
+#
+# `swap` tracks the running balance handed to the side about to move; `res`
+# flips each time the side to move changes and holds the answer for the side
+# that played m if the sequence stopped right now.  A king may recapture only
+# when the opponent has no attacker left (otherwise the "recapture" is illegal
+# and the result flips back).
+#
+# Promotions and castles are not handled (callers exclude them); quiet moves
+# work (victim value 0) but the main use is captures.
+function _see_ge(b::Board, m::Move, threshold::Int)::Bool
+    fl = flags(m)
+    fr = from_sq(m)
+    t  = to_sq(m)
+
+    victim_v = fl == MF_EP ? PIECE_VALUE[Int(Pawn)+1] :
+                             PIECE_VALUE[Int(b.piece_on[t+1].kind)+1]
+    # Best case: we win the victim and nothing recaptures.
+    swap = victim_v - threshold
+    swap < 0 && return false
+    # Worst case: we lose the mover right back.  If that still meets the
+    # threshold, no need to look at the board at all.
+    swap = PIECE_VALUE[Int(b.piece_on[fr+1].kind)+1] - swap
+    swap <= 0 && return true
+
+    occupied = all_occ(b) ⊻ sq_bb(fr) ⊻ sq_bb(t)
+    if fl == MF_EP
+        occupied ⊻= sq_bb(t + (b.side == White ? -8 : 8))
+    end
+
+    diag_sliders = bb(b, White, Bishop) | bb(b, Black, Bishop) |
+                   bb(b, White, Queen)  | bb(b, Black, Queen)
+    orth_sliders = bb(b, White, Rook)   | bb(b, Black, Rook)   |
+                   bb(b, White, Queen)  | bb(b, Black, Queen)
+
+    attackers = attackers_to(b, t, occupied)
+    stm       = b.side
+    res       = true
+
+    while true
+        stm = other(stm)
+        attackers &= occupied
+        stm_attackers = attackers & b.occ[Int(stm)+1]
+        stm_attackers == 0 && break
+        res = !res
+
+        # Capture with the least valuable attacker.  After removing it from
+        # the occupancy, sliders that were lined up behind it join the battle.
+        if (pcs = stm_attackers & bb(b, stm, Pawn)) != 0
+            (swap = PIECE_VALUE[Int(Pawn)+1] - swap) < Int(res) && break
+            occupied ⊻= sq_bb(lsb(pcs))
+            attackers |= bishop_attacks(t, occupied) & diag_sliders
+        elseif (pcs = stm_attackers & bb(b, stm, Knight)) != 0
+            (swap = PIECE_VALUE[Int(Knight)+1] - swap) < Int(res) && break
+            occupied ⊻= sq_bb(lsb(pcs))
+        elseif (pcs = stm_attackers & bb(b, stm, Bishop)) != 0
+            (swap = PIECE_VALUE[Int(Bishop)+1] - swap) < Int(res) && break
+            occupied ⊻= sq_bb(lsb(pcs))
+            attackers |= bishop_attacks(t, occupied) & diag_sliders
+        elseif (pcs = stm_attackers & bb(b, stm, Rook)) != 0
+            (swap = PIECE_VALUE[Int(Rook)+1] - swap) < Int(res) && break
+            occupied ⊻= sq_bb(lsb(pcs))
+            attackers |= rook_attacks(t, occupied) & orth_sliders
+        elseif (pcs = stm_attackers & bb(b, stm, Queen)) != 0
+            (swap = PIECE_VALUE[Int(Queen)+1] - swap) < Int(res) && break
+            occupied ⊻= sq_bb(lsb(pcs))
+            attackers |= (bishop_attacks(t, occupied) & diag_sliders) |
+                         (rook_attacks(t, occupied)   & orth_sliders)
+        else  # king: legal only if the opponent has no attackers left
+            return (attackers & occupied & ~b.occ[Int(stm)+1]) != 0 ? !res : res
+        end
+    end
+    res
+end
+
 # ── Move ordering ──────────────────────────────────────────────────────────────
 # Good move ordering is the single biggest practical speedup for alpha-beta:
 # searching the best moves first causes beta cutoffs earlier, pruning more of
@@ -76,7 +157,7 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
 
 @inline function _move_score(m::Move, b::Board, hash_move::Move,
                               killers::Matrix{Move}, history::Matrix{Int32},
-                              ply::Int)::Int
+                              ply::Int, cfg::EngineConfig)::Int
     m == hash_move && return 1_000_000
 
     fl = flags(m)
@@ -85,7 +166,18 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
         aggr    = b.piece_on[from_sq(m)+1].kind
         # Victim weight dominates (×10) so any more-valuable capture outranks
         # any less-valuable capture regardless of the aggressor.
-        return 100_000 + _MVV[Int(victim)+1] * 10 - _MVV[Int(aggr)+1]
+        mvv_lva = _MVV[Int(victim)+1] * 10 - _MVV[Int(aggr)+1]
+        # SEE gate: captures of a more valuable piece can never lose material,
+        # so the exchange is only resolved when the aggressor outvalues the
+        # victim (promo-captures are exempt: the aggressor is always a pawn).
+        # Losing captures sort below every quiet move — they are almost always
+        # refuted, so searching quiets first finds cutoffs sooner.
+        if cfg.see && (fl & MF_PROMO) == 0 &&
+           PIECE_VALUE[Int(aggr)+1] > PIECE_VALUE[Int(victim)+1] &&
+           !_see_ge(b, m, 0)
+            return -100_000 + mvv_lva
+        end
+        return 100_000 + mvv_lva
     end
 
     (fl & MF_PROMO) != 0 && return 90_000
@@ -111,9 +203,9 @@ end
 # Fill ml.scores with move ordering scores (parallel to ml.moves).
 @inline function _score_moves!(ml::MoveList, b::Board, hash_move::Move,
                                killers::Matrix{Move}, history::Matrix{Int32},
-                               ply::Int, start_idx::Int=1)
+                               ply::Int, cfg::EngineConfig, start_idx::Int=1)
     @inbounds for i in start_idx:length(ml)
-        ml.scores[i] = _move_score(ml[i], b, hash_move, killers, history, ply)
+        ml.scores[i] = _move_score(ml[i], b, hash_move, killers, history, ply, cfg)
     end
 end
 
@@ -294,7 +386,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
 
     orig_alpha = alpha
     if !in_check
-        stand_pat = (b.side == White ? 1 : -1) * total(evaluate(b, si.config))
+        stand_pat = evaluate_lazy(b, si.config, alpha, beta)
         stand_pat >= beta && return stand_pat
         alpha = max(alpha, stand_pat)
     end
@@ -306,12 +398,19 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     # return alpha (= stand_pat).  In check with no evasions: checkmate.
     length(ml) == 0 && return in_check ? -(MATE_SCORE - ply) : alpha
 
-    _score_moves!(ml, b, NULL_MOVE, si.killers, si.history, ply, 1)
+    _score_moves!(ml, b, NULL_MOVE, si.killers, si.history, ply, si.config, 1)
 
     best      = in_check ? -(MATE_SCORE - ply) : alpha
     best_move = NULL_MOVE
     for i in 1:length(ml)
         m = _pick_move!(ml, i)
+
+        # SEE pruning: a qsearch move list holds only captures and promotions,
+        # and _move_score gives SEE-losing captures a negative score.  Picks
+        # are in descending score order, so once a losing capture surfaces,
+        # everything that remains loses material too — stop searching.
+        # Not applied in check (the list holds evasions, all must be tried).
+        !in_check && @inbounds(ml.scores[i]) < 0 && break
 
         # Delta pruning: skip captures that can't raise alpha even in the best case.
         # Guard: only when not in check (stand_pat is defined) and not a promotion
@@ -481,7 +580,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # from being stored in TT (which causes scores > MATE_SCORE after ply
     # normalization if the sentinel is later retrieved and negated by a parent).
     static_eval = cfg.futility && !in_check && depth <= 2 ?
-        (b.side == White ? 1 : -1) * total(evaluate(b, cfg)) : -(MATE_SCORE + 1)
+        evaluate_lazy(b, cfg, alpha, beta) : -(MATE_SCORE + 1)
     futility_ok = static_eval > -(MATE_SCORE + 1) &&
         static_eval + FUTILITY_MARGIN[depth + 1] < alpha
 
@@ -496,6 +595,10 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     orig_alpha = alpha
     best_score = -(MATE_SCORE + 1)
     best_move  = NULL_MOVE
+
+    # PVS state: true once one move has been searched with the full window.
+    # All later moves get a null-window scout search first (see loop below).
+    pv_searched = false
 
     # 1. Try hash move first
     tried_hash = false
@@ -522,6 +625,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
 
                     # Hash move is never reduced (i=1)
                     score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false)
+                    pv_searched = true
 
                     unmake_move!(b, m, undo)
                     pop!(si.path)
@@ -546,7 +650,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     end
 
     # 2. Score remaining moves
-    _score_moves!(ml, b, hash_move, si.killers, si.history, ply, tried_hash ? 2 : 1)
+    _score_moves!(ml, b, hash_move, si.killers, si.history, ply, cfg, tried_hash ? 2 : 1)
 
     # 3. Search remaining moves
     for i in (tried_hash ? 2 : 1):length(ml)
@@ -577,11 +681,32 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             reduction = clamp(1 + floor(Int, log(depth) * log(i) / 2.0), 0, depth - 2)
         end
 
-        score = -_negamax(b, depth - 1 + extension - reduction, -beta, -alpha, ply + 1, si, false)
-
-        # Re-search at full depth if the reduced search beat alpha.
-        if reduction > 0 && score > alpha && !si.stop
-            score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false)
+        # ── Principal variation search ───────────────────────────────────────
+        # The first searched move establishes the PV with a full (α, β) window.
+        # Later moves only need to prove they are NOT better than α, which the
+        # null window (α, α+1) does at a fraction of the cost.  Escalation:
+        #   1. scout at reduced depth (LMR) with the null window;
+        #   2. if it beats α and was reduced, verify at full depth, still null
+        #      window (the cheap check that the reduction wasn't hiding a
+        #      better move);
+        #   3. if it still beats α inside an open window (α+1 < β), re-search
+        #      with the full window to obtain the exact score.  When β = α+1
+        #      already (we are inside someone else's scout), step 3 is a no-op.
+        if !cfg.pvs || !pv_searched
+            score = -_negamax(b, depth - 1 + extension - reduction, -beta, -alpha, ply + 1, si, false)
+            # Re-search at full depth if the reduced search beat alpha.
+            if reduction > 0 && score > alpha && !si.stop
+                score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false)
+            end
+            pv_searched = true
+        else
+            score = -_negamax(b, depth - 1 + extension - reduction, -(alpha + 1), -alpha, ply + 1, si, false)
+            if reduction > 0 && score > alpha && !si.stop
+                score = -_negamax(b, depth - 1 + extension, -(alpha + 1), -alpha, ply + 1, si, false)
+            end
+            if score > alpha && score < beta && !si.stop
+                score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false)
+            end
         end
 
         unmake_move!(b, m, undo)
@@ -659,7 +784,7 @@ function _trickiness_score(b::Board, m::Move, si::SearchInfo)::Int
 
     tte       = _tt_get(si.tt, b.hash)
     hash_move = tte.key == b.hash ? tte.move : NULL_MOVE
-    _score_moves!(ml, b, hash_move, si.killers, si.history, 2)
+    _score_moves!(ml, b, hash_move, si.killers, si.history, 2, si.config)
 
     best_score  = -(MATE_SCORE + 1)
     second_best = -(MATE_SCORE + 1)
@@ -707,12 +832,21 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
     end
 
     empty!(si.root_moves)
-    _score_moves!(ml, b, hash_move, si.killers, si.history, 1, 1)
+    _score_moves!(ml, b, hash_move, si.killers, si.history, 1, si.config, 1)
     for i in 1:length(ml)
         m = _pick_move!(ml, i)
         push!(si.path, b.hash)
         undo  = make_move!(b, m)
-        score = -_negamax(b, depth - 1, -beta, -alpha, 2, si, false)
+        # PVS at the root: first move full window, later moves scouted with a
+        # null window and re-searched only when the scout beats alpha.
+        if i == 1 || !si.config.pvs
+            score = -_negamax(b, depth - 1, -beta, -alpha, 2, si, false)
+        else
+            score = -_negamax(b, depth - 1, -(alpha + 1), -alpha, 2, si, false)
+            if score > alpha && score < beta && !si.stop
+                score = -_negamax(b, depth - 1, -beta, -alpha, 2, si, false)
+            end
+        end
         unmake_move!(b, m, undo)
         pop!(si.path)
 

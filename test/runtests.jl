@@ -490,4 +490,168 @@ using Test
         @test occursin("escaping the pin", exp)
     end
 
+    @testset "Commentary - protecting a threatened piece" begin
+        # Regression: this branch used to crash with a MethodError because
+        # _is_defended was called with an unsupported `ignore_sq` keyword.
+        # Black's bishop (just arrived on e6) attacks the undefended knight on
+        # d5; White replies e2-e4, defending the knight with the pawn.
+        b   = board_from_fen("6k1/8/4b3/3N4/8/8/4P3/6K1 w - - 0 1")
+        fen = board_to_fen(b)
+        opp = Move(sq(2,7), sq(4,5), MF_QUIET)   # ...Bc8-e6, the threatening move
+        m   = move_from_uci(b, "e2e4")
+        res = SearchResult(m, 10, 6, 100, evaluate(b), Move[m])
+        exp = explain_move(res, b, White; last_opp_move = opp)
+        @test occursin("protecting my knight", exp)
+        # The board must be fully restored (the old crash left it mutated).
+        @test board_to_fen(b) == fen
+    end
+
+    @testset "_is_defended with ignore_sq" begin
+        # After e2-e4 in the position above, d5 is defended by the e4 pawn and
+        # by nothing else: ignoring e4 must flip the answer.
+        b = board_from_fen("6k1/8/4b3/3N4/4P3/8/8/6K1 w - - 0 1")
+        d5 = sq(3, 4); e4 = sq(4, 3)
+        @test Chess._is_defended(b, d5, White) == true
+        @test Chess._is_defended(b, d5, White; ignore_sq = e4) == false
+        # ignore_sq must also re-open slider lines: rook d1 defends d5 through
+        # an empty d-file, and a blocker on d3 cuts that defense unless ignored.
+        b2 = board_from_fen("6k1/8/8/3P4/8/3n4/8/3R2K1 w - - 0 1")
+        d5 = sq(3, 4); d3 = sq(3, 2)
+        @test Chess._is_defended(b2, d5, White) == false               # knight d3 blocks
+        @test Chess._is_defended(b2, d5, White; ignore_sq = d3) == true
+    end
+
+    # ── Static exchange evaluation ────────────────────────────────────────────
+
+    @testset "SEE - free capture" begin
+        # PxP, no recapture: wins exactly one pawn.
+        b = board_from_fen("1k6/8/8/3p4/4P3/8/8/1K6 w - - 0 1")
+        m = move_from_uci(b, "e4d5")
+        @test Chess._see_ge(b, m, 0)   == true
+        @test Chess._see_ge(b, m, 100) == true
+        @test Chess._see_ge(b, m, 101) == false
+    end
+
+    @testset "SEE - even exchange" begin
+        # PxP with a pawn recapture: net exactly zero.
+        b = board_from_fen("1k6/8/4p3/3p4/4P3/8/8/1K6 w - - 0 1")
+        m = move_from_uci(b, "e4d5")
+        @test Chess._see_ge(b, m, 0) == true
+        @test Chess._see_ge(b, m, 1) == false
+    end
+
+    @testset "SEE - losing capture" begin
+        # NxP where the pawn is defended by a pawn: 100 − 320 = −220.
+        b = board_from_fen("1k6/8/4p3/3p4/8/4N3/8/1K6 w - - 0 1")
+        m = move_from_uci(b, "e3d5")
+        @test Chess._see_ge(b, m, 0)    == false
+        @test Chess._see_ge(b, m, -220) == true
+        @test Chess._see_ge(b, m, -219) == false
+    end
+
+    @testset "SEE - x-ray battery" begin
+        # Doubled rooks on the d-file vs rook d5 defended by knight f6:
+        # Rxd5 Nxd5 Rxd5 nets 500 − 500 + 320 = +320.  The second rook only
+        # joins the exchange through the square the first rook vacated.
+        b = board_from_fen("1k6/8/5n2/3r4/8/8/3R4/1K1R4 w - - 0 1")
+        m = move_from_uci(b, "d2d5")
+        @test Chess._see_ge(b, m, 0)   == true
+        @test Chess._see_ge(b, m, 320) == true
+        @test Chess._see_ge(b, m, 321) == false
+    end
+
+    @testset "SEE - king recapture legality" begin
+        # Nxd5 where the pawn is defended only by the king, but our rook backs
+        # the capture up: Kxd5 would be illegal, so we win the pawn cleanly.
+        b = board_from_fen("1r6/8/3k4/3p4/8/4N3/8/3R2K1 w - - 0 1")
+        m = move_from_uci(b, "e3d5")
+        @test Chess._see_ge(b, m, 100) == true
+        # Same capture without the backup rook: the king legally recaptures
+        # and we lose knight for pawn.
+        b2 = board_from_fen("1r6/8/3k4/3p4/8/4N3/8/6K1 w - - 0 1")
+        m2 = move_from_uci(b2, "e3d5")
+        @test Chess._see_ge(b2, m2, 0) == false
+    end
+
+    @testset "Search - avoids SEE-losing capture" begin
+        # The only capture available wins a pawn but loses the queen to the
+        # recapture; the engine must prefer any quiet move.
+        b = board_from_fen("6k1/8/4p3/3p4/8/8/8/3Q2K1 w - - 0 1")
+        r = search_move(b, 300)
+        @test move_to_uci(r.move) != "d1d5"
+    end
+
+    # ── Lazy evaluation ───────────────────────────────────────────────────────
+
+    @testset "Lazy eval - exact inside a wide window" begin
+        # With an effectively infinite window the shortcut can never trigger,
+        # so evaluate_lazy must agree exactly with the full evaluation.
+        for fen in [
+            STARTPOS,
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+            "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R b KQ - 1 8",
+        ]
+            b    = board_from_fen(fen)
+            sgn  = b.side == White ? 1 : -1
+            full = sgn * total(evaluate(b))
+            @test Chess.evaluate_lazy(b, DEFAULT_CONFIG, -32_000, 32_000) == full
+        end
+    end
+
+    @testset "Lazy eval - shortcut stays on the right side of the bound" begin
+        # White is up two queens: with a window near zero the lazy core must
+        # fail high, and the full eval must agree that the score is >= beta.
+        b    = board_from_fen("4k3/8/8/8/8/8/QQ6/4K3 w - - 0 1")
+        lz   = Chess.evaluate_lazy(b, DEFAULT_CONFIG, -50, 50)
+        full = total(evaluate(b))
+        @test lz >= 50 && full >= 50
+        # Same position from Black's perspective: must fail low.
+        b2  = board_from_fen("4k3/8/8/8/8/8/QQ6/4K3 b - - 0 1")
+        lz2 = Chess.evaluate_lazy(b2, DEFAULT_CONFIG, -50, 50)
+        @test lz2 <= -50 && -total(evaluate(b2)) <= -50
+    end
+
+    @testset "Lazy eval - disabled flag gives the full value" begin
+        cfg = EngineConfig(lazy_eval = false)
+        b   = board_from_fen("4k3/8/8/8/8/8/QQ6/4K3 w - - 0 1")
+        @test Chess.evaluate_lazy(b, cfg, -50, 50) == total(evaluate(b, cfg))
+    end
+
+    # ── Principal variation search ────────────────────────────────────────────
+
+    @testset "PVS - finds mate in 2" begin
+        # Rook ladder with the rooks out of the king's reach: 1.Rg7 (any) 2.Rh8#.
+        # The mated side runs out of moves at ply 4, so the score is
+        # MATE_SCORE − 4.  There is no mate in 1.
+        b = board_from_fen("3k4/8/6R1/7R/8/8/8/6K1 w - - 0 1")
+        r = search_move(b, 1000)
+        @test r.score == MATE_SCORE - 4
+    end
+
+    @testset "PVS - agrees with full-window search" begin
+        # On clear tactical positions PVS must select the same move as the
+        # plain full-window alpha-beta (it only changes how fast non-PV moves
+        # are refuted, never the final result).
+        for fen in [
+            "7k/8/8/3q4/8/8/8/3R3K w - - 0 1",     # free queen: Rxd5
+            "r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 4 4",  # Qxf7#
+        ]
+            b1 = board_from_fen(fen)
+            b2 = board_from_fen(fen)
+            r_pvs  = search_move(b1, 400; si = SearchInfo(DEFAULT_CONFIG))
+            r_full = search_move(b2, 400; si = SearchInfo(EngineConfig(pvs = false)))
+            @test r_pvs.move == r_full.move
+        end
+    end
+
+    @testset "Feature flags - new toggles exist and default on" begin
+        @test DEFAULT_CONFIG.pvs       == true
+        @test DEFAULT_CONFIG.see       == true
+        @test DEFAULT_CONFIG.lazy_eval == true
+        cfg = EngineConfig(pvs = false, see = false, lazy_eval = false)
+        @test !cfg.pvs && !cfg.see && !cfg.lazy_eval
+    end
+
 end
