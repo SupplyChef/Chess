@@ -197,16 +197,18 @@ end
 
 @inline function sq_attacked_by(b::Board, sq::Square, attacker::Color, occ::BB)::Bool
     a = attacker
-    (
-        knight_attacks(sq) & bb(b, a, Knight) |
-        king_attacks(sq)   & bb(b, a, King)   |
-        rook_attacks(sq, occ)   & (bb(b, a, Rook)   | bb(b, a, Queen)) |
-        bishop_attacks(sq, occ) & (bb(b, a, Bishop) | bb(b, a, Queen)) |
-        # Use the OTHER color's pawn-attack index so we look in the attacker's
-        # forward direction: e.g. to find white pawns attacking sq, use the black
-        # pawn table (which looks downward, the direction white pawns come FROM).
-        PAWN_ATTACKS[sq+1, Int(other(a))+1] & bb(b, a, Pawn)
-    ) != 0
+    # Use the OTHER color's pawn-attack index so we look in the attacker's
+    # forward direction: e.g. to find white pawns attacking sq, use the black
+    # pawn table (which looks downward, the direction white pawns come FROM).
+    (PAWN_ATTACKS[sq+1, Int(other(a))+1] & bb(b, a, Pawn)) != 0 && return true
+    (knight_attacks(sq) & bb(b, a, Knight)) != 0 && return true
+    (king_attacks(sq)   & bb(b, a, King))   != 0 && return true
+
+    # Sliders are more expensive (magic bitboard lookups)
+    (bishop_attacks(sq, occ) & (bb(b, a, Bishop) | bb(b, a, Queen))) != 0 && return true
+    (rook_attacks(sq, occ)   & (bb(b, a, Rook)   | bb(b, a, Queen))) != 0 && return true
+
+    false
 end
 
 function _rook_attacks_slow(s::Square, occ::BB)

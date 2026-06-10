@@ -388,14 +388,12 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # on the current search path (si.path).  reps >= 1 means this position has
     # been seen before → visiting it again creates a draw risk, so we return 0.
     #
-    # This is safe because apply_moves! empties prior_counts after every capture
-    # or pawn push.  Only positions from the current "reversible window" (since
-    # the last irreversible move) are counted, so every hash in prior_counts
-    # represents a position that could genuinely be repeated.  There are no
-    # phantom entries from a previous check sequence that ended with a capture.
-    let reps = get(si.prior_counts, b.hash, 0)
-        for h in si.path; h == b.hash && (reps += 1); end
-        reps >= 1 && return 0
+    # Repetition is only possible if there have been at least 4 reversible plies.
+    if b.halfmove >= 4
+        let reps = get(si.prior_counts, b.hash, 0)
+            for h in si.path; h == b.hash && (reps += 1); end
+            reps >= 1 && return 0
+        end
     end
 
     # TT probe: if we have previously searched this position at sufficient depth,
@@ -497,6 +495,17 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     best_score = -(MATE_SCORE + 1)
     best_move  = NULL_MOVE
 
+    # ── Internal Iterative Deepening (IID) ──────────────────────────────────
+    # If we have no hash move and the depth is high, perform a shallow search
+    # to find a move that can be used for ordering.
+    if hash_move == NULL_MOVE && depth >= 5
+        _negamax(b, depth - 2, alpha, beta, ply, si, is_null)
+        tte = _tt_get(si.tt, b.hash)
+        if tte.key == b.hash
+            hash_move = tte.move
+        end
+    end
+
     # 1. Try hash move first
     tried_hash = false
     if hash_move != NULL_MOVE
@@ -569,19 +578,26 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         extension = (cfg.check_extensions && gives_check) ? 1 : 0
 
         # LMR: after the first 3 moves, reduce quiet non-checking moves.
-        # Log-based formula: reduction grows with both depth and move index,
-        # giving larger cuts at high depth where re-search cost is highest.
-        # Capped at depth-2 so the reduced search is always at least depth 1.
         reduction = 0
         if cfg.lmr && depth >= 3 && i > 3 && !is_capture && !is_promo && !gives_check && !in_check
             reduction = clamp(1 + floor(Int, log(depth) * log(i) / 2.0), 0, depth - 2)
         end
 
-        score = -_negamax(b, depth - 1 + extension - reduction, -beta, -alpha, ply + 1, si, false)
-
-        # Re-search at full depth if the reduced search beat alpha.
-        if reduction > 0 && score > alpha && !si.stop
+        # PVS: Principal Variation Search
+        # If we already searched a hash move (tried_hash=true), it was searched
+        # with a full window. All moves in this loop are therefore non-PV moves.
+        # If no hash move was searched, only the first move (i=1) is a PV move.
+        if !tried_hash && i == 1
             score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false)
+        else
+            score = -_negamax(b, depth - 1 + extension - reduction, -alpha - 1, -alpha, ply + 1, si, false)
+            # Re-search if null window fails high
+            if score > alpha && !si.stop
+                # If we had a reduction, re-search at full depth first, but still with a null window
+                # unless it's a PV node. In this engine we don't track PV nodes explicitly,
+                # but we can try a full window search directly if the null window re-search also fails high.
+                score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false)
+            end
         end
 
         unmake_move!(b, m, undo)
