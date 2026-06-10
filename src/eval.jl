@@ -935,6 +935,33 @@ _eval_tempo(b::Board)::Int = b.side == White ? 10 : -10
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
+# How far (in centipawns) the slow eval terms (mobility, king safety, pawn
+# structure, space, …) can realistically move the score away from the
+# material + PST core.  Chosen as a conservative bound: trapped-piece
+# penalties (−100), king-zone attack penalties, and stacked passer bonuses
+# rarely sum past ~400 cp in one direction.
+const LAZY_EVAL_MARGIN = 450
+
+"""
+    evaluate_lazy(b, cfg, alpha, beta) → Int
+
+Static evaluation from the **side-to-move** perspective, with a lazy shortcut:
+when the cheap core (material + tapered PST + tempo) already lies more than
+`LAZY_EVAL_MARGIN` outside the `(alpha, beta)` window, the core is returned
+directly — the remaining slow terms cannot bring the score back inside the
+window, so any bound-relative decision (stand-pat cutoff, futility test) is
+unaffected.  Otherwise falls through to the full `evaluate`.
+"""
+@inline function evaluate_lazy(b::Board, cfg::EngineConfig, alpha::Int, beta::Int)::Int
+    if cfg.lazy_eval
+        ph   = Int(clamp(b.phase, 0, 24))
+        core = Int(b.material) + (ph * Int(b.mg_score) + (24 - ph) * Int(b.eg_score)) ÷ 24
+        sc   = (b.side == White ? core : -core) + 10   # +10 tempo for the side to move
+        (sc - LAZY_EVAL_MARGIN >= beta || sc + LAZY_EVAL_MARGIN <= alpha) && return sc
+    end
+    (b.side == White ? 1 : -1) * total(evaluate(b, cfg))
+end
+
 function evaluate(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::EvalBreakdown
     ph = Int(clamp(b.phase, 0, 24))
     material = b.material
