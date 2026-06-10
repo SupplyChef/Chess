@@ -336,13 +336,14 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     # Pawn attack bitboards for mobility safety checks
     wp = bb(b, White, Pawn)
     bp = bb(b, Black, Pawn)
+    all_pawns = wp | bp
     w_pawn_atk = ((wp << 7) & ~FILE_MASK[8]) | ((wp << 9) & ~FILE_MASK[1])
     b_pawn_atk = ((bp >> 9) & ~FILE_MASK[8]) | ((bp >> 7) & ~FILE_MASK[1])
 
     for c in (White, Black)
         sign        = c == White ? 1 : -1
         my_pawns    = bb(b, c, Pawn)
-        enemy_pawns = bb(b, other(c), Pawn)
+        enemy_pawns = c == White ? bp : wp
         seventh     = c == White ? 6 : 1   # 0-indexed rank of the 7th rank
 
         # Rook on open file (+20) or semi-open file (+10).
@@ -350,7 +351,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         # Rook on the 7th rank (+15, stacks with file bonus).
         for s in BitIter(bb(b, c, Rook))
             f = file_of(s)
-            if ((my_pawns | enemy_pawns) & FILE_MASK[f+1]) == 0
+            if (all_pawns & FILE_MASK[f+1]) == 0
                 score += sign * 20
             elseif (my_pawns & FILE_MASK[f+1]) == 0
                 score += sign * 10
@@ -427,7 +428,8 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             for s in BitIter(bb(b, c, Knight))
                 atk  = knight_attacks(s) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                unsf = count_bits(atk &  their_atk)
+                total_atk = count_bits(atk)
+                unsf = total_atk - safe
                 score += sign * (safe * 3 + unsf * 1)
                 # Trapped knight penalty
                 safe == 0 && (score -= sign * 100)
@@ -436,7 +438,8 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             for s in BitIter(bb(b, c, Bishop))
                 atk  = bishop_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                unsf = count_bits(atk &  their_atk)
+                total_atk = count_bits(atk)
+                unsf = total_atk - safe
                 score += sign * (safe * 3 + unsf * 1)
                 # Trapped bishop penalty
                 safe == 0 && (score -= sign * 100)
@@ -445,7 +448,8 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             for s in BitIter(bb(b, c, Rook))
                 atk  = rook_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                unsf = count_bits(atk &  their_atk)
+                total_atk = count_bits(atk)
+                unsf = total_atk - safe
                 score += sign * (safe * 2 + unsf * 1)
                 # Trapped rook penalty (e.g. cornered by pawns)
                 safe == 0 && (score -= sign * 100)
@@ -453,7 +457,8 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             for s in BitIter(bb(b, c, Queen))
                 atk  = queen_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                unsf = count_bits(atk &  their_atk)
+                total_atk = count_bits(atk)
+                unsf = total_atk - safe
                 score += sign * (safe * 4 + unsf * 2)
             end
         end
@@ -475,50 +480,18 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     end
 
     if cfg.eval_pins
-    for c in (White, Black)
-        sign     = c == White ? 1 : -1
-        their_k  = lsb(bb(b, other(c), King))
-        their_occ = b.occ[Int(other(c))+1]
-
-        for s in BitIter(bb(b, c, Rook) | bb(b, c, Queen))
-            sf = file_of(s); sr = rank_of(s)
-            kf = file_of(their_k); kr = rank_of(their_k)
-            if sf == kf
-                ray_mask = @inbounds FILE_MASK[sf+1]
-            elseif sr == kr
-                ray_mask = @inbounds RANK_MASK[sr+1]
-            else
-                continue
-            end
-            between = _slider_attacks(s, sq_bb(their_k), ray_mask) &
-                      _slider_attacks(their_k, sq_bb(s), ray_mask)
-            pieces_between = between & occ
-            if count_bits(pieces_between) == 1 && (pieces_between & their_occ) != 0
-                pinned_sq   = lsb(pieces_between)
-                pinned_kind = b.piece_on[pinned_sq+1].kind
-                score += sign * PIECE_VALUE[Int(pinned_kind)+1] ÷ 8
+        for c in (White, Black)
+            sign = c == White ? 1 : -1
+            # A piece is pinned if it's blocking an attack on its own king.
+            # get_pin_and_checker_masks(b, color) returns (pin_mask, check_mask).
+            pin_mask, _ = get_pin_and_checker_masks(b, c)
+            for s in BitIter(pin_mask)
+                pinned_kind = b.piece_on[s+1].kind
+                # Small bonus for pinning an enemy piece (awarded to the pinner's side).
+                score -= sign * PIECE_VALUE[Int(pinned_kind)+1] ÷ 8
             end
         end
-
-        for s in BitIter(bb(b, c, Bishop) | bb(b, c, Queen))
-            if (@inbounds DIAG_MASK[s+1]) & sq_bb(their_k) != 0
-                ray_mask = @inbounds DIAG_MASK[s+1]
-            elseif (@inbounds ADIAG_MASK[s+1]) & sq_bb(their_k) != 0
-                ray_mask = @inbounds ADIAG_MASK[s+1]
-            else
-                continue
-            end
-            between = _slider_attacks(s, sq_bb(their_k), ray_mask) &
-                      _slider_attacks(their_k, sq_bb(s), ray_mask)
-            pieces_between = between & occ
-            if count_bits(pieces_between) == 1 && (pieces_between & their_occ) != 0
-                pinned_sq   = lsb(pieces_between)
-                pinned_kind = b.piece_on[pinned_sq+1].kind
-                score += sign * PIECE_VALUE[Int(pinned_kind)+1] ÷ 8
-            end
-        end
-    end   # for c
-    end   # cfg.eval_pins
+    end
 
     # ── Endgame king tropism ──────────────────────────────────────────────────────
     # In the endgame the king is an active fighting piece.  Beyond what the tapered
@@ -773,15 +746,7 @@ end
 # a centralised king in the middlegame is already penalised by PST_KING_MG and
 # the shield geometry doesn't apply.
 function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
-    # Game phase: 24 = full material, 0 = king+pawns only.
-    ph = 0
-    for c in (White, Black)
-        ph += count_bits(bb(b, c, Knight)) + count_bits(bb(b, c, Bishop))
-        ph += 2 * count_bits(bb(b, c, Rook))
-        ph += 4 * count_bits(bb(b, c, Queen))
-    end
-    ph = min(ph, 24)
-
+    ph = Int(clamp(b.phase, 0, 24))
     score = 0
     occ   = all_occ(b)
     for c in (White, Black)
