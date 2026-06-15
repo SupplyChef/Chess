@@ -157,6 +157,7 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
 
 @inline function _move_score(m::Move, b::Board, hash_move::Move,
                               killers::Matrix{Move}, history::Matrix{Int32},
+                              countermoves::Matrix{Move}, prev_move::Move,
                               ply::Int, cfg::EngineConfig)::Int
     m == hash_move && return 1_000_000
 
@@ -191,6 +192,13 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
         @inbounds killers[2, ply] == m && return 70_000
     end
 
+    # Countermove: quiet move that best refuted the opponent's previous move.
+    # Ordered just below killers — it's move-specific rather than ply-specific.
+    if cfg.countermove && prev_move != NULL_MOVE
+        fs_p = from_sq(prev_move); ts_p = to_sq(prev_move)
+        @inbounds countermoves[fs_p+1, ts_p+1] == m && return 65_000
+    end
+
     # History heuristic: quiet moves that previously caused cutoffs score
     # between 1 and 60_000 — above generic quiet moves but below killers.
     fs = from_sq(m); ts = to_sq(m)
@@ -203,9 +211,11 @@ end
 # Fill ml.scores with move ordering scores (parallel to ml.moves).
 @inline function _score_moves!(ml::MoveList, b::Board, hash_move::Move,
                                killers::Matrix{Move}, history::Matrix{Int32},
+                               countermoves::Matrix{Move}, prev_move::Move,
                                ply::Int, cfg::EngineConfig, start_idx::Int=1)
     @inbounds for i in start_idx:length(ml)
-        ml.scores[i] = _move_score(ml[i], b, hash_move, killers, history, ply, cfg)
+        ml.scores[i] = _move_score(ml[i], b, hash_move, killers, history,
+                                   countermoves, prev_move, ply, cfg)
     end
 end
 
@@ -256,6 +266,14 @@ end
     @inbounds history[fs+1, ts+1] = max(history[fs+1, ts+1] - Int32(depth * depth), Int32(-10_000))
 end
 
+# Countermove heuristic: record the quiet move that best refuted a specific
+# opponent move.  Indexed by the opponent's (from, to) square pair.
+@inline function _update_countermove!(cm::Matrix{Move}, prev_move::Move, m::Move)
+    prev_move == NULL_MOVE && return
+    fs = from_sq(prev_move); ts = to_sq(prev_move)
+    @inbounds cm[fs+1, ts+1] = m
+end
+
 # ── Search state ──────────────────────────────────────────────────────────────
 const MOVE_STACK_SIZE   = MAX_PLY + 64   # regular depth + qsearch budget
 const TRICKINESS_WEIGHT = 0.05           # conservative weight; tune up if play feels too timid
@@ -289,6 +307,10 @@ mutable struct SearchInfo
     # ones, improving move ordering beyond what killers alone can achieve.
     # Indexed [from_sq+1, to_sq+1]; values capped at 10_000 to prevent overflow.
     history     ::Matrix{Int32}
+    # Countermove heuristic: records the best quiet refutation of each opponent
+    # move, indexed by [from_sq+1, to_sq+1] of that opponent move.  Provides a
+    # third ordering tier between killers and history.
+    countermoves::Matrix{Move}
     move_stack  ::Vector{MoveList}        # pre-allocated, one per ply
     root_moves  ::Vector{Tuple{Int,Move}} # (score, move) from last complete iteration
     nodes       ::Int64
@@ -313,6 +335,7 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
         fill(TT_EMPTY, TT_SIZE),
         fill(NULL_MOVE, 2, MAX_PLY),
         zeros(Int32, 64, 64),
+        fill(NULL_MOVE, 64, 64),
         [MoveList() for _ in 1:MOVE_STACK_SIZE],
         Tuple{Int,Move}[],
         Int64(0),
@@ -416,7 +439,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     # return alpha (= stand_pat).  In check with no evasions: checkmate.
     length(ml) == 0 && return in_check ? -(MATE_SCORE - ply) : alpha
 
-    _score_moves!(ml, b, NULL_MOVE, si.killers, si.history, ply, si.config, 1)
+    _score_moves!(ml, b, NULL_MOVE, si.killers, si.history, si.countermoves, NULL_MOVE, ply, si.config, 1)
 
     best      = in_check ? -(MATE_SCORE - ply) : alpha
     best_move = NULL_MOVE
@@ -483,8 +506,31 @@ end
 #         (they have a refutation elsewhere in the tree).
 # A beta cutoff occurs when we find a move that scores >= beta — the opponent
 # won't reach this node because they have something better, so we stop searching.
+# Singular extension helper: search all moves except `excl_move` to cheaply
+# determine whether the hash move is the only good option at this node.
+function _negamax_excl(b::Board, depth::Int, alpha::Int, beta::Int,
+                       ply::Int, si::SearchInfo, excl_move::Move)::Int
+    ml = si.move_stack[min(ply, MOVE_STACK_SIZE)]
+    generate_moves!(ml, b)
+    best = -(MATE_SCORE + 1)
+    for i in 1:length(ml)
+        m = ml.moves[i]
+        m == excl_move && continue
+        push!(si.path, b.hash)
+        undo  = make_move!(b, m)
+        score = -_negamax(b, depth - 1, -beta, -alpha, ply + 1, si, false, m)
+        unmake_move!(b, m, undo)
+        pop!(si.path)
+        si.stop && return 0
+        score >= beta && return score
+        best = max(best, score)
+    end
+    best
+end
+
 function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
-                  ply::Int, si::SearchInfo, is_null::Bool)::Int
+                  ply::Int, si::SearchInfo, is_null::Bool,
+                  prev_move::Move = NULL_MOVE)::Int
     # Periodic time check (every 1024 nodes to keep overhead low).
     si.nodes += 1
     if (si.nodes & 0x3FF) == 0 && time() >= si.time_limit
@@ -596,7 +642,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             b.hash     ⊻= zob_ep(ep_save)
             b.ep_square = -1
         end
-        null_score = -_negamax(b, depth - R - 1, -beta, -beta + 1, ply + 1, si, true)
+        null_score = -_negamax(b, depth - R - 1, -beta, -beta + 1, ply + 1, si, true, NULL_MOVE)
         b.side = other(b.side)
         b.hash ⊻= ZOBRIST_SIDE[]
         if ep_save != -1
@@ -605,6 +651,32 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         end
         pop!(si.path)
         !si.stop && null_score >= beta && return beta
+    end
+
+    # ── Probcut ───────────────────────────────────────────────────────────────
+    # At high depth, if a capture appears so strong that even a shallow search
+    # with a raised beta confirms it exceeds beta by a large margin, we can
+    # safely prune and return immediately.  This skips expensive subtrees where
+    # a clearly winning capture would cause a cutoff anyway.
+    if cfg.probcut && !is_null && !in_check && depth >= 5 &&
+       abs(beta) < MATE_SCORE - MOVE_STACK_SIZE
+        pc_beta  = beta + 200
+        pc_depth = depth - 4
+        ml_pc    = si.move_stack[min(ply, MOVE_STACK_SIZE)]
+        generate_moves!(ml_pc, b)
+        for k in 1:length(ml_pc)
+            mc  = ml_pc.moves[k]
+            flc = flags(mc)
+            is_cap_pc = (flc & MF_CAPTURE) != 0 || flc == MF_EP
+            is_cap_pc || continue
+            push!(si.path, b.hash)
+            undo_pc = make_move!(b, mc)
+            pc_score = -_negamax(b, pc_depth, -pc_beta, -pc_beta + 1, ply + 1, si, false, mc)
+            unmake_move!(b, mc, undo_pc)
+            pop!(si.path)
+            si.stop && break
+            pc_score >= pc_beta && return pc_score
+        end
     end
 
     # ── Internal iterative reduction ──────────────────────────────────────────
@@ -663,13 +735,25 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                 if futility_ok && !is_capture && !is_promo
                     best_score = max(best_score, static_eval)
                 else
+                    # Singular extension: if the TT gives a lower-bound score
+                    # and a search of all other moves at reduced depth fails to
+                    # beat (tt_score − margin), this move is the only good one.
+                    sing_ext = 0
+                    if cfg.singular_ext && depth >= 6 && ply > 0 &&
+                       tte.key == b.hash && tte.flag == TT_LOWER &&
+                       tte.depth >= depth - 3 && abs(tte.score) < MATE_SCORE - MOVE_STACK_SIZE
+                        sing_beta  = tte.score - 2 * depth
+                        sing_score = _negamax_excl(b, depth ÷ 2, sing_beta - 1, sing_beta, ply, si, m)
+                        sing_ext   = (!si.stop && sing_score < sing_beta) ? 1 : 0
+                    end
+
                     push!(si.path, b.hash)
                     undo = make_move!(b, m)
                     gives_check = king_in_check(b, b.side)
-                    extension = (cfg.check_extensions && gives_check) ? 1 : 0
+                    extension = (cfg.check_extensions && gives_check) ? 1 : sing_ext
 
                     # Hash move is never reduced (i=1)
-                    score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false)
+                    score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false, m)
                     pv_searched = true
 
                     unmake_move!(b, m, undo)
@@ -695,7 +779,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     end
 
     # 2. Score remaining moves
-    _score_moves!(ml, b, hash_move, si.killers, si.history, ply, cfg, tried_hash ? 2 : 1)
+    _score_moves!(ml, b, hash_move, si.killers, si.history,
+                  si.countermoves, prev_move, ply, cfg, tried_hash ? 2 : 1)
 
     # 3. Search remaining moves
     quiet_count = 0   # number of quiet moves searched so far (for LMP)
@@ -749,19 +834,19 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         #      with the full window to obtain the exact score.  When β = α+1
         #      already (we are inside someone else's scout), step 3 is a no-op.
         if !cfg.pvs || !pv_searched
-            score = -_negamax(b, depth - 1 + extension - reduction, -beta, -alpha, ply + 1, si, false)
+            score = -_negamax(b, depth - 1 + extension - reduction, -beta, -alpha, ply + 1, si, false, m)
             # Re-search at full depth if the reduced search beat alpha.
             if reduction > 0 && score > alpha && !si.stop
-                score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false)
+                score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false, m)
             end
             pv_searched = true
         else
-            score = -_negamax(b, depth - 1 + extension - reduction, -(alpha + 1), -alpha, ply + 1, si, false)
+            score = -_negamax(b, depth - 1 + extension - reduction, -(alpha + 1), -alpha, ply + 1, si, false, m)
             if reduction > 0 && score > alpha && !si.stop
-                score = -_negamax(b, depth - 1 + extension, -(alpha + 1), -alpha, ply + 1, si, false)
+                score = -_negamax(b, depth - 1 + extension, -(alpha + 1), -alpha, ply + 1, si, false, m)
             end
             if score > alpha && score < beta && !si.stop
-                score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false)
+                score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false, m)
             end
         end
 
@@ -779,6 +864,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                     if !is_capture && !is_promo
                         _update_killers!(si.killers, ply, m)
                         _update_history!(si.history, m, depth)
+                        cfg.countermove && _update_countermove!(si.countermoves, prev_move, m)
                         # Apply malus to quiet moves searched before this cutoff.
                         if cfg.history_malus
                             for j in loop_start:i-1
@@ -850,7 +936,7 @@ function _trickiness_score(b::Board, m::Move, si::SearchInfo)::Int
 
     tte       = _tt_get(si.tt, b.hash)
     hash_move = tte.key == b.hash ? tte.move : NULL_MOVE
-    _score_moves!(ml, b, hash_move, si.killers, si.history, 2, si.config)
+    _score_moves!(ml, b, hash_move, si.killers, si.history, si.countermoves, NULL_MOVE, 2, si.config)
 
     best_score  = -(MATE_SCORE + 1)
     second_best = -(MATE_SCORE + 1)
@@ -898,7 +984,7 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
     end
 
     empty!(si.root_moves)
-    _score_moves!(ml, b, hash_move, si.killers, si.history, 1, si.config, 1)
+    _score_moves!(ml, b, hash_move, si.killers, si.history, si.countermoves, NULL_MOVE, 1, si.config, 1)
     for i in 1:length(ml)
         m = _pick_move!(ml, i)
         push!(si.path, b.hash)
@@ -969,6 +1055,7 @@ function search_move(b::Board, time_ms::Int;
     empty!(si.path)
     fill!(si.killers, NULL_MOVE)
     fill!(si.history, Int32(0))
+    fill!(si.countermoves, NULL_MOVE)
 
     best_move       = NULL_MOVE
     best_score      = 0

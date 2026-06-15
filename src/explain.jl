@@ -747,8 +747,16 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
         sort!(parts; by = first, rev = true)
 
         if isempty(parts)
-            # Differentiate "solid" by piece type
-            our_k == Pawn ? "keeping my pawn structure solid" : "keeping the position solid"
+            # Initiative / tempo: quiet move while significantly ahead → name the pressure.
+            is_quiet   = !is_cap && !is_pr && fl != MF_KS_CAST && fl != MF_QS_CAST
+            score_ahead = (my_color == White ? 1 : -1) * result.score
+            if is_quiet && score_ahead >= 150
+                score_ahead >= 250 ?
+                    "I have the initiative — you'll need to find precise defense" :
+                    "keeping up the pressure"
+            else
+                our_k == Pawn ? "keeping my pawn structure solid" : "keeping the position solid"
+            end
         elseif length(parts) == 1
             parts[1][2]
         else
@@ -1045,16 +1053,68 @@ function explain_pv_outcome(result::SearchResult, b::Board, my_color::Color)::St
               length(pos) == 1 ? pos[1] :
               "$(pos[1]) and $(pos[2])"
 
+    # PV journey: "After Nf6, I'll Rxe5, then Kd7 →" — narrate the sequence.
+    journey = ""
+    if length(result.pv) >= 2
+        opp_reply  = _approx_san(result.pv[1], b)
+        undo_j1    = make_move!(b, result.pv[1])
+        our_follow = _approx_san(result.pv[2], b)
+        if length(result.pv) >= 4
+            undo_j2 = make_move!(b, result.pv[2])
+            opp2    = _approx_san(result.pv[3], b)
+            unmake_move!(b, result.pv[2], undo_j2)
+            journey = "After $opp_reply I'll $our_follow, then $opp2 — "
+        else
+            journey = "After $opp_reply I'll $our_follow — "
+        end
+        unmake_move!(b, result.pv[1], undo_j1)
+    end
+
     if !isempty(mat_gain)
-        base = "Looking ahead: I expect to win $mat_gain"
+        base = "$(journey)I expect to win $mat_gain"
         return isempty(pos_str) ? "$base." : "$base, with $pos_str to follow."
     elseif !isempty(mat_loss)
         return !isempty(pos_str) ?
-            "Looking ahead: I sacrifice $mat_loss for $pos_str." :
-            "Looking ahead: I expect to lose $mat_loss — best available."
+            "$(journey)I sacrifice $mat_loss for $pos_str." :
+            "$(journey)I expect to lose $mat_loss — best available."
     else
         return !isempty(pos_str) ?
-            "Looking ahead: I'm aiming for $pos_str." :
-            "Looking ahead: I expect a gradually improving position."
+            "$(journey)I'm aiming for $pos_str." :
+            "$(journey)I expect a gradually improving position."
     end
+end
+
+# ── Opening name recognition ──────────────────────────────────────────────────
+"""
+    _opening_name(moves) → String
+
+Return the most specific recognised opening name for the given UCI move list,
+or "" if none matches.
+"""
+function _opening_name(moves::Vector{String})::String
+    openings = [
+        (["d2d4","d7d5","c2c4","e7e6","b1c3","g8f6","c1g5"], "Queen's Gambit Declined"),
+        (["e2e4","e7e5","g1f3","b8c6","f1c4","g8f6"],         "Two Knights Defense"),
+        (["e2e4","c7c5","g1f3","d7d6","d2d4"],                "Sicilian, Open"),
+        (["e2e4","e7e5","g1f3","b8c6","f1b5"],                "Ruy López"),
+        (["e2e4","e7e5","g1f3","b8c6","f1c4"],                "Italian Game"),
+        (["d2d4","d7d5","c2c4","c7c6"],                       "Slav Defense"),
+        (["d2d4","g8f6","c2c4","g7g6"],                       "King's Indian Defense"),
+        (["d2d4","g8f6","c2c4","e7e6","g2g3"],                "Catalan Opening"),
+        (["g1f3","d7d5","g2g3"],                              "Réti Opening"),
+        (["d2d4","d7d5","c2c4"],                              "Queen's Gambit"),
+        (["d2d4","d7d5"],                                     "Queen's Pawn Game"),
+        (["e2e4","e7e5","g1f3","b8c6"],                       "King's Pawn, Four Knights"),
+        (["e2e4","e7e5"],                                     "King's Pawn Game"),
+        (["e2e4","c7c5"],                                     "Sicilian Defense"),
+        (["e2e4","e7e6"],                                     "French Defense"),
+        (["e2e4","c7c6"],                                     "Caro-Kann Defense"),
+        (["e2e4","d7d5"],                                     "Scandinavian Defense"),
+        (["c2c4"],                                            "English Opening"),
+    ]
+    for (prefix, name) in openings
+        n = length(prefix)
+        length(moves) >= n && moves[1:n] == prefix && return name
+    end
+    ""
 end
