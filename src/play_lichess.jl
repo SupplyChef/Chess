@@ -54,7 +54,10 @@ end
 
 function post_chat(game_id::String, text::String; room::String = "player")
     url  = "https://lichess.org/api/bot/game/$game_id/chat"
-    body = "room=$(_urlencode(room))&text=$(_urlencode(text))"
+    # Lichess hard-caps chat messages at 140 characters; longer posts are silently
+    # dropped by the API.  Truncate here so the message always goes through.
+    safe = length(text) <= 140 ? text : text[1:prevind(text, 140)] * "…"
+    body = "room=$(_urlencode(room))&text=$(_urlencode(safe))"
     hdrs = vcat(AUTH_HEADER, ["Content-Type" => "application/x-www-form-urlencoded"])
     try
         HTTP.post(url, hdrs, body; readtimeout = 5, connecttimeout = 5)
