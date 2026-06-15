@@ -133,6 +133,44 @@ Base.@kwdef struct EngineConfig
     # Knight distance penalty in deep endgames (phase < 10): a knight far from
     # all pawns is nearly useless.  Penalty = min_pawn_distance × (10-phase) ÷ 5
     # centipawns, capped at 20 cp.  Incentivises repositioning the knight.
+
+    # ── New search heuristics ──────────────────────────────────────────────────
+
+    rfp              ::Bool = true
+    # Reverse futility pruning (static null move): at depth ≤ 7, if
+    # static_eval − 90×depth ≥ beta the position is already too good to
+    # bother searching — return the margin-adjusted score immediately.
+
+    lmp              ::Bool = true
+    # Late move pruning: at depth ≤ 3, once we have searched more than
+    # LMP_QUIET_LIMIT[depth] quiet moves without raising alpha, skip the rest.
+    # Positions where many quiet moves all fail low are almost always resolved
+    # by the first few moves; additional quiet moves cost time for no gain.
+
+    iir              ::Bool = true
+    # Internal iterative reduction: when no hash move is available at depth ≥ 4
+    # the move ordering is poor, so reduce depth by 1 to cheaply find a good
+    # move for the TT.  The next iteration then starts with a reliable hash move.
+
+    history_malus    ::Bool = true
+    # History malus: quiet moves that were searched and failed to raise alpha
+    # (i.e. lost material or were simply bad) have their history score penalised
+    # by −depth².  This improves move ordering by making the history table
+    # reflect not just which moves cause cutoffs but also which moves fail low.
+
+    # ── New evaluation terms ───────────────────────────────────────────────────
+
+    eval_kbnk        ::Bool = true
+    # K+B+N vs lone K endgame evaluation: add a mating bonus that guides the
+    # winning king to the bishop-coloured corner and penalises the losing king
+    # for staying near the centre.  Without this the engine often fails to
+    # convert within the 50-move rule.
+
+    eval_mopup       ::Bool = true
+    # Mopup evaluation: when one side has an overwhelming material lead and the
+    # opponent has a lone king (or near-bare king), add a large bonus for
+    # (a) driving the bare king to an edge/corner and (b) bringing our king
+    # close.  Activates only when phase < 6 and material advantage > 400 cp.
 end
 
 """The default full-strength configuration (all features enabled)."""

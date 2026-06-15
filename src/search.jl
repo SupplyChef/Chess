@@ -248,6 +248,14 @@ end
     @inbounds history[fs+1, ts+1] = min(history[fs+1, ts+1] + Int32(depth * depth), Int32(10_000))
 end
 
+# History malus: penalise quiet moves that failed to raise alpha.  The penalty
+# mirrors the bonus applied to the move that caused the cutoff, so repeatedly
+# bad moves sink in the ordering and are tried last or skipped by LMP.
+@inline function _update_history_malus!(history::Matrix{Int32}, m::Move, depth::Int)
+    fs = from_sq(m); ts = to_sq(m)
+    @inbounds history[fs+1, ts+1] = max(history[fs+1, ts+1] - Int32(depth * depth), Int32(-10_000))
+end
+
 # ── Search state ──────────────────────────────────────────────────────────────
 const MOVE_STACK_SIZE   = MAX_PLY + 64   # regular depth + qsearch budget
 const TRICKINESS_WEIGHT = 0.10           # conservative weight; tune up if play feels too timid
@@ -257,6 +265,16 @@ const ASPIRATION_DELTA  = 75             # initial aspiration window half-width 
 # plus this margin is still below alpha, quiet moves cannot improve the position
 # and are skipped.  Roughly: 1 pawn at depth 1, 2 pawns at depth 2.
 const FUTILITY_MARGIN = (0, 150, 300)
+
+# Reverse futility pruning: if static_eval − RFP_MARGIN×depth ≥ beta the node
+# is already winning enough that searching it further cannot change the outcome.
+const RFP_MARGIN = 90   # centipawns per depth level
+
+# Late move pruning: maximum quiet moves to search at depth 1–3 before giving
+# up on the rest.  Positions that are not resolved by the first N quiet moves
+# are almost never resolved by later ones at these shallow depths.
+# Indexed by depth directly (depth 1 → 6, depth 2 → 12, depth 3 → 18).
+const LMP_QUIET_LIMIT = (6, 12, 18)   # depth 1, 2, 3
 
 # Delta pruning margin for quiescence search (centipawns).  A capture whose
 # maximum material gain (captured piece value) plus this margin still falls
@@ -536,6 +554,27 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
 
     in_check = king_in_check(b, b.side)
 
+    cfg = si.config
+
+    # ── Static evaluation (shared by RFP, futility, and IIR) ─────────────────
+    # Compute once and reuse across all pruning tests that follow.  The lazy
+    # shortcut means this is cheap whenever the score is far outside the window.
+    static_eval = !in_check && depth <= 8 ?
+        evaluate_lazy(b, cfg, alpha, beta) : -(MATE_SCORE + 1)
+
+    # ── Reverse futility pruning (static null move) ───────────────────────────
+    # If our position is already so good that even after subtracting a generous
+    # per-depth margin we still exceed beta, the opponent won't allow this node.
+    # Guarded by: not in check (score unreliable), not a null-move child (avoid
+    # double-pruning), and the side must have non-pawn material (zugzwang risk).
+    if cfg.rfp && !is_null && !in_check && depth >= 1 && depth <= 7 &&
+       static_eval != -(MATE_SCORE + 1) &&
+       (bb(b, b.side, Knight) | bb(b, b.side, Bishop) |
+        bb(b, b.side, Rook)   | bb(b, b.side, Queen)) != BB(0)
+        rfp_score = static_eval - RFP_MARGIN * depth
+        rfp_score >= beta && return rfp_score
+    end
+
     # ── Null move pruning ─────────────────────────────────────────────────────
     # If we're not in check and we have non-pawn material, try passing our turn.
     # If even then the opponent can't beat beta, the position is good enough to
@@ -544,12 +583,11 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # is catastrophic.
     #
     # We use a null-window around beta (–β, –β+1) and a reduced depth R so
-    # the null search is very fast.  R = 3 at depth ≥ 6, R = 2 otherwise.
-    cfg = si.config
+    # the null search is very fast.  R = 3 at depth ≥ 5, R = 2 otherwise.
     if cfg.null_move && !is_null && !in_check && depth >= 3 &&
        (bb(b, b.side, Knight) | bb(b, b.side, Bishop) |
         bb(b, b.side, Rook)   | bb(b, b.side, Queen)) != BB(0)
-        R       = depth >= 6 ? 3 : 2
+        R       = depth >= 5 ? 3 : 2
         ep_save = b.ep_square
         push!(si.path, b.hash)          # record current hash before passing the turn
         b.side  = other(b.side)
@@ -569,6 +607,15 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         !si.stop && null_score >= beta && return beta
     end
 
+    # ── Internal iterative reduction ──────────────────────────────────────────
+    # When there is no hash move the move ordering is poor — we're searching
+    # blindly.  Reduce depth by 1 so this node is cheap; the TT entry it writes
+    # will be used as a hash move when we re-search at the full depth in the
+    # next iteration of iterative deepening.
+    if cfg.iir && hash_move == NULL_MOVE && depth >= 4 && !in_check
+        depth -= 1
+    end
+
     # ── Futility pruning ──────────────────────────────────────────────────────
     # At depth 1 and 2, if static eval + a margin (1–2 pawns) is still below
     # alpha, quiet moves are unlikely to improve alpha — prune them.
@@ -579,9 +626,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # floor to at least this value, preventing the -(MATE_SCORE+1) sentinel
     # from being stored in TT (which causes scores > MATE_SCORE after ply
     # normalization if the sentinel is later retrieved and negated by a parent).
-    static_eval = cfg.futility && !in_check && depth <= 2 ?
-        evaluate_lazy(b, cfg, alpha, beta) : -(MATE_SCORE + 1)
-    futility_ok = static_eval > -(MATE_SCORE + 1) &&
+    futility_ok = static_eval > -(MATE_SCORE + 1) && !in_check && depth <= 2 &&
         static_eval + FUTILITY_MARGIN[depth + 1] < alpha
 
     ml = si.move_stack[min(ply, MOVE_STACK_SIZE)]
@@ -653,7 +698,9 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     _score_moves!(ml, b, hash_move, si.killers, si.history, ply, cfg, tried_hash ? 2 : 1)
 
     # 3. Search remaining moves
-    for i in (tried_hash ? 2 : 1):length(ml)
+    quiet_count = 0   # number of quiet moves searched so far (for LMP)
+    loop_start  = tried_hash ? 2 : 1
+    for i in loop_start:length(ml)
         m  = _pick_move!(ml, i)
         fl = flags(m)
         is_capture = (fl & MF_CAPTURE) != 0 || fl == MF_EP
@@ -665,6 +712,15 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             continue
         end
 
+        # Late move pruning: at shallow depths, stop searching quiet moves once
+        # we've already tried enough of them without raising alpha.
+        if !is_capture && !is_promo
+            quiet_count += 1
+            if cfg.lmp && !in_check && 1 <= depth <= 3 &&
+               quiet_count > LMP_QUIET_LIMIT[depth]
+                continue
+            end
+        end
         push!(si.path, b.hash)
         undo        = make_move!(b, m)
         gives_check = king_in_check(b, b.side)
@@ -672,12 +728,12 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         # ── Extensions and Late Move Reductions ──────────────────────────────
         extension = (cfg.check_extensions && gives_check) ? 1 : 0
 
-        # LMR: after the first 3 moves, reduce quiet non-checking moves.
+        # LMR: after the first 2 moves, reduce quiet non-checking moves.
         # Log-based formula: reduction grows with both depth and move index,
         # giving larger cuts at high depth where re-search cost is highest.
         # Capped at depth-2 so the reduced search is always at least depth 1.
         reduction = 0
-        if cfg.lmr && depth >= 3 && i > 3 && !is_capture && !is_promo && !gives_check && !in_check
+        if cfg.lmr && depth >= 3 && i > 2 && !is_capture && !is_promo && !gives_check && !in_check
             reduction = clamp(1 + floor(Int, log(depth) * log(i) / 2.0), 0, depth - 2)
         end
 
@@ -723,6 +779,16 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                     if !is_capture && !is_promo
                         _update_killers!(si.killers, ply, m)
                         _update_history!(si.history, m, depth)
+                        # Apply malus to quiet moves searched before this cutoff.
+                        if cfg.history_malus
+                            for j in loop_start:i-1
+                                mj  = ml.moves[j]
+                                flj = flags(mj)
+                                if (flj & MF_CAPTURE) == 0 && flj != MF_EP && (flj & MF_PROMO) == 0
+                                    _update_history_malus!(si.history, mj, depth)
+                                end
+                            end
+                        end
                     end
                     break
                 end

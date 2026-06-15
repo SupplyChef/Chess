@@ -674,6 +674,68 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         end
     end
 
+    # ── K+B+N vs lone K ───────────────────────────────────────────────────────
+    # B+N mate requires driving the bare king to a corner of the bishop's colour.
+    # The existing king-tropism terms are insufficient for this rare but important
+    # technique.  We add a large bonus that scales with how close the bare king
+    # is to the correct corner and how close the winning king is to the bare king.
+    if cfg.eval_kbnk
+        for c in (White, Black)
+            sign = c == White ? 1 : -1
+            their_c = other(c)
+            # Winning side must have exactly K+B+N.
+            (bb(b, c, Rook)   | bb(b, c, Queen)  | bb(b, c, Pawn)) != BB(0) && continue
+            count_bits(bb(b, c, Knight)) == 1     || continue
+            count_bits(bb(b, c, Bishop)) == 1     || continue
+            # Losing side must be a bare king.
+            (bb(b, their_c, Rook)   | bb(b, their_c, Queen)  |
+             bb(b, their_c, Bishop) | bb(b, their_c, Knight) |
+             bb(b, their_c, Pawn)) != BB(0)       && continue
+
+            bish_sq    = lsb(bb(b, c, Bishop))
+            bish_color = (file_of(bish_sq) + rank_of(bish_sq)) & 1
+            their_k    = lsb(bb(b, their_c, King))
+            kf = file_of(their_k); kr = rank_of(their_k)
+            # Correct corners: a1=(0,0) and h8=(7,7) are light (sum even),
+            #                  a8=(0,7) and h1=(7,0) are dark (sum odd).
+            corner_dist = if bish_color == 0   # light bishop → a1 or h8
+                min(kf + kr, (7 - kf) + (7 - kr))
+            else                               # dark bishop → a8 or h1
+                min(kf + (7 - kr), (7 - kf) + kr)
+            end
+            score += sign * (14 - corner_dist) * 12   # up to +168 cp
+            our_k  = lsb(bb(b, c, King))
+            score += sign * (7 - _chebyshev(our_k, their_k)) * 8   # up to +56 cp
+        end
+    end
+
+    # ── Mopup evaluation ──────────────────────────────────────────────────────
+    # When one side has a decisive material advantage and the opponent is down
+    # to a bare (or near-bare) king, the winning side earns bonuses for
+    # (a) pushing the losing king to a corner and (b) bringing its own king
+    # close.  This is additive to the existing king-tropism terms but activates
+    # more aggressively when the material gap is large.
+    if cfg.eval_mopup && ph < 6
+        for c in (White, Black)
+            sign    = c == White ? 1 : -1
+            their_c = other(c)
+            # Losing side: no pieces except the king (bare king).
+            (bb(b, their_c, Rook)   | bb(b, their_c, Queen)  |
+             bb(b, their_c, Bishop) | bb(b, their_c, Knight) |
+             bb(b, their_c, Pawn)) != BB(0)       && continue
+            # Winning side must have a significant material edge.
+            Int(b.material) * sign < 400           && continue
+
+            their_k    = lsb(bb(b, their_c, King))
+            their_kf   = file_of(their_k)
+            their_kr   = rank_of(their_k)
+            corner_dist = min(their_kf, 7 - their_kf, their_kr, 7 - their_kr)
+            our_k       = lsb(bb(b, c, King))
+            score += sign * (7 - corner_dist) * 15           # up to +105 cp
+            score += sign * (7 - _chebyshev(our_k, their_k)) * 12   # up to +84 cp
+        end
+    end
+
     score
 end
 
