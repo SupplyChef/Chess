@@ -71,7 +71,7 @@ Base.@kwdef struct EngineConfig
     # Disabling one shows how much it contributes to play quality.
 
     eval_mobility    ::Bool = true
-    # +4/3/2/1 cp per reachable square for N/B/R/Q (own-piece squares excluded).
+    # +2/2/2/1 cp per safe reachable square for N/B/R/Q (own-piece squares excluded).
     # Rewards active pieces; penalises blocked bishops and rooks behind pawns.
 
     eval_pins        ::Bool = true

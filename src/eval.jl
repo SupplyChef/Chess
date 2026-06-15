@@ -374,8 +374,8 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         # by an enemy pawn.  We reuse the passed-pawn corridor mask (minus the
         # knight's own file) to test whether any enemy pawn can advance to an
         # adjacent file at any rank in front of the knight.
-        # Full outpost (+35): no enemy pawn in the corridor at all.
-        # Semi-outpost (+15): enemy pawn is in the corridor but its immediate
+        # Full outpost (+20): no enemy pawn in the corridor at all.
+        # Semi-outpost (+8): enemy pawn is in the corridor but its immediate
         # advance square is blocked, so it cannot drive the knight away soon.
         for s in BitIter(bb(b, c, Knight))
             in_opp_half = c == White ? rank_of(s) >= 4 : rank_of(s) <= 3
@@ -384,7 +384,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                     ~FILE_MASK[file_of(s)+1]
             challenger = pmask & enemy_pawns
             if challenger == 0
-                score += sign * 35
+                score += sign * 20
             else
                 # Semi-outpost: all challenger pawns are immediately blocked.
                 # Enemy pawn advances toward our side (decreasing rank for Black
@@ -398,7 +398,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                         all_blocked = false; break
                     end
                 end
-                all_blocked && (score += sign * 15)
+                all_blocked && (score += sign * 8)
             end
         end
 
@@ -408,7 +408,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         for s in BitIter(bb(b, c, Knight) | bb(b, c, Bishop))
             in_opp_half = c == White ? rank_of(s) >= 4 : rank_of(s) <= 3
             in_opp_half || continue
-            (pawn_attacks(s, c) & enemy_pawns) == 0 && (score += sign * 8)
+            (pawn_attacks(s, c) & enemy_pawns) == 0 && (score += sign * 4)
         end
     end
 
@@ -428,7 +428,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 atk  = knight_attacks(s) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
                 unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 3 + unsf * 1)
+                score += sign * (safe * 2 + unsf * 1)
                 # Trapped knight penalty
                 safe == 0 && (score -= sign * 100)
                 safe == 1 && (score -= sign * 50)
@@ -437,7 +437,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 atk  = bishop_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
                 unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 3 + unsf * 1)
+                score += sign * (safe * 2 + unsf * 1)
                 # Trapped bishop penalty
                 safe == 0 && (score -= sign * 100)
                 safe == 1 && (score -= sign * 50)
@@ -470,7 +470,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 (rook_attacks(cs, occ)       & (bb(b, c, Rook)   | bb(b, c, Queen)))       != 0 && (ctrl += 1)
                 (king_attacks(cs)            & bb(b, c, King))                              != 0 && (ctrl += 1)
             end
-            score += sign * ctrl * 3
+            score += sign * ctrl * 2
         end
     end
 
