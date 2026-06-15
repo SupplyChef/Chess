@@ -268,14 +268,20 @@ function _fork_targets(b::Board, m::Move, mover_val::Int)::Vector{Tuple{PieceKin
         k == Queen  ? queen_attacks(dst, occ)  : BB(0)
     end
     targets = Tuple{PieceKind,Int}[]
-    for s in BitIter(atk & theirs)
-        pk = b.piece_on[s+1].kind
-        if pk == King
-            push!(targets, (King, s))
-        else
-            v = PIECE_VALUE[Int(pk)+1]
-            if v > mover_val || !_is_defended(b, s, them)
-                push!(targets, (pk, s))
+    # A fork only works when the forking piece is safe on its landing square.
+    # If it's hanging, the opponent takes it and both "forked" pieces escape.
+    forker_safe = !_is_defended(b, dst, them) ||
+                  _is_defended(b, dst, us; ignore_sq = dst)
+    if forker_safe
+        for s in BitIter(atk & theirs)
+            pk = b.piece_on[s+1].kind
+            if pk == King
+                push!(targets, (King, s))
+            else
+                v = PIECE_VALUE[Int(pk)+1]
+                if v > mover_val || !_is_defended(b, s, them)
+                    push!(targets, (pk, s))
+                end
             end
         end
     end
@@ -326,9 +332,18 @@ function _key_move_concept(b::Board, m::Move, our_k::PieceKind,
     length(forks) >= 2 &&
         return "fork the $(_piece_name(forks[1][1])) and $(_piece_name(forks[2][1]))"
 
-    _is_pinning(b, m)   && return "pin your piece"
-    _is_discovery(b, m) && return "set up a discovered attack"
-    _is_trapping(b, m)  && return "trap one of your pieces"
+    # Only announce pin/trap when the moving piece is safe on its destination.
+    km_piece_safe = begin
+        undo_ks = make_move!(b, m)
+        dst_ks  = to_sq(m)
+        s_ks    = !_is_defended(b, dst_ks, other(my_color)) ||
+                   _is_defended(b, dst_ks, my_color; ignore_sq = dst_ks)
+        unmake_move!(b, m, undo_ks)
+        s_ks
+    end
+    km_piece_safe && _is_pinning(b, m)   && return "pin your piece"
+    _is_discovery(b, m)                  && return "set up a discovered attack"
+    km_piece_safe && _is_trapping(b, m)  && return "trap one of your pieces"
 
     if (fl & MF_CAPTURE) != 0 || fl == MF_EP
         cap_k    = fl == MF_EP ? Pawn : b.piece_on[to_sq(m)+1].kind
@@ -526,11 +541,22 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
         return "I played $our_san — revealing a discovered attack. $note"
     end
 
-    if _is_pinning(b, result.move)
+    # Pin and trap announcements require the moving piece to be safe on its
+    # destination — otherwise the opponent captures it and the tactic evaporates.
+    moving_piece_safe = begin
+        undo_s = make_move!(b, result.move)
+        dst_s  = to_sq(result.move)
+        s      = !_is_defended(b, dst_s, other(my_color)) ||
+                  _is_defended(b, dst_s, my_color; ignore_sq = dst_s)
+        unmake_move!(b, result.move, undo_s)
+        s
+    end
+
+    if moving_piece_safe && _is_pinning(b, result.move)
         return "I played $our_san — pinning your piece. $note"
     end
 
-    if _is_trapping(b, result.move)
+    if moving_piece_safe && _is_trapping(b, result.move)
         return "I played $our_san — trapping your piece. $note"
     end
 
