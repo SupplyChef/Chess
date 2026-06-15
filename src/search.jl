@@ -258,7 +258,7 @@ end
 
 # ── Search state ──────────────────────────────────────────────────────────────
 const MOVE_STACK_SIZE   = MAX_PLY + 64   # regular depth + qsearch budget
-const TRICKINESS_WEIGHT = 0.10           # conservative weight; tune up if play feels too timid
+const TRICKINESS_WEIGHT = 0.05           # conservative weight; tune up if play feels too timid
 const ASPIRATION_DELTA  = 75             # initial aspiration window half-width (centipawns)
 
 # Futility margins (centipawns) indexed by depth.  At depth d, if static eval
