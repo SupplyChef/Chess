@@ -264,15 +264,12 @@ const (_BACKWARD_W, _BACKWARD_B) = _build_backward_masks()
 
 # Bonus in centipawns for a passed pawn based on how far advanced it is.
 # Indexed by rank_of(s)+1 (1=rank1 … 8=rank8); ranks 1 and 8 unused for pawns.
-# Growth is intentionally steep: a pawn on rank 7 is one move from a queen
-# (~1000 cp swing) so even a 120 cp bonus still heavily undersells the threat.
-# The gap between rank 6 and rank 5 reflects that a 7th-rank pawn often queens
-# immediately regardless of what the opponent does.
-# Ranks 3-5 are intentionally bumped so the engine correctly resists trading
-# into endgames where the opponent gets two advanced connected passers — the
-# danger of those positions was systematically underestimated at shallow depth.
-const PASSED_BONUS_W = (0, 0, 15, 40, 65, 95, 130, 0)
-const PASSED_BONUS_B = (0, 130, 95, 65, 40, 15,   0, 0)
+# The curve is intentionally steep to create urgency: each rank gain must look
+# more attractive than the defensive alternative, otherwise the engine sits on
+# a "winning" eval without converting.  A rank-7 pawn is essentially a free queen.
+# The rank-2→3 jump (+30 cp) ensures even newly-passed pawns are pushed promptly.
+const PASSED_BONUS_W = (0, 0, 20, 50, 80, 115, 155, 0)
+const PASSED_BONUS_B = (0, 155, 115, 80, 50, 20,   0, 0)
 
 @inline _passed_bonus(s::Square, c::Color)::Int =
     c == White ? PASSED_BONUS_W[rank_of(s)+1] : PASSED_BONUS_B[rank_of(s)+1]
@@ -788,6 +785,23 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 ocb_only && (bonus = bonus ÷ 2)
                 score += sign * bonus
                 passed_bb |= sq_bb(s)
+                # Free passer: no piece of either colour stands between the
+                # pawn and its promotion square.  An unobstructed passer is
+                # far more dangerous than one that is physically blocked.
+                promo_rank = c == White ? 7 : 0
+                pawn_rank  = rank_of(s)
+                pawn_file  = file_of(s)
+                path_clear = true
+                if c == White
+                    for r in (pawn_rank + 1):(promo_rank - 1)
+                        (all_occ(b) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
+                    end
+                else
+                    for r in (promo_rank + 1):(pawn_rank - 1)
+                        (all_occ(b) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
+                    end
+                end
+                path_clear && (score += sign * 25)
             else
                 # Backward pawn detection: no friendly pawns in the support zone,
                 # and the square in front is attacked by an enemy pawn.
@@ -804,14 +818,15 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         end
 
         # Connected passed pawns: adjacent passers support each other and are
-        # very difficult to stop together — a lone bishop cannot handle both
-        # simultaneously, so the bonus is intentionally large.
+        # very difficult to stop together — a lone piece cannot handle both
+        # simultaneously.  The bonus is large enough to clearly outweigh the
+        # cost of pushing versus making defensive moves.
         if cfg.eval_connected_passers
             for s in BitIter(passed_bb)
                 f = file_of(s)
                 neighbor = (f > 0 ? FILE_MASK[f]   : BB(0)) |
                            (f < 7 ? FILE_MASK[f+2] : BB(0))
-                (passed_bb & neighbor) != 0 && (score += sign * 40)
+                (passed_bb & neighbor) != 0 && (score += sign * 55)
             end
         end
     end
