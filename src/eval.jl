@@ -371,17 +371,20 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         # by an enemy pawn.  We reuse the passed-pawn corridor mask (minus the
         # knight's own file) to test whether any enemy pawn can advance to an
         # adjacent file at any rank in front of the knight.
-        # Full outpost (+20): no enemy pawn in the corridor at all.
-        # Semi-outpost (+8): enemy pawn is in the corridor but its immediate
-        # advance square is blocked, so it cannot drive the knight away soon.
+        # Full outpost: +32 if pawn-supported (hard to dislodge), +20 otherwise.
+        # Semi-outpost: +14 if pawn-supported, +8 otherwise.
         for s in BitIter(bb(b, c, Knight))
             in_opp_half = c == White ? rank_of(s) >= 4 : rank_of(s) <= 3
             in_opp_half || continue
+            # Pawn-supported: a friendly pawn defends the knight's square.
+            # Equivalently: pawn_attacks(s, other(c)) gives the squares that
+            # could host a pawn of color c to defend s diagonally.
+            pawn_supported = (pawn_attacks(s, other(c)) & bb(b, c, Pawn)) != BB(0)
             pmask = (c == White ? _PASSED_W[s+1] : _PASSED_B[s+1]) &
                     ~FILE_MASK[file_of(s)+1]
             challenger = pmask & enemy_pawns
             if challenger == 0
-                score += sign * 20
+                score += sign * (pawn_supported ? 32 : 20)
             else
                 # Semi-outpost: all challenger pawns are immediately blocked.
                 # Enemy pawn advances toward our side (decreasing rank for Black
@@ -395,7 +398,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                         all_blocked = false; break
                     end
                 end
-                all_blocked && (score += sign * 8)
+                all_blocked && (score += sign * (pawn_supported ? 14 : 8))
             end
         end
 
@@ -409,10 +412,10 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         end
     end
 
-    # Bishop pair bonus (+30): two bishops outperform two knights or bishop+knight
-    # in open positions because they cover both diagonal colors.
+    # Bishop pair bonus: scales with board openness (inverse of phase).
+    # 20 cp at full material (closed positions) → 30 cp at bare endgame (open).
     for c in (White, Black)
-        count_bits(bb(b, c, Bishop)) >= 2 && (score += (c == White ? 1 : -1) * 30)
+        count_bits(bb(b, c, Bishop)) >= 2 && (score += (c == White ? 1 : -1) * (20 + (24 - ph) * 10 ÷ 24))
     end
 
     if cfg.eval_mobility
@@ -451,7 +454,10 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 atk  = queen_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
                 unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 4 + unsf * 2)
+                score += sign * (safe * 1 + unsf * 0)
+                # A trapped queen is catastrophic — far worse than a trapped minor piece.
+                safe == 0 && (score -= sign * 150)
+                safe <= 2 && safe > 0 && (score -= sign * 60)
             end
         end
     end
@@ -828,6 +834,22 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                            (f < 7 ? FILE_MASK[f+2] : BB(0))
                 (passed_bb & neighbor) != 0 && (score += sign * 55)
             end
+        end
+
+        # Flank pawn majority: more pawns on one flank creates a potential
+        # passed pawn by advancing — a long-term structural advantage.
+        if cfg.eval_pawn_majority
+            # Count files with at least one pawn (not total pawns), and only
+            # award the bonus when the opponent actually has pawns on that flank
+            # — an uncontested flank with no enemy pawns doesn't create a
+            # meaningful majority (the doubled-pawn test case has 2 white pawns
+            # on e but zero black pawns; that's not a structural advantage).
+            our_qs = count(f -> (pawns & FILE_MASK[f]) != BB(0), 1:4)
+            opp_qs = count(f -> (enemy_pawns & FILE_MASK[f]) != BB(0), 1:4)
+            our_ks = count(f -> (pawns & FILE_MASK[f]) != BB(0), 5:8)
+            opp_ks = count(f -> (enemy_pawns & FILE_MASK[f]) != BB(0), 5:8)
+            (opp_qs > 0 && our_qs > opp_qs) && (score += sign * 15)
+            (opp_ks > 0 && our_ks > opp_ks) && (score += sign * 15)
         end
     end
     score

@@ -124,6 +124,11 @@ Base.@kwdef struct EngineConfig
     # significant time for the pawn to advance.  Bonus: +30 cp per passed pawn
     # whose enemy king is cut off from the promotion side of the board.
 
+    eval_pawn_majority    ::Bool = true
+    # Flank pawn majority: +15 cp per flank (queenside or kingside) where we
+    # have more pawns than the opponent.  A majority creates a potential passed
+    # pawn by advancing, making it a lasting structural advantage.
+
     eval_connected_passers ::Bool = true
     # Connected passed pawns bonus: two or more passed pawns on adjacent files
     # support each other and are very difficult to stop.  +25 cp per pawn that
@@ -159,6 +164,21 @@ Base.@kwdef struct EngineConfig
     # reflect not just which moves cause cutoffs but also which moves fail low.
 
     # ── New evaluation terms ───────────────────────────────────────────────────
+
+    countermove      ::Bool = true
+    # Countermove heuristic: record the quiet move that caused a beta cutoff in
+    # response to each opponent move.  Score it at 65,000 in move ordering so it
+    # is tried just after killers.  Refines ordering when killers don't apply.
+
+    probcut          ::Bool = true
+    # Probcut: at depth ≥ 5, run a shallow null-window search on captures with
+    # beta+200 as the threshold.  If a capture beats the raised threshold, the
+    # position is "too good" and we return immediately without a full search.
+
+    singular_ext     ::Bool = true
+    # Singular extensions: when the TT move at depth ≥ 6 is the only good option
+    # (all other moves fail below tt_score−2*depth in a reduced search), extend
+    # it by 1 ply to explore the forced line more deeply.
 
     eval_kbnk        ::Bool = true
     # K+B+N vs lone K endgame evaluation: add a mating bonus that guides the
