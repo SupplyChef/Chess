@@ -9,7 +9,8 @@ const PHASE_TABLE = Int16[0, 0, 1, 1, 2, 4, 0]
 # ── Colors ─────────────────────────────────────────────────────────────────────
 @enum Color White = 0 Black = 1
 
-other(c::Color) = c == White ? Black : White
+other(c::Color)   = c == White ? Black : White
+sign_of(c::Color) = c == White ? 1 : -1
 
 # ── Piece kinds ────────────────────────────────────────────────────────────────
 @enum PieceKind NoPiece = 0 Pawn = 1 Knight = 2 Bishop = 3 Rook = 4 Queen = 5 King = 6
@@ -151,6 +152,12 @@ end
 
 @inline bb(b::Board, c::Color, k::PieceKind) = b.bb[Int(c)+1, Int(k)+1]
 @inline set_bb!(b::Board, c::Color, k::PieceKind, v::BB) = (b.bb[Int(c)+1, Int(k)+1] = v)
+
+# All non-pawn, non-king pieces for a given side.  Used as a zugzwang guard in
+# null-move and RFP pruning: if this returns 0 the side is in a K+P ending where
+# passing might genuinely lose (zugzwang), so those pruning techniques are skipped.
+@inline non_pawn_pieces(b::Board, c::Color)::BB =
+    bb(b, c, Knight) | bb(b, c, Bishop) | bb(b, c, Rook) | bb(b, c, Queen)
 
 # ── Castling right constants ────────────────────────────────────────────────────
 const CR_WK = 0x1

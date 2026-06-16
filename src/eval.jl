@@ -13,30 +13,14 @@ const MG_TABLE = zeros(Int32, 2, 7, 64)
 const EG_TABLE = zeros(Int32, 2, 7, 64)
 
 function _init_eval!()
-    for c in (White, Black)
-        for k in (Pawn, Knight, Bishop, Rook, Queen, King)
-            mg_pst = if k == Pawn; PST_PAWN_MG
-                elseif k == Knight; PST_KNIGHT_MG
-                elseif k == Bishop; PST_BISHOP_MG
-                elseif k == Rook;   PST_ROOK_MG
-                elseif k == Queen;  PST_QUEEN_MG
-                else                PST_KING_MG
-                end
-            eg_pst = if k == Pawn; PST_PAWN_EG
-                elseif k == Knight; PST_KNIGHT_EG
-                elseif k == Bishop; PST_BISHOP_EG
-                elseif k == Rook;   PST_ROOK_EG
-                elseif k == Queen;  PST_QUEEN_EG
-                else                PST_KING_EG
-                end
-
-            for s in 0:63
-                # Mirroring logic from original _pst
-                idx = c == White ? (7 - rank_of(s)) * 8 + file_of(s) + 1 :
-                                        rank_of(s)  * 8 + file_of(s) + 1
-                MG_TABLE[Int(c)+1, Int(k)+1, s+1] = Int32(mg_pst[idx])
-                EG_TABLE[Int(c)+1, Int(k)+1, s+1] = Int32(eg_pst[idx])
-            end
+    for c in (White, Black), k in (Pawn, Knight, Bishop, Rook, Queen, King)
+        mg_pst = _PST_MG[Int(k)+1]
+        eg_pst = _PST_EG[Int(k)+1]
+        for s in 0:63
+            idx = c == White ? (7 - rank_of(s)) * 8 + file_of(s) + 1 :
+                                    rank_of(s)  * 8 + file_of(s) + 1
+            MG_TABLE[Int(c)+1, Int(k)+1, s+1] = Int32(mg_pst[idx])
+            EG_TABLE[Int(c)+1, Int(k)+1, s+1] = Int32(eg_pst[idx])
         end
     end
 end
@@ -208,6 +192,11 @@ const PST_KING_EG = Int16[
     -50,-30,-30,-30,-30,-30,-30,-50,
 ]
 
+# PST dispatch tables, indexed by Int(PieceKind); slot 1 (NoPiece) is unused.
+# Eliminates the if-elseif cascade that was in _init_eval!.
+const _PST_MG = (nothing, PST_PAWN_MG, PST_KNIGHT_MG, PST_BISHOP_MG, PST_ROOK_MG, PST_QUEEN_MG, PST_KING_MG)
+const _PST_EG = (nothing, PST_PAWN_EG, PST_KNIGHT_EG, PST_BISHOP_EG, PST_ROOK_EG, PST_QUEEN_EG, PST_KING_EG)
+
 # ── Passed-pawn corridor masks ─────────────────────────────────────────────────
 # A pawn is "passed" when no enemy pawn can ever block or capture it — i.e.,
 # there is no enemy pawn in the three-file corridor (own file + adjacent files)
@@ -293,15 +282,15 @@ function _is_insufficient_material(b::Board)::Bool
     wn = count_bits(bb(b, White, Knight))
     bn = count_bits(bb(b, Black, Knight))
     wb = count_bits(bb(b, White, Bishop))
-    bb_ = count_bits(bb(b, Black, Bishop))
-    total_minor = wn + bn + wb + bb_
+    bbn = count_bits(bb(b, Black, Bishop))
+    total_minor = wn + bn + wb + bbn
 
     total_minor == 0 && return true   # K vs K
     total_minor == 1 && return true   # K+minor vs K
 
     # K+B vs K+B: draw only when both bishops travel on the same colour.
     # A bishop's square colour is (file+rank) mod 2.
-    if wn == 0 && bn == 0 && wb == 1 && bb_ == 1
+    if wn == 0 && bn == 0 && wb == 1 && bbn == 1
         ws = lsb(bb(b, White, Bishop))
         bs = lsb(bb(b, Black, Bishop))
         return (file_of(ws) + rank_of(ws)) & 1 == (file_of(bs) + rank_of(bs)) & 1
@@ -337,7 +326,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     b_pawn_atk = ((bp >> 9) & ~FILE_MASK[8]) | ((bp >> 7) & ~FILE_MASK[1])
 
     for c in (White, Black)
-        sign        = c == White ? 1 : -1
+        sign        = sign_of(c)
         my_pawns    = bb(b, c, Pawn)
         enemy_pawns = bb(b, other(c), Pawn)
         seventh     = c == White ? 6 : 1   # 0-indexed rank of the 7th rank
@@ -415,12 +404,12 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     # Bishop pair bonus: scales with board openness (inverse of phase).
     # 20 cp at full material (closed positions) → 30 cp at bare endgame (open).
     for c in (White, Black)
-        count_bits(bb(b, c, Bishop)) >= 2 && (score += (c == White ? 1 : -1) * (20 + (24 - ph) * 10 ÷ 24))
+        count_bits(bb(b, c, Bishop)) >= 2 && (score += sign_of(c) * (20 + (24 - ph) * 10 ÷ 24))
     end
 
     if cfg.eval_mobility
         for c in (White, Black)
-            sign      = c == White ? 1 : -1
+            sign      = sign_of(c)
             our_occ   = b.occ[Int(c)+1]
             their_atk = c == White ? b_pawn_atk : w_pawn_atk
 
@@ -464,7 +453,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
 
     if cfg.eval_center
         for c in (White, Black)
-            sign = c == White ? 1 : -1
+            sign = sign_of(c)
             ctrl = 0
             for cs in (sq(3,3), sq(4,3), sq(3,4), sq(4,4))
                 (pawn_attacks(cs, other(c)) & bb(b, c, Pawn))                              != 0 && (ctrl += 1)
@@ -479,7 +468,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
 
     if cfg.eval_pins
     for c in (White, Black)
-        sign     = c == White ? 1 : -1
+        sign     = sign_of(c)
         their_k  = lsb(bb(b, other(c), King))
         their_occ = b.occ[Int(other(c))+1]
 
@@ -559,10 +548,8 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             bk = lsb(bb(b, Black, King))
             king_dist  = _chebyshev(wk, bk)
             prox_bonus = (7 - king_dist) * eg_weight * 4 ÷ 12
-            w_pieces = count_bits(bb(b, White, Knight) | bb(b, White, Bishop) |
-                                  bb(b, White, Rook)   | bb(b, White, Queen))
-            b_pieces = count_bits(bb(b, Black, Knight) | bb(b, Black, Bishop) |
-                                  bb(b, Black, Rook)   | bb(b, Black, Queen))
+            w_pieces = count_bits(non_pawn_pieces(b, White))
+            b_pieces = count_bits(non_pawn_pieces(b, Black))
             if w_pieces > b_pieces
                 score += prox_bonus
             elseif b_pieces > w_pieces
@@ -571,7 +558,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         end
 
         for c in (White, Black)
-            sign        = c == White ? 1 : -1
+            sign        = sign_of(c)
             our_k       = lsb(bb(b, c, King))
             their_k     = lsb(bb(b, other(c), King))
             our_pawns   = bb(b, c, Pawn)
@@ -595,7 +582,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
 
     if cfg.eval_rook_passer
         for c in (White, Black)
-            sign        = c == White ? 1 : -1
+            sign        = sign_of(c)
             their_pawns = bb(b, other(c), Pawn)
             my_rooks    = bb(b, c, Rook)
             enemy_rooks = bb(b, other(c), Rook)
@@ -636,7 +623,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     # the promotion square is a theoretical draw regardless of pawn advancement.
     if cfg.eval_wrong_bishop
         for c in (White, Black)
-            sign = c == White ? 1 : -1
+            sign = sign_of(c)
             # Only applies when the "winning" side has bishop+pawn(s) only.
             (bb(b, c, Rook) | bb(b, c, Queen) | bb(b, c, Knight)) != BB(0) && continue
             count_bits(bb(b, c, Bishop)) == 1 || continue
@@ -662,7 +649,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         eg_wt = 10 - ph   # 1..10
         all_pawns = bb(b, White, Pawn) | bb(b, Black, Pawn)
         for c in (White, Black)
-            sign = c == White ? 1 : -1
+            sign = sign_of(c)
             for ns in BitIter(bb(b, c, Knight))
                 min_dist = 14
                 for ps in BitIter(all_pawns)
@@ -684,16 +671,14 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     # is to the correct corner and how close the winning king is to the bare king.
     if cfg.eval_kbnk
         for c in (White, Black)
-            sign = c == White ? 1 : -1
+            sign = sign_of(c)
             their_c = other(c)
             # Winning side must have exactly K+B+N.
             (bb(b, c, Rook)   | bb(b, c, Queen)  | bb(b, c, Pawn)) != BB(0) && continue
             count_bits(bb(b, c, Knight)) == 1     || continue
             count_bits(bb(b, c, Bishop)) == 1     || continue
             # Losing side must be a bare king.
-            (bb(b, their_c, Rook)   | bb(b, their_c, Queen)  |
-             bb(b, their_c, Bishop) | bb(b, their_c, Knight) |
-             bb(b, their_c, Pawn)) != BB(0)       && continue
+            (non_pawn_pieces(b, their_c) | bb(b, their_c, Pawn)) != BB(0) && continue
 
             bish_sq    = lsb(bb(b, c, Bishop))
             bish_color = (file_of(bish_sq) + rank_of(bish_sq)) & 1
@@ -720,12 +705,10 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     # more aggressively when the material gap is large.
     if cfg.eval_mopup && ph < 6
         for c in (White, Black)
-            sign    = c == White ? 1 : -1
+            sign    = sign_of(c)
             their_c = other(c)
             # Losing side: no pieces except the king (bare king).
-            (bb(b, their_c, Rook)   | bb(b, their_c, Queen)  |
-             bb(b, their_c, Bishop) | bb(b, their_c, Knight) |
-             bb(b, their_c, Pawn)) != BB(0)       && continue
+            (non_pawn_pieces(b, their_c) | bb(b, their_c, Pawn)) != BB(0) && continue
             # Winning side must have a significant material edge.
             Int(b.material) * sign < 400           && continue
 
@@ -761,7 +744,7 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     end
 
     for c in (White, Black)
-        sign = c == White ? 1 : -1
+        sign = sign_of(c)
         pawns       = bb(b, c, Pawn)
         enemy_pawns = bb(b, other(c), Pawn)
 
@@ -884,14 +867,14 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     score = 0
     occ   = all_occ(b)
     for c in (White, Black)
-        sign     = c == White ? 1 : -1
+        sign     = sign_of(c)
         ks       = lsb(bb(b, c, King))
         kf       = file_of(ks); kr = rank_of(ks)
         their_ks = lsb(bb(b, other(c), King))
         their_kf = file_of(their_ks)
         pawns    = bb(b, c, Pawn)
         them     = other(c)
-        fwd      = c == White ? 1 : -1
+        fwd      = c == White ? 1 : -1   # rank direction toward opponent
 
         # ── 1. King Zone attacks ──────────────────────────────────────────────
         # Penalise the side whose king's surrounding squares are heavily
@@ -1015,7 +998,7 @@ function _eval_space(b::Board)::Int
     space_zone = (RANK_MASK[4] | RANK_MASK[5] | RANK_MASK[6]) &
                  (FILE_MASK[3] | FILE_MASK[4] | FILE_MASK[5] | FILE_MASK[6])
     for c in (White, Black)
-        sign        = c == White ? 1 : -1
+        sign        = sign_of(c)
         pawns       = bb(b, c, Pawn)
         enemy_pawns = bb(b, other(c), Pawn)
         if c == White
@@ -1055,10 +1038,10 @@ unaffected.  Otherwise falls through to the full `evaluate`.
     if cfg.lazy_eval
         ph   = Int(clamp(b.phase, 0, 24))
         core = Int(b.material) + (ph * Int(b.mg_score) + (24 - ph) * Int(b.eg_score)) ÷ 24
-        sc   = (b.side == White ? core : -core) + 10   # +10 tempo for the side to move
+        sc   = sign_of(b.side) * core + 10   # +10 tempo for the side to move
         (sc - LAZY_EVAL_MARGIN >= beta || sc + LAZY_EVAL_MARGIN <= alpha) && return sc
     end
-    (b.side == White ? 1 : -1) * total(evaluate(b, cfg))
+    sign_of(b.side) * total(evaluate(b, cfg))
 end
 
 function evaluate(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::EvalBreakdown
@@ -1086,13 +1069,16 @@ function evaluate(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::EvalBreakdown
     )
 end
 
+_signed_cp(v::Int) = (v > 0 ? "+" : "") * string(v)
+_advantage(v::Int) = v > 0 ? "White" : v < 0 ? "Black" : "equal"
+
 function explain(e::EvalBreakdown; io::IO = stdout)
     t = total(e)
-    println(io, "Evaluation: $(t > 0 ? "+" : "")$t cp  ($(t > 0 ? "White" : t < 0 ? "Black" : "equal"))")
-    println(io, "  Material:       $(e.material > 0 ? "+" : "")$(e.material)")
-    println(io, "  Piece activity: $(e.piece_activity > 0 ? "+" : "")$(e.piece_activity)")
-    println(io, "  Pawn structure: $(e.pawn_structure > 0 ? "+" : "")$(e.pawn_structure)")
-    println(io, "  King safety:    $(e.king_safety > 0 ? "+" : "")$(e.king_safety)")
-    println(io, "  Space:          $(e.space > 0 ? "+" : "")$(e.space)")
-    println(io, "  Tempo:          $(e.tempo > 0 ? "+" : "")$(e.tempo)")
+    println(io, "Evaluation: $(_signed_cp(t)) cp  ($(_advantage(t)))")
+    println(io, "  Material:       $(_signed_cp(e.material))")
+    println(io, "  Piece activity: $(_signed_cp(e.piece_activity))")
+    println(io, "  Pawn structure: $(_signed_cp(e.pawn_structure))")
+    println(io, "  King safety:    $(_signed_cp(e.king_safety))")
+    println(io, "  Space:          $(_signed_cp(e.space))")
+    println(io, "  Tempo:          $(_signed_cp(e.tempo))")
 end

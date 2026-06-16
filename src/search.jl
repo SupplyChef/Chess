@@ -56,6 +56,31 @@ end
     end
 end
 
+# ── TT helpers ───────────────────────────────────────────────────────────────
+# Mate scores are stored ply-relative (distance from the node, not the root) so
+# that the same mating line scores consistently regardless of when the TT entry
+# is later retrieved.  The two helpers below handle the conversion.
+
+# Before reading a TT score into the search window, convert from node-relative
+# back to root-relative by subtracting (for wins) or adding (for losses) the ply.
+@inline function _mate_score_from_tt(sc::Int, ply::Int)::Int
+    sc > MATE_SCORE - MOVE_STACK_SIZE  && return sc - ply
+    sc < -(MATE_SCORE - MOVE_STACK_SIZE) && return sc + ply
+    sc
+end
+
+# Before writing a score to the TT, convert from root-relative to node-relative.
+@inline function _mate_score_to_tt(sc::Int, ply::Int)::Int
+    sc > MATE_SCORE - MOVE_STACK_SIZE  && return sc + ply
+    sc < -(MATE_SCORE - MOVE_STACK_SIZE) && return sc - ply
+    sc
+end
+
+# Classify the result of a search node into the correct TT flag.
+@inline _tt_flag(score::Int, orig_alpha::Int, beta::Int)::UInt8 =
+    score >= beta      ? TT_LOWER :
+    score > orig_alpha ? TT_EXACT : TT_UPPER
+
 # ── Static exchange evaluation ────────────────────────────────────────────────
 # _see_ge(b, m, threshold) answers: "does the capture sequence started by m win
 # at least `threshold` centipawns for the side to move?"  It resolves the full
@@ -407,12 +432,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     # TT Probe
     tte = _tt_get(si.tt, b.hash)
     if tte.key == b.hash
-        sc = Int(tte.score)
-        if sc > MATE_SCORE - MOVE_STACK_SIZE
-            sc -= ply
-        elseif sc < -(MATE_SCORE - MOVE_STACK_SIZE)
-            sc += ply
-        end
+        sc = _mate_score_from_tt(Int(tte.score), ply)
         if tte.flag == TT_EXACT
             return sc
         elseif tte.flag == TT_LOWER
@@ -480,15 +500,8 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     # this, the PV stops at the last negamax move (a capture) and the material
     # swing calculation overcounts, falsely claiming a piece was won.
     if !si.stop && best_move != NULL_MOVE
-        store_score = best
-        if best >= MATE_SCORE - MOVE_STACK_SIZE
-            store_score = best + ply
-        elseif best <= -(MATE_SCORE - MOVE_STACK_SIZE)
-            store_score = best - ply
-        end
-        flag = best >= beta      ? TT_LOWER :
-               best > orig_alpha ? TT_EXACT : TT_UPPER
-        _tt_put!(si.tt, b.hash, 0, store_score, flag, best_move)
+        _tt_put!(si.tt, b.hash, 0, _mate_score_to_tt(best, ply),
+                 _tt_flag(best, orig_alpha, beta), best_move)
     end
 
     best
@@ -571,18 +584,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     if tte.key == b.hash
         hash_move = tte.move
         if tte.depth >= depth
-            sc = Int(tte.score)
-            # Ply-normalize mate scores: stored value is relative to the node that
-            # stored it; convert to relative to the current node by undoing the
-            # storage adjustment (subtract ply when storing, add back when retrieving
-            # — and vice-versa for the losing side).
-            # Threshold: MATE_SCORE - MOVE_STACK_SIZE covers the deepest reachable ply
-            # (including quiescence), ensuring all mate-distance values are caught.
-            if sc > MATE_SCORE - MOVE_STACK_SIZE
-                sc -= ply
-            elseif sc < -(MATE_SCORE - MOVE_STACK_SIZE)
-                sc += ply
-            end
+            sc = _mate_score_from_tt(Int(tte.score), ply)
             if tte.flag == TT_EXACT
                 return sc
             elseif tte.flag == TT_LOWER
@@ -615,8 +617,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # double-pruning), and the side must have non-pawn material (zugzwang risk).
     if cfg.rfp && !is_null && !in_check && depth >= 1 && depth <= 7 &&
        static_eval != -(MATE_SCORE + 1) &&
-       (bb(b, b.side, Knight) | bb(b, b.side, Bishop) |
-        bb(b, b.side, Rook)   | bb(b, b.side, Queen)) != BB(0)
+       non_pawn_pieces(b, b.side) != BB(0)
         rfp_score = static_eval - RFP_MARGIN * depth
         rfp_score >= beta && return rfp_score
     end
@@ -631,8 +632,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # We use a null-window around beta (–β, –β+1) and a reduced depth R so
     # the null search is very fast.  R = 3 at depth ≥ 5, R = 2 otherwise.
     if cfg.null_move && !is_null && !in_check && depth >= 3 &&
-       (bb(b, b.side, Knight) | bb(b, b.side, Bishop) |
-        bb(b, b.side, Rook)   | bb(b, b.side, Queen)) != BB(0)
+       non_pawn_pieces(b, b.side) != BB(0)
         R       = depth >= 5 ? 3 : 2
         ep_save = b.ep_square
         push!(si.path, b.hash)          # record current hash before passing the turn
@@ -738,13 +738,13 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                 # Swap hash move to front
                 ml.moves[i], ml.moves[1] = ml.moves[1], ml.moves[i]
 
-                m  = ml.moves[1]
-                fl = flags(m)
-                is_capture = (fl & MF_CAPTURE) != 0 || fl == MF_EP
-                is_promo   = (fl & MF_PROMO)   != 0
+                m        = ml.moves[1]
+                fl       = flags(m)
+                m_is_cap = (fl & MF_CAPTURE) != 0 || fl == MF_EP
+                m_is_pro = (fl & MF_PROMO)   != 0
 
                 # Futility pruning on hash move
-                if futility_ok && !is_capture && !is_promo
+                if futility_ok && !m_is_cap && !m_is_pro
                     best_score = max(best_score, static_eval)
                 else
                     push!(si.path, b.hash)
@@ -786,20 +786,20 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     quiet_count = 0   # number of quiet moves searched so far (for LMP)
     loop_start  = tried_hash ? 2 : 1
     for i in loop_start:length(ml)
-        m  = _pick_move!(ml, i)
-        fl = flags(m)
-        is_capture = (fl & MF_CAPTURE) != 0 || fl == MF_EP
-        is_promo   = (fl & MF_PROMO)   != 0
+        m        = _pick_move!(ml, i)
+        fl       = flags(m)
+        m_is_cap = (fl & MF_CAPTURE) != 0 || fl == MF_EP
+        m_is_pro = (fl & MF_PROMO)   != 0
 
         # Futility: skip quiet moves when we're too far below alpha to recover.
-        if futility_ok && !is_capture && !is_promo
+        if futility_ok && !m_is_cap && !m_is_pro
             best_score = max(best_score, static_eval)
             continue
         end
 
         # Late move pruning: at shallow depths, stop searching quiet moves once
         # we've already tried enough of them without raising alpha.
-        if !is_capture && !is_promo
+        if !m_is_cap && !m_is_pro
             quiet_count += 1
             if cfg.lmp && !in_check && 1 <= depth <= 3 &&
                quiet_count > LMP_QUIET_LIMIT[depth]
@@ -818,7 +818,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         # giving larger cuts at high depth where re-search cost is highest.
         # Capped at depth-2 so the reduced search is always at least depth 1.
         reduction = 0
-        if cfg.lmr && depth >= 3 && i > 2 && !is_capture && !is_promo && !gives_check && !in_check
+        if cfg.lmr && depth >= 3 && i > 2 && !m_is_cap && !m_is_pro && !gives_check && !in_check
             reduction = clamp(1 + floor(Int, log(depth) * log(i) / 2.0), 0, depth - 2)
         end
 
@@ -861,7 +861,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             if score > alpha
                 alpha = score
                 if alpha >= beta
-                    if !is_capture && !is_promo
+                    if !m_is_cap && !m_is_pro
                         _update_killers!(si.killers, ply, m)
                         _update_history!(si.history, m, depth)
                         cfg.countermove && _update_countermove!(si.countermoves, prev_move, m)
@@ -887,18 +887,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     #   best_score > orig_alpha → exact (alpha was raised; this IS the minimax value)
     #   otherwise           → upper bound (no move improved alpha; true score ≤ best_score)
     if !si.stop
-        flag = best_score >= beta      ? TT_LOWER :
-               best_score > orig_alpha ? TT_EXACT : TT_UPPER
-        # Ply-normalize mate scores before storing so the value is node-relative
-        # rather than root-relative.  Retrieving at any ply then gives the correct
-        # mate distance by applying the inverse adjustment.
-        store_score = best_score
-        if best_score > MATE_SCORE - MOVE_STACK_SIZE
-            store_score = best_score + ply
-        elseif best_score < -(MATE_SCORE - MOVE_STACK_SIZE)
-            store_score = best_score - ply
-        end
-        _tt_put!(si.tt, b.hash, depth, store_score, flag, best_move)
+        _tt_put!(si.tt, b.hash, depth, _mate_score_to_tt(best_score, ply),
+                 _tt_flag(best_score, orig_alpha, beta), best_move)
     end
 
     best_score
@@ -1012,14 +1002,8 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
         end
     end
 
-    # Use the same three-case flag as _negamax so the entry is valid when the
-    # position is later encountered as a sub-tree node in future searches:
-    #   fail-high (best_score >= beta):  TT_LOWER  — true score ≥ best_score
-    #   inside window (> orig_alpha):    TT_EXACT  — this IS the minimax value
-    #   fail-low (never beat orig_alpha): TT_UPPER — true score ≤ best_score
-    flag = best_score >= beta      ? TT_LOWER :
-           best_score > orig_alpha ? TT_EXACT : TT_UPPER
-    _tt_put!(si.tt, b.hash, depth, best_score, flag, best_move)
+    _tt_put!(si.tt, b.hash, depth, best_score,
+             _tt_flag(best_score, orig_alpha, beta), best_move)
     (best_score, best_move)
 end
 
