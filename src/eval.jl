@@ -792,8 +792,8 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 score += sign * bonus
                 passed_bb |= sq_bb(s)
                 # Free passer: no piece of either colour stands between the
-                # pawn and its promotion square.  An unobstructed passer is
-                # far more dangerous than one that is physically blocked.
+                # pawn and its promotion square, AND no friendly pawn trails
+                # behind it on the same file (doubled pawns are not truly free).
                 promo_rank = c == White ? 7 : 0
                 pawn_rank  = rank_of(s)
                 pawn_file  = file_of(s)
@@ -802,9 +802,16 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                     for r in (pawn_rank + 1):(promo_rank - 1)
                         (all_occ(b) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
                     end
+                    # disqualify if a friendly pawn sits behind on the same file
+                    for r in 1:(pawn_rank - 1)
+                        (bb(b, c, Pawn) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
+                    end
                 else
                     for r in (promo_rank + 1):(pawn_rank - 1)
                         (all_occ(b) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
+                    end
+                    for r in (pawn_rank + 1):6
+                        (bb(b, c, Pawn) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
                     end
                 end
                 path_clear && (score += sign * 40)
