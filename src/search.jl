@@ -701,6 +701,18 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     futility_ok = static_eval > -(MATE_SCORE + 1) && !in_check && depth <= 2 &&
         static_eval + FUTILITY_MARGIN[depth + 1] < alpha
 
+    # ── Singular extension (pre-computed before generate_moves!) ─────────────
+    # Must run BEFORE generate_moves! fills si.move_stack[ply], because
+    # _negamax_excl also uses si.move_stack[ply] internally and would overwrite it.
+    sing_ext = 0
+    if cfg.singular_ext && hash_move != NULL_MOVE && depth >= 6 && ply > 0 &&
+       tte.key == b.hash && tte.flag == TT_LOWER &&
+       tte.depth >= depth - 3 && abs(tte.score) < MATE_SCORE - MOVE_STACK_SIZE
+        sing_beta  = tte.score - 2 * depth
+        sing_score = _negamax_excl(b, depth ÷ 2, sing_beta - 1, sing_beta, ply, si, hash_move)
+        !si.stop && sing_score < sing_beta && (sing_ext = 1)
+    end
+
     ml = si.move_stack[min(ply, MOVE_STACK_SIZE)]
     generate_moves!(ml, b)
 
@@ -735,18 +747,6 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                 if futility_ok && !is_capture && !is_promo
                     best_score = max(best_score, static_eval)
                 else
-                    # Singular extension: if the TT gives a lower-bound score
-                    # and a search of all other moves at reduced depth fails to
-                    # beat (tt_score − margin), this move is the only good one.
-                    sing_ext = 0
-                    if cfg.singular_ext && depth >= 6 && ply > 0 &&
-                       tte.key == b.hash && tte.flag == TT_LOWER &&
-                       tte.depth >= depth - 3 && abs(tte.score) < MATE_SCORE - MOVE_STACK_SIZE
-                        sing_beta  = tte.score - 2 * depth
-                        sing_score = _negamax_excl(b, depth ÷ 2, sing_beta - 1, sing_beta, ply, si, m)
-                        sing_ext   = (!si.stop && sing_score < sing_beta) ? 1 : 0
-                    end
-
                     push!(si.path, b.hash)
                     undo = make_move!(b, m)
                     gives_check = king_in_check(b, b.side)
