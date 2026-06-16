@@ -839,14 +839,17 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         # Flank pawn majority: more pawns on one flank creates a potential
         # passed pawn by advancing — a long-term structural advantage.
         if cfg.eval_pawn_majority
-            qs_mask = FILE_MASK[1] | FILE_MASK[2] | FILE_MASK[3] | FILE_MASK[4]
-            ks_mask = FILE_MASK[5] | FILE_MASK[6] | FILE_MASK[7] | FILE_MASK[8]
-            our_qs = count_bits(pawns & qs_mask)
-            opp_qs = count_bits(enemy_pawns & qs_mask)
-            our_ks = count_bits(pawns & ks_mask)
-            opp_ks = count_bits(enemy_pawns & ks_mask)
-            our_qs > opp_qs && (score += sign * 15)
-            our_ks > opp_ks && (score += sign * 15)
+            # Count files with at least one pawn (not total pawns), and only
+            # award the bonus when the opponent actually has pawns on that flank
+            # — an uncontested flank with no enemy pawns doesn't create a
+            # meaningful majority (the doubled-pawn test case has 2 white pawns
+            # on e but zero black pawns; that's not a structural advantage).
+            our_qs = count(f -> (pawns & FILE_MASK[f]) != BB(0), 1:4)
+            opp_qs = count(f -> (enemy_pawns & FILE_MASK[f]) != BB(0), 1:4)
+            our_ks = count(f -> (pawns & FILE_MASK[f]) != BB(0), 5:8)
+            opp_ks = count(f -> (enemy_pawns & FILE_MASK[f]) != BB(0), 5:8)
+            (opp_qs > 0 && our_qs > opp_qs) && (score += sign * 15)
+            (opp_ks > 0 && our_ks > opp_ks) && (score += sign * 15)
         end
     end
     score
