@@ -228,8 +228,9 @@ using Test
     end
 
     @testset "Evaluation - doubled pawn penalty" begin
-        # Doubled pawns on e2/e3: doubled penalty (−15) + isolated penalty (−20)
-        # outweighs the small passed-pawn bonus (+10 for the e3 pawn).
+        # Doubled pawns on e2/e3: doubled penalty (−12) + isolated penalty (2×−20)
+        # outweighs the passed-pawn bonus (+30 for the e3 pawn); the lead pawn
+        # gets no free-passer bonus because a friendly pawn trails behind it.
         b = board_from_fen("4k3/8/8/8/8/4P3/4P3/4K3 w - - 0 1")
         e = evaluate(b)
         @test e.pawn_structure < 0

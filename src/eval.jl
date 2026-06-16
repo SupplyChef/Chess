@@ -267,9 +267,9 @@ const (_BACKWARD_W, _BACKWARD_B) = _build_backward_masks()
 # The curve is intentionally steep to create urgency: each rank gain must look
 # more attractive than the defensive alternative, otherwise the engine sits on
 # a "winning" eval without converting.  A rank-7 pawn is essentially a free queen.
-# The rank-2→3 jump (+30 cp) ensures even newly-passed pawns are pushed promptly.
-const PASSED_BONUS_W = (0, 0, 20, 50, 80, 115, 155, 0)
-const PASSED_BONUS_B = (0, 155, 115, 80, 50, 20,   0, 0)
+# The rank-2→3 jump (+40 cp) ensures even newly-passed pawns are pushed promptly.
+const PASSED_BONUS_W = (0, 0, 30, 70, 115, 165, 220, 0)
+const PASSED_BONUS_B = (0, 220, 165, 115, 70, 30,   0, 0)
 
 @inline _passed_bonus(s::Square, c::Color)::Int =
     c == White ? PASSED_BONUS_W[rank_of(s)+1] : PASSED_BONUS_B[rank_of(s)+1]
@@ -792,8 +792,8 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 score += sign * bonus
                 passed_bb |= sq_bb(s)
                 # Free passer: no piece of either colour stands between the
-                # pawn and its promotion square.  An unobstructed passer is
-                # far more dangerous than one that is physically blocked.
+                # pawn and its promotion square, AND no friendly pawn trails
+                # behind it on the same file (doubled pawns are not truly free).
                 promo_rank = c == White ? 7 : 0
                 pawn_rank  = rank_of(s)
                 pawn_file  = file_of(s)
@@ -802,12 +802,19 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                     for r in (pawn_rank + 1):(promo_rank - 1)
                         (all_occ(b) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
                     end
+                    # disqualify if a friendly pawn sits behind on the same file
+                    for r in 1:(pawn_rank - 1)
+                        (bb(b, c, Pawn) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
+                    end
                 else
                     for r in (promo_rank + 1):(pawn_rank - 1)
                         (all_occ(b) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
                     end
+                    for r in (pawn_rank + 1):6
+                        (bb(b, c, Pawn) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
+                    end
                 end
-                path_clear && (score += sign * 25)
+                path_clear && (score += sign * 40)
             else
                 # Backward pawn detection: no friendly pawns in the support zone,
                 # and the square in front is attacked by an enemy pawn.
