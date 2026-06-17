@@ -471,6 +471,8 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
         score = -_quiesce(b, -beta, -alpha, ply + 1, si)
         unmake_move!(b, m, undo)
 
+        si.stop && break
+
         if score > best
             best      = score
             best_move = m
@@ -542,6 +544,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         si.stop = true
         return 0
     end
+    si.stop && return 0
 
     # ── Draw detection ────────────────────────────────────────────────────────
     # Check these before the TT so a stale non-zero TT entry can't override a draw.
