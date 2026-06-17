@@ -1062,7 +1062,7 @@ function search_move(b::Board, time_ms::Int;
     si.prior_counts = prior_counts
     empty!(si.path)
     fill!(si.killers, NULL_MOVE)
-    fill!(si.history, Int32(0))
+    si.history .÷= 8   # age rather than zero: carry ordering knowledge across moves
     fill!(si.countermoves, NULL_MOVE)
 
     best_move       = NULL_MOVE
