@@ -400,6 +400,11 @@ end
 # all evasions, not just captures.
 function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::Int
     si.nodes += 1
+    if (si.nodes & 0x3FF) == 0 && time() >= si.time_limit
+        si.stop = true
+        return 0
+    end
+    si.stop && return 0
 
     # A capture might reduce material to a theoretically drawn endgame.
     _is_insufficient_material(b) && return 0
