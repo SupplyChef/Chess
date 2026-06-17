@@ -1044,6 +1044,7 @@ Find the best move in position `b` within `time_ms` milliseconds.
   background coaching search that runs after our move is submitted).
 """
 function search_move(b::Board, time_ms::Int;
+                     max_depth::Int = MAX_PLY,
                      si::SearchInfo = SearchInfo(),
                      prior_counts::Dict{UInt64,Int} = Dict{UInt64,Int}(),
                      verbose::Bool = true)::SearchResult
@@ -1169,6 +1170,8 @@ function search_move(b::Board, time_ms::Int;
             mate_dist = MATE_SCORE - abs(score)
             mate_dist < depth && break
         end
+
+        depth >= max_depth && break
     end
 
     # Trickiness pass: among the top-3 moves within 30cp of the best, prefer
