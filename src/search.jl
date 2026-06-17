@@ -718,7 +718,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
        tte.depth >= depth - 3 && abs(tte.score) < MATE_SCORE - MOVE_STACK_SIZE
         sing_beta  = tte.score - 2 * depth
         sing_score = _negamax_excl(b, depth ÷ 2, sing_beta - 1, sing_beta, ply, si, hash_move)
-        !si.stop && sing_score < sing_beta && (sing_ext = 1)
+        !si.stop && sing_score < sing_beta && ply < MAX_PLY && (sing_ext = 1)
     end
 
     ml = si.move_stack[min(ply, MOVE_STACK_SIZE)]
@@ -758,7 +758,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                     push!(si.path, b.hash)
                     undo = make_move!(b, m)
                     gives_check = king_in_check(b, b.side)
-                    extension = (cfg.check_extensions && gives_check) ? 1 : sing_ext
+                    extension = (cfg.check_extensions && gives_check && ply < MAX_PLY) ? 1 : sing_ext
 
                     # Hash move is never reduced (i=1)
                     score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false, m)
@@ -819,7 +819,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         gives_check = king_in_check(b, b.side)
 
         # ── Extensions and Late Move Reductions ──────────────────────────────
-        extension = (cfg.check_extensions && gives_check) ? 1 : 0
+        extension = (cfg.check_extensions && gives_check && ply < MAX_PLY) ? 1 : 0
 
         # LMR: after the first 2 moves, reduce quiet non-checking moves.
         # Log-based formula: reduction grows with both depth and move index,
