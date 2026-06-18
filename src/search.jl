@@ -1094,13 +1094,14 @@ function search_move(b::Board, time_ms::Int;
     # original time allocation so the engine can resolve the uncertainty.
     time_extended    = false
     prev_best_move   = NULL_MOVE
-    time_hard_limit  = si.time_start + time_ms * 2 / 1000.0
+    time_hard_limit  = si.time_start + time_ms * 3 / 2 / 1000.0
 
     prev_score = 0
     for depth in 1:MAX_PLY
         # Age history scores so data from the most-recent iteration carries more
-        # weight than data from shallow early iterations.
-        si.history .÷= 2
+        # weight than data from shallow early iterations.  ÷4 (not ÷2) keeps
+        # useful signal from recent depths rather than erasing it too quickly.
+        si.history .÷= 4
 
         # Aspiration windows: search with a narrow window centred on the previous
         # iteration's score.  If the true score lies outside, we get a fail-low
@@ -1156,17 +1157,16 @@ function search_move(b::Board, time_ms::Int;
         verbose && @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  pv %s\n",
                            depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, pv_str)
 
-        # Time extension: when the position is unstable — either the score swings
-        # more than 100 cp from the previous depth, or the best move changes —
-        # grant a one-time extension so the engine can resolve the uncertainty.
-        # This mirrors what adaptive-time-management engines do: spending more
-        # time on critical moves where the first answer is likely wrong.
-        # Guard: don't extend on mate scores (those converge quickly anyway).
+        # Time extension: when the position is genuinely unstable — score swings
+        # more than 150 cp from the previous depth, or the best move changes —
+        # grant a one-time extension of up to ½ the original allocation (hard
+        # cap is 1.5× budget, down from 2×).  Threshold raised from 100 to 150
+        # so routine positional fluctuations don't trigger the extension.
         if depth >= 5 && !time_extended && abs(score) < MATE_SCORE - MAX_PLY
             score_swing  = abs(score - prev_score)
             move_changed = (prev_best_move != NULL_MOVE && move != prev_best_move)
-            if score_swing > 100 || move_changed
-                si.time_limit = min(si.time_limit + time_ms / 1000.0, time_hard_limit)
+            if score_swing > 150 || move_changed
+                si.time_limit = min(si.time_limit + time_ms / 2 / 1000.0, time_hard_limit)
                 time_extended = true
             end
         end

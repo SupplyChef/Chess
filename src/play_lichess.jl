@@ -101,10 +101,13 @@ end
 # (or 1 s) on the clock so a burst of complex positions can't cause flagging.
 function time_for_move(remaining_ms::Int, increment_ms::Int, ::Int)::Int
     base_ms  = remaining_ms ÷ 60 + increment_ms ÷ 2
-    safety   = max(3 * increment_ms, 1_000)
-    max_ms   = max(min(remaining_ms * 5 ÷ 100 + increment_ms * 3 ÷ 4,
-                       remaining_ms - safety), 50)
-    clamp(base_ms, 50, max_ms)
+    # Safety: keep more buffer to cover HTTP latency (~200ms/move) and bursts.
+    # For no-increment games the old 1 s floor was too thin once the clock
+    # dropped below ~5 s, causing flagging due to network overhead.
+    safety   = max(4 * increment_ms, 2_500)
+    max_ms   = max(min(remaining_ms * 4 ÷ 100 + increment_ms * 3 ÷ 4,
+                       remaining_ms - safety), 20)
+    clamp(base_ms, 20, max_ms)
 end
 
 # ── PV deviation analysis ─────────────────────────────────────────────────────
@@ -170,7 +173,7 @@ end
 # ── Core game logic ────────────────────────────────────────────────────────────
 
 # Coaching: explain the opponent's last move using a quick background search.
-function _coaching_async(game_id::String, moves_played::Vector{Move})
+function _coaching_async(game_id::String, moves_played::Vector{Move}, remaining_ms::Int)
     length(moves_played) == 0 && return
     # Capture the engine's score from just before the opponent moved.
     prev_score = let hist = get(PV_HISTORY, game_id, Tuple{Int,Vector{Move},Int}[])
@@ -183,7 +186,11 @@ function _coaching_async(game_id::String, moves_played::Vector{Move})
             prev_str = join(move_to_uci.(moves_played[1:end-1]), " ")
             apply_moves!(b_coach, prev_str, c_coach)
             opp_move = moves_played[end]
-            r_coach  = search_move(b_coach, 1_500; si = SearchInfo(), verbose = false)
+            # Cap coaching time: at most 10% of our remaining clock or 500ms.
+            # Julia @async tasks are cooperative — a long coaching search holds
+            # the CPU and delays our next main search if the opponent plays fast.
+            coaching_ms = clamp(remaining_ms ÷ 10, 50, 500)
+            r_coach  = search_move(b_coach, coaching_ms; si = SearchInfo(), verbose = false)
             msg = explain_opponent_move(b_coach, opp_move, r_coach)
             # Critical moment detection: flag when opponent's move shifted the
             # position significantly in their favour.
@@ -281,7 +288,7 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
 
     # Coaching: explain the opponent's last move. Runs after our move is submitted
     # so it doesn't compete with the main search or interleave info output.
-    opp_just_moved && _coaching_async(game_id, moves_played)
+    opp_just_moved && _coaching_async(game_id, moves_played, remaining_ms)
 
     # Advance our local board to stay in sync.
     make_move!(board, result.move)
