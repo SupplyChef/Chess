@@ -437,16 +437,20 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 atk  = bishop_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
                 score += sign * safe
-                # Trapped bishop penalty
+                # Restriction penalty — bishops need open diagonals
                 safe == 0 && (score -= sign * 100)
                 safe == 1 && (score -= sign * 50)
+                safe == 2 && (score -= sign * 20)
+                safe == 3 && (score -= sign * 8)
             end
             for s in BitIter(bb(b, c, Rook))
                 atk  = rook_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
                 score += sign * safe
-                # Trapped rook penalty (e.g. cornered by pawns)
+                # Restriction penalty — rooks need open files/ranks
                 safe == 0 && (score -= sign * 100)
+                safe == 1 && (score -= sign * 35)
+                safe == 2 && (score -= sign * 12)
             end
             for s in BitIter(bb(b, c, Queen))
                 atk  = queen_attacks(s, occ) & ~our_occ
