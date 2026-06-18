@@ -484,10 +484,14 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
 
     # Genuinely winning/losing material over the PV.
     # Score gate: only claim net "win" if the engine's score confirms it.
+    # For losing: also fire when the score is severely negative (≤ −350 cp) even
+    # if the material swing is neutral — e.g. a rook-for-rook trade that leaves a
+    # −634 cp position shouldn't be described as a nice positional rook placement.
     is_cap            = is_capture(result.move) || is_ep(result.move)
     is_pr             = is_promo(result.move)
     genuinely_winning = swing >= 95 && !is_recap && result.score >= 50
-    genuinely_losing  = swing <= -95 && !is_recap && result.score <= -60
+    genuinely_losing  = !is_recap && result.score <= -60 &&
+                        (swing <= -95 || result.score <= -350)
 
     # ── 2. Immediate material gain ─────────────────────────────────────────────
     # Triggers for captures or promotions. Future wins are handled in positional.

@@ -268,8 +268,8 @@ const (_BACKWARD_W, _BACKWARD_B) = _build_backward_masks()
 # more attractive than the defensive alternative, otherwise the engine sits on
 # a "winning" eval without converting.  A rank-7 pawn is essentially a free queen.
 # The rank-2→3 jump (+25 cp) ensures even newly-passed pawns are pushed promptly.
-const PASSED_BONUS_W = (0, 0, 25, 60, 95, 135, 180, 0)
-const PASSED_BONUS_B = (0, 180, 135, 95, 60, 25,   0, 0)
+const PASSED_BONUS_W = (0, 0, 15, 35, 60,  90, 130, 0)
+const PASSED_BONUS_B = (0, 130,  90, 60, 35, 15,   0, 0)
 
 @inline _passed_bonus(s::Square, c::Color)::Int =
     c == White ? PASSED_BONUS_W[rank_of(s)+1] : PASSED_BONUS_B[rank_of(s)+1]
@@ -606,7 +606,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 # Our rook behind our passed pawn — the classic battery.
                 for rs in BitIter(my_rooks & FILE_MASK[f+1])
                     behind = c == White ? rank_of(rs) < r : rank_of(rs) > r
-                    if behind; score += sign * 45; break; end
+                    if behind; score += sign * 25; break; end
                 end
                 # Enemy rook in front of our passed pawn — blockading it.
                 # We reward the rook's OWNER (the blocking side) via sign flip.
@@ -814,7 +814,7 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                         (bb(b, c, Pawn) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
                     end
                 end
-                path_clear && (score += sign * 30)
+                path_clear && (score += sign * 15)
             else
                 # Backward pawn detection: no friendly pawns in the support zone,
                 # and the square in front is attacked by an enemy pawn.
@@ -839,7 +839,7 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 f = file_of(s)
                 neighbor = (f > 0 ? FILE_MASK[f]   : BB(0)) |
                            (f < 7 ? FILE_MASK[f+2] : BB(0))
-                (passed_bb & neighbor) != 0 && (score += sign * 55)
+                (passed_bb & neighbor) != 0 && (score += sign * 30)
             end
         end
 
