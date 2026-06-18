@@ -92,15 +92,18 @@ end
 
 # Spend 1/60 of remaining time per move.  The recurrence is:
 #   R[n+1] = R[n]*(59/60) + increment
-# Time per move = remaining÷60 + ⅞×increment.
+# Time per move = remaining÷60 + increment×½.
 # Fixed point of the recurrence R_{n+1} = R_n − time(R_n) + I:
-#   R*/60 + 7I/8 = I  →  R* = 7.5×I  (≈ 15 s for 3+2)
-# The clock stabilises well above zero; thinking time at the fixed point ≈ I.
-# For bullet/blitz with no increment the formula reduces to remaining÷60 (original).
-# Max cap includes the increment so a low clock still gets the full increment budget.
+#   R*/60 + I/2 = I  →  R* = 30×I  (≈ 60 s for 3+2)
+# The clock stabilises at a safe level; thinking time at the fixed point ≈ I.
+# For no-increment games the formula reduces to remaining÷60 (unchanged).
+# Max cap: 5% of remaining + ¾ of increment, but always keep at least 3×increment
+# (or 1 s) on the clock so a burst of complex positions can't cause flagging.
 function time_for_move(remaining_ms::Int, increment_ms::Int, ::Int)::Int
-    base_ms = remaining_ms ÷ 60 + increment_ms * 7 ÷ 8
-    max_ms  = max(min(remaining_ms * 4 ÷ 100 + increment_ms, remaining_ms - 500), 50)
+    base_ms  = remaining_ms ÷ 60 + increment_ms ÷ 2
+    safety   = max(3 * increment_ms, 1_000)
+    max_ms   = max(min(remaining_ms * 5 ÷ 100 + increment_ms * 3 ÷ 4,
+                       remaining_ms - safety), 50)
     clamp(base_ms, 50, max_ms)
 end
 
