@@ -274,24 +274,6 @@ end
     @inbounds cm[fs+1, ts+1] = m
 end
 
-# ── Path stack helpers ────────────────────────────────────────────────────────
-# path_counts mirrors the path vector as a hash→count map so the repetition
-# check in _negamax is O(1) rather than an O(depth) linear scan.
-@inline function _path_push!(si::SearchInfo, hash::UInt64)
-    push!(si.path, hash)
-    si.path_counts[hash] = get(si.path_counts, hash, 0) + 1
-end
-
-@inline function _path_pop!(si::SearchInfo)
-    h = pop!(si.path)
-    cnt = si.path_counts[h] - 1
-    if cnt == 0
-        delete!(si.path_counts, h)
-    else
-        si.path_counts[h] = cnt
-    end
-end
-
 # ── Search state ──────────────────────────────────────────────────────────────
 const MOVE_STACK_SIZE   = MAX_PLY + 64   # regular depth + qsearch budget
 const TRICKINESS_WEIGHT = 0.05           # conservative weight; tune up if play feels too timid
@@ -367,6 +349,24 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
         Dict{UInt64,Int}(),
         cfg,
     )
+end
+
+# ── Path stack helpers ────────────────────────────────────────────────────────
+# path_counts mirrors the path vector as a hash→count map so the repetition
+# check in _negamax is O(1) rather than an O(depth) linear scan.
+@inline function _path_push!(si::SearchInfo, hash::UInt64)
+    push!(si.path, hash)
+    si.path_counts[hash] = get(si.path_counts, hash, 0) + 1
+end
+
+@inline function _path_pop!(si::SearchInfo)
+    h = pop!(si.path)
+    cnt = si.path_counts[h] - 1
+    if cnt == 0
+        delete!(si.path_counts, h)
+    else
+        si.path_counts[h] = cnt
+    end
 end
 
 # ── Result ────────────────────────────────────────────────────────────────────
