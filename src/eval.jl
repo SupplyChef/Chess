@@ -436,8 +436,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             for s in BitIter(bb(b, c, Bishop))
                 atk  = bishop_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 2 + unsf * 1)
+                score += sign * safe
                 # Trapped bishop penalty
                 safe == 0 && (score -= sign * 100)
                 safe == 1 && (score -= sign * 50)
@@ -445,16 +444,14 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             for s in BitIter(bb(b, c, Rook))
                 atk  = rook_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 2 + unsf * 1)
+                score += sign * safe
                 # Trapped rook penalty (e.g. cornered by pawns)
                 safe == 0 && (score -= sign * 100)
             end
             for s in BitIter(bb(b, c, Queen))
                 atk  = queen_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 1 + unsf * 0)
+                score += sign * safe
                 # A trapped queen is catastrophic — far worse than a trapped minor piece.
                 safe == 0 && (score -= sign * 150)
                 safe <= 2 && safe > 0 && (score -= sign * 60)
