@@ -318,14 +318,16 @@ mutable struct SearchInfo
     time_start  ::Float64
     time_limit  ::Float64
     # Draw detection state:
-    #   path         — Zobrist hashes of every position on the current search path,
-    #                  from the root down to the current node's parent.  Used to
-    #                  detect repetitions that occur within the search tree.
+    #   path         — Zobrist hashes on the current search path (root → parent).
+    #                  Maintained via _path_push!/_path_pop! which keep path_counts
+    #                  in sync; do not push/pop si.path directly.
+    #   path_counts  — hash → count map for O(1) repetition detection; mirrors path.
     #   prior_counts — position counts from the GAME before the search started,
     #                  supplied by the caller (play_lichess tracks these).  A
     #                  position with count 2 is already in its second occurrence;
     #                  one more repeat makes it a draw.
     path         ::Vector{UInt64}
+    path_counts  ::Dict{UInt64,Int}
     prior_counts ::Dict{UInt64,Int}
     config       ::EngineConfig
 end
@@ -344,8 +346,27 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
         0.0,
         UInt64[],
         Dict{UInt64,Int}(),
+        Dict{UInt64,Int}(),
         cfg,
     )
+end
+
+# ── Path stack helpers ────────────────────────────────────────────────────────
+# path_counts mirrors the path vector as a hash→count map so the repetition
+# check in _negamax is O(1) rather than an O(depth) linear scan.
+@inline function _path_push!(si::SearchInfo, hash::UInt64)
+    push!(si.path, hash)
+    si.path_counts[hash] = get(si.path_counts, hash, 0) + 1
+end
+
+@inline function _path_pop!(si::SearchInfo)
+    h = pop!(si.path)
+    cnt = si.path_counts[h] - 1
+    if cnt == 0
+        delete!(si.path_counts, h)
+    else
+        si.path_counts[h] = cnt
+    end
 end
 
 # ── Result ────────────────────────────────────────────────────────────────────
@@ -523,11 +544,11 @@ function _negamax_excl(b::Board, depth::Int, alpha::Int, beta::Int,
     for i in 1:length(ml)
         m = ml.moves[i]
         m == excl_move && continue
-        push!(si.path, b.hash)
+        _path_push!(si, b.hash)
         undo  = make_move!(b, m)
         score = -_negamax(b, depth - 1, -beta, -alpha, ply + 1, si, false, m)
         unmake_move!(b, m, undo)
-        pop!(si.path)
+        _path_pop!(si)
         si.stop && return 0
         score >= beta && return score
         best = max(best, score)
@@ -555,17 +576,12 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # Insufficient material: neither side can force checkmate.
     _is_insufficient_material(b) && return 0
 
-    # Repetition detection: count occurrences both in the game (prior_counts) and
-    # on the current search path (si.path).  reps >= 1 means this position has
-    # been seen before → visiting it again creates a draw risk, so we return 0.
-    #
-    # This is safe because apply_moves! empties prior_counts after every capture
-    # or pawn push.  Only positions from the current "reversible window" (since
-    # the last irreversible move) are counted, so every hash in prior_counts
-    # represents a position that could genuinely be repeated.  There are no
-    # phantom entries from a previous check sequence that ended with a capture.
-    let reps = get(si.prior_counts, b.hash, 0)
-        for h in si.path; h == b.hash && (reps += 1); end
+    # Repetition detection: sum occurrences in the game (prior_counts) and on the
+    # current search path (path_counts — O(1) Dict lookup).  reps >= 1 means this
+    # position has been seen before; one more visit creates a draw, so return 0.
+    # prior_counts is reset after every irreversible move so only genuinely
+    # repeatable positions are counted.
+    let reps = get(si.prior_counts, b.hash, 0) + get(si.path_counts, b.hash, 0)
         reps >= 1 && return 0
     end
 
@@ -643,7 +659,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         bb(b, b.side, Rook)   | bb(b, b.side, Queen)) != BB(0)
         R       = depth >= 5 ? 3 : 2
         ep_save = b.ep_square
-        push!(si.path, b.hash)          # record current hash before passing the turn
+        _path_push!(si, b.hash)          # record current hash before passing the turn
         b.side  = other(b.side)
         b.hash ⊻= ZOBRIST_SIDE[]
         if ep_save != -1
@@ -657,7 +673,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             b.ep_square = ep_save
             b.hash     ⊻= zob_ep(ep_save)
         end
-        pop!(si.path)
+        _path_pop!(si)
         !si.stop && null_score >= beta && return beta
     end
 
@@ -677,11 +693,11 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             flc = flags(mc)
             is_cap_pc = (flc & MF_CAPTURE) != 0 || flc == MF_EP
             is_cap_pc || continue
-            push!(si.path, b.hash)
+            _path_push!(si, b.hash)
             undo_pc = make_move!(b, mc)
             pc_score = -_negamax(b, pc_depth, -pc_beta, -pc_beta + 1, ply + 1, si, false, mc)
             unmake_move!(b, mc, undo_pc)
-            pop!(si.path)
+            _path_pop!(si)
             si.stop && break
             pc_score >= pc_beta && return pc_score
         end
@@ -755,7 +771,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                 if futility_ok && !is_capture && !is_promo
                     best_score = max(best_score, static_eval)
                 else
-                    push!(si.path, b.hash)
+                    _path_push!(si, b.hash)
                     undo = make_move!(b, m)
                     gives_check = king_in_check(b, b.side)
                     extension = (cfg.check_extensions && gives_check && ply < MAX_PLY) ? 1 : sing_ext
@@ -765,7 +781,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                     pv_searched = true
 
                     unmake_move!(b, m, undo)
-                    pop!(si.path)
+                    _path_pop!(si)
 
                     if si.stop; return 0; end
 
@@ -814,7 +830,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                 continue
             end
         end
-        push!(si.path, b.hash)
+        _path_push!(si, b.hash)
         undo        = make_move!(b, m)
         gives_check = king_in_check(b, b.side)
 
@@ -859,7 +875,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         end
 
         unmake_move!(b, m, undo)
-        pop!(si.path)
+        _path_pop!(si)
 
         si.stop && break
 
@@ -995,7 +1011,7 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
     _score_moves!(ml, b, hash_move, si.killers, si.history, si.countermoves, NULL_MOVE, 1, si.config, 1)
     for i in 1:length(ml)
         m = _pick_move!(ml, i)
-        push!(si.path, b.hash)
+        _path_push!(si, b.hash)
         undo  = make_move!(b, m)
         # PVS at the root: first move full window, later moves scouted with a
         # null window and re-searched only when the scout beats alpha.
@@ -1008,7 +1024,7 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
             end
         end
         unmake_move!(b, m, undo)
-        pop!(si.path)
+        _path_pop!(si)
 
         si.stop && break
 
@@ -1061,6 +1077,7 @@ function search_move(b::Board, time_ms::Int;
     si.time_limit   = si.time_start + time_ms / 1000.0
     si.prior_counts = prior_counts
     empty!(si.path)
+    empty!(si.path_counts)
     fill!(si.killers, NULL_MOVE)
     si.history .÷= 8   # age rather than zero: carry ordering knowledge across moves
     fill!(si.countermoves, NULL_MOVE)
@@ -1183,12 +1200,16 @@ function search_move(b::Board, time_ms::Int;
     # un-analyzed move.
     id_best_move = best_move   # best move after ID; may be overridden by trickiness
 
-    if best_depth >= 4 && length(completed_roots) >= 2 && !is_capture(best_move)
+    # Skip trickiness on a low time budget: the pass costs up to 10% of the
+    # per-move allocation, which is unacceptable when the clock is tight.
+    trick_budget_ms = clamp(time_ms ÷ 10, 0, 60)
+    if best_depth >= 4 && length(completed_roots) >= 2 && !is_capture(best_move) &&
+       trick_budget_ms >= 10
         sort!(completed_roots; by = first, rev = true)
         threshold = completed_roots[1][1] - 30
         top_n     = min(3, length(completed_roots))
         si.stop       = false
-        si.time_limit = time() + 0.060   # 60 ms budget for trickiness pass
+        si.time_limit = time() + trick_budget_ms / 1000.0
         best_adj   = -MATE_SCORE - 1
         trick_move = best_move
         for (ab_score, m) in completed_roots[1:top_n]
