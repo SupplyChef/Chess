@@ -932,10 +932,12 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 end
             end
 
-            if enemy_atk_count >= 1
+            if enemy_atk_count >= 2
                 # Scale by phase: full strength at ph=24, vanishes at ph=0.
-                # Penalty is weighted by (count * weight) to reflect pressure.
-                penalty = (enemy_atk_weight * enemy_atk_count * ph) ÷ 24
+                # Require at least 2 attackers (single piece probes aren't an attack).
+                # Use weight only — multiplying by count created quadratic scaling
+                # that let 4 attackers hit ~160cp, making piece sacrifices look free.
+                penalty = (enemy_atk_weight * ph) ÷ 24
                 score -= sign * penalty
             end
         end
