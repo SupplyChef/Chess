@@ -474,7 +474,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 (rook_attacks(cs, occ)       & (bb(b, c, Rook)   | bb(b, c, Queen)))       != 0 && (ctrl += 1)
                 (king_attacks(cs)            & bb(b, c, King))                              != 0 && (ctrl += 1)
             end
-            score += sign * ctrl * 2
+            score += sign * ctrl
         end
     end
 
