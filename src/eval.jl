@@ -940,9 +940,30 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             end
         end
 
+        # ── 2. Castling rights value ──────────────────────────────────────────────
+        # Having the right to castle is a concrete asset: it lets the king reach
+        # safety in one move.  Losing both rights forces the king to walk,
+        # costing tempo and exposing it to attack.
+        # Only meaningful in the middlegame (scales linearly with phase).
+        if ph >= 6
+            wt = (ph - 6) ÷ 2                        # 0 at ph=6, up to 9 at ph=24
+            has_ks = c == White ? (b.castling & CR_WK) != 0 : (b.castling & CR_BK) != 0
+            has_qs = c == White ? (b.castling & CR_WQ) != 0 : (b.castling & CR_BQ) != 0
+            score += sign * wt * (has_ks ? 5 : 0)
+            score += sign * wt * (has_qs ? 4 : 0)
+        end
+
+        # ── 3. Uncastled king in center ───────────────────────────────────────────
+        # A king stranded on the d or e file in the middlegame is a sitting target.
+        # The PST alone gives only −25 cp; add a phase-scaled penalty to capture
+        # the real danger (open lines, forced king walks, mating attacks).
+        if ph >= 8 && kf >= 3 && kf <= 4
+            center_penalty = (ph * 4)                 # up to −96 cp at full material
+            score -= sign * center_penalty
+        end
+
         if kf <= 2 || kf >= 5
             # King has castled — evaluate pawn shield and open-file penalties.
-
             # Close shield (1 rank ahead): +20 each
             r1 = kr + fwd
             if 0 <= r1 <= 7
