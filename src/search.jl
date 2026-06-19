@@ -426,7 +426,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
         return 0
     end
     si.stop && return 0
-    ply >= MAX_PLY - 1 && return evaluate(b, si.config)
+    ply >= MAX_PLY - 1 && return evaluate_lazy(b, si.config, alpha, beta)
 
     # A capture might reduce material to a theoretically drawn endgame.
     _is_insufficient_material(b) && return 0
