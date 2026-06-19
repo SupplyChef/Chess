@@ -290,10 +290,15 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
     # so it doesn't compete with the main search or interleave info output.
     opp_just_moved && _coaching_async(game_id, moves_played, remaining_ms)
 
-    # Advance our local board to stay in sync.
+    # Advance our local board to stay in sync so the board.side guard prevents
+    # replaying if a duplicate event fires before the next gameState rebuild.
+    # We do NOT manually update POSITION_COUNTS here: the next gameState event
+    # triggers a full rebuild via apply_moves!, which correctly counts every
+    # position from both sides.  Updating counts here would race with that
+    # rebuild and double-count engine-side positions while leaving opponent
+    # positions at their correct count — the "us vs them" asymmetry that caused
+    # the engine to treat its own recent positions as already repeated.
     make_move!(board, result.move)
-    counts = POSITION_COUNTS[game_id]
-    counts[board.hash] = get(counts, board.hash, 0) + 1
 end
 
 function play_game(game_id::String)
