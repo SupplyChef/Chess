@@ -577,12 +577,16 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     _is_insufficient_material(b) && return 0
 
     # Repetition detection: sum occurrences in the game (prior_counts) and on the
-    # current search path (path_counts — O(1) Dict lookup).  reps >= 1 means this
-    # position has been seen before; one more visit creates a draw, so return 0.
+    # current search path (path_counts — O(1) Dict lookup).  reps >= 2 means this
+    # position has been seen at least twice before; one more visit creates a 3-fold
+    # repetition draw, so return 0.  We require >= 2 (not >= 1) so the engine
+    # cannot manufacture a fake draw by replaying its own last move: prior_counts=1
+    # means the position was seen once in the game, but the opponent has no obligation
+    # to repeat — only claim draw on the genuine third occurrence.
     # prior_counts is reset after every irreversible move so only genuinely
     # repeatable positions are counted.
     let reps = get(si.prior_counts, b.hash, 0) + get(si.path_counts, b.hash, 0)
-        reps >= 1 && return 0
+        reps >= 2 && return 0
     end
 
     # TT probe: if we have previously searched this position at sufficient depth,

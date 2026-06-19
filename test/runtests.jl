@@ -337,11 +337,10 @@ using Test
         @test r.score == 0
     end
 
-    @testset "Repetition detection - position seen before scores as draw" begin
-        # With reps >= 1, any position already in prior_counts evaluates as 0 (draw).
-        # This is correct when prior_counts is properly bounded (only positions since
-        # the last irreversible move), because those positions CAN be repeated.
-        # Verify by marking all depth-1 positions as seen once: every white move then
+    @testset "Repetition detection - position seen twice before scores as draw" begin
+        # With reps >= 2, a position must have appeared at least twice before
+        # (prior_counts >= 2) for the current visit to be the third occurrence (draw).
+        # Verify by marking all depth-1 positions as seen twice: every white move then
         # returns 0, and the engine reports score = 0.
         b = board_from_fen("4k3/8/8/8/8/8/Q7/4K3 w - - 0 1")
         ml = MoveList()
@@ -349,7 +348,7 @@ using Test
         pc = Dict{UInt64,Int}()
         for i in 1:length(ml)
             undo = make_move!(b, ml.moves[i])
-            pc[b.hash] = 1
+            pc[b.hash] = 2
             unmake_move!(b, ml.moves[i], undo)
         end
         r = search_move(b, 500; prior_counts=pc)
