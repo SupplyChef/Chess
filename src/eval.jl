@@ -431,7 +431,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 score += sign * (safe * 2 + unsf * 1)
                 # Trapped knight penalty
                 safe == 0 && (score -= sign * 100)
-                safe == 1 && (score -= sign * 50)
+                safe == 1 && (score -= sign * 25)
             end
             for s in BitIter(bb(b, c, Bishop))
                 atk  = bishop_attacks(s, occ) & ~our_occ
@@ -439,9 +439,9 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 score += sign * safe
                 # Restriction penalty — bishops need open diagonals
                 safe == 0 && (score -= sign * 100)
-                safe == 1 && (score -= sign * 50)
-                safe == 2 && (score -= sign * 20)
-                safe == 3 && (score -= sign * 8)
+                safe == 1 && (score -= sign * 25)
+                safe == 2 && (score -= sign * 10)
+                safe == 3 && (score -= sign * 4)
             end
             for s in BitIter(bb(b, c, Rook))
                 atk  = rook_attacks(s, occ) & ~our_occ
@@ -449,8 +449,8 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 score += sign * safe
                 # Restriction penalty — rooks need open files/ranks
                 safe == 0 && (score -= sign * 100)
-                safe == 1 && (score -= sign * 35)
-                safe == 2 && (score -= sign * 12)
+                safe == 1 && (score -= sign * 18)
+                safe == 2 && (score -= sign * 6)
             end
             for s in BitIter(bb(b, c, Queen))
                 atk  = queen_attacks(s, occ) & ~our_occ
@@ -458,7 +458,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 score += sign * safe
                 # A trapped queen is catastrophic — far worse than a trapped minor piece.
                 safe == 0 && (score -= sign * 150)
-                safe <= 2 && safe > 0 && (score -= sign * 60)
+                safe <= 2 && safe > 0 && (score -= sign * 30)
             end
         end
     end
@@ -960,7 +960,7 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         # The PST alone gives only −25 cp; add a phase-scaled penalty to capture
         # the real danger (open lines, forced king walks, mating attacks).
         if ph >= 8 && kf >= 3 && kf <= 4
-            center_penalty = (ph * 4)                 # up to −96 cp at full material
+            center_penalty = (ph * 3)                 # up to −72 cp at full material
             score -= sign * center_penalty
         end
 

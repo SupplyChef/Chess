@@ -51,7 +51,7 @@ end
     # Replace if: empty slot, different position (hash collision — stale entry),
     # or same position at shallower depth.  Crucially, same-key deeper entries
     # are preserved so a depth-3 re-search can't destroy a depth-17 result.
-    if e.key == 0 || e.key != hash || e.depth <= depth
+    if e.key == 0 || e.key != hash || e.depth < depth
         @inbounds tt[idx] = TTEntry(hash, Int32(score), Int16(depth), flag, move)
     end
 end
@@ -426,6 +426,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
         return 0
     end
     si.stop && return 0
+    ply >= MAX_PLY - 1 && return evaluate_lazy(b, si.config, alpha, beta)
 
     # A capture might reduce material to a theoretically drawn endgame.
     _is_insufficient_material(b) && return 0
@@ -633,7 +634,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # ── Static evaluation (shared by RFP, futility, and IIR) ─────────────────
     # Compute once and reuse across all pruning tests that follow.  The lazy
     # shortcut means this is cheap whenever the score is far outside the window.
-    static_eval = !in_check && depth <= 8 ?
+    static_eval = !in_check && depth <= 12 ?
         evaluate_lazy(b, cfg, alpha, beta) : -(MATE_SCORE + 1)
 
     # ── Reverse futility pruning (static null move) ───────────────────────────
@@ -1083,7 +1084,9 @@ function search_move(b::Board, time_ms::Int;
     empty!(si.path)
     empty!(si.path_counts)
     fill!(si.killers, NULL_MOVE)
-    si.history .÷= 8   # age rather than zero: carry ordering knowledge across moves
+    # Age history at move start (÷2 only — ÷8 was too aggressive and discarded
+    # useful ordering signal built up during the engine's own search).
+    si.history .÷= 2
     fill!(si.countermoves, NULL_MOVE)
 
     best_move       = NULL_MOVE
@@ -1123,7 +1126,7 @@ function search_move(b::Board, time_ms::Int;
             δ = ASPIRATION_DELTA
             α = max(-MATE_SCORE, prev_score - δ)
             β = min( MATE_SCORE, prev_score + δ)
-            while true
+            for _ in 1:6               # max 6 expansions before falling back to full window
                 score, move = _search_root(b, depth, α, β, si)
                 si.stop && break
                 if score <= α          # fail-low: widen only the lower bound and retry.
@@ -1136,7 +1139,6 @@ function search_move(b::Board, time_ms::Int;
                 else
                     break              # score inside window — result is reliable
                 end
-                δ > 2 * MATE_SCORE && break  # fallback: give up and accept the result
             end
         end
 
