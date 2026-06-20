@@ -848,7 +848,11 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         # Capped at depth-2 so the reduced search is always at least depth 1.
         reduction = 0
         if cfg.lmr && depth >= 3 && i > 2 && !is_capture && !is_promo && !gives_check && !in_check
-            reduction = clamp(1 + floor(Int, log(depth) * log(i) / 2.0), 0, depth - 2)
+            reduction = clamp(1 + floor(Int, log(depth) * log(i) / 2.5), 0, depth - 2)
+            # When already significantly behind, search harder — critical quiet moves
+            # (e.g. discovered attacks) are likely ordered late and would otherwise
+            # be reduced too much, causing large evaluation swings.
+            static_eval < alpha - 200 && (reduction = max(0, reduction - 1))
         end
 
         # ── Principal variation search ───────────────────────────────────────
