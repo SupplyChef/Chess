@@ -57,8 +57,8 @@ const PST_PAWN_MG = Int16[
      0,  0,  0,  0,  0,  0,  0,  0,
     50, 50, 50, 50, 50, 50, 50, 50,
     10, 10, 20, 30, 30, 20, 10, 10,
-     5,  5, 10, 15, 15, 10,  5,  5,
-     0,  0,  0, 10, 10,  0,  0,  0,
+     5,  5, 10, 20, 20, 10,  5,  5,
+     0,  0,  0, 15, 15,  0,  0,  0,
      5, -5,-10,  0,  0,-10, -5,  5,
      5, 10, 10,-20,-20, 10, 10,  5,
      0,  0,  0,  0,  0,  0,  0,  0,
@@ -427,8 +427,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             for s in BitIter(bb(b, c, Knight))
                 atk  = knight_attacks(s) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 2 + unsf * 1)
+                score += sign * safe                  # 1 cp per safe move (was 2+1)
                 # Trapped knight penalty
                 safe == 0 && (score -= sign * 100)
                 safe == 1 && (score -= sign * 25)
@@ -436,7 +435,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             for s in BitIter(bb(b, c, Bishop))
                 atk  = bishop_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                score += sign * safe
+                score += sign * (safe ÷ 2)            # 1 cp per 2 safe moves (was 1 each)
                 # Restriction penalty — bishops need open diagonals
                 safe == 0 && (score -= sign * 100)
                 safe == 1 && (score -= sign * 25)
@@ -446,7 +445,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             for s in BitIter(bb(b, c, Rook))
                 atk  = rook_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                score += sign * safe
+                score += sign * (safe ÷ 2)            # 1 cp per 2 safe moves (was 1 each)
                 # Restriction penalty — rooks need open files/ranks
                 safe == 0 && (score -= sign * 100)
                 safe == 1 && (score -= sign * 18)
@@ -455,7 +454,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             for s in BitIter(bb(b, c, Queen))
                 atk  = queen_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                score += sign * safe
+                score += sign * (safe ÷ 3)            # 1 cp per 3 safe moves (was 1 each)
                 # A trapped queen is catastrophic — far worse than a trapped minor piece.
                 safe == 0 && (score -= sign * 150)
                 safe <= 2 && safe > 0 && (score -= sign * 30)
