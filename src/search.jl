@@ -601,7 +601,11 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     hash_move = NULL_MOVE
     if tte.key == b.hash
         hash_move = tte.move
-        if tte.depth >= depth
+        # Don't allow TT cutoffs for positions already seen in the game (prior_counts > 0).
+        # A TT entry stored before this position entered a repetition cycle would mask
+        # the draw: the search would short-circuit before traversing the 3-4 move loop
+        # that returns to a position with reps >= 2.  We still use tte.move for ordering.
+        if tte.depth >= depth && get(si.prior_counts, b.hash, 0) == 0
             sc = Int(tte.score)
             # Ply-normalize mate scores: stored value is relative to the node that
             # stored it; convert to relative to the current node by undoing the
@@ -1254,18 +1258,27 @@ function search_move(b::Board, time_ms::Int;
     # and don't have a BETTER score elsewhere; in that case any move is fine but
     # we log it so the caller can claim the draw if needed.
     if best_score < 0
-        ml_rescue = si.move_stack[2]
-        generate_moves!(ml_rescue, b)
-        for i in 1:length(ml_rescue)
-            m = ml_rescue[i]
-            undo = make_move!(b, m)
-            can_draw = get(prior_counts, b.hash, 0) >= 2
-            unmake_move!(b, m, undo)
-            if can_draw
-                best_move  = m
-                best_score = 0
-                pv         = [m]
-                break
+        # If the root position itself has appeared >= 2 times before, this IS the
+        # 3rd occurrence and Lichess will auto-enforce the draw.  Score it as 0.
+        if get(prior_counts, b.hash, 0) >= 2
+            best_score = 0
+            pv         = isempty(pv) ? [best_move] : pv
+        else
+            # Look for a move that reaches a position seen >= 2 times: playing to it
+            # creates the 3rd occurrence, Lichess auto-draws.
+            ml_rescue = si.move_stack[2]
+            generate_moves!(ml_rescue, b)
+            for i in 1:length(ml_rescue)
+                m = ml_rescue[i]
+                undo = make_move!(b, m)
+                can_draw = get(prior_counts, b.hash, 0) >= 2
+                unmake_move!(b, m, undo)
+                if can_draw
+                    best_move  = m
+                    best_score = 0
+                    pv         = [m]
+                    break
+                end
             end
         end
     end
