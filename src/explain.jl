@@ -491,7 +491,7 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
     is_pr             = is_promo(result.move)
     genuinely_winning = swing >= 95 && !is_recap && result.score >= 50
     genuinely_losing  = !is_recap && result.score <= -60 &&
-                        (swing <= -95 || result.score <= -350)
+                        (swing <= -95 || result.score <= -300)
 
     # ── 2. Immediate material gain ─────────────────────────────────────────────
     # Triggers for captures or promotions. Future wins are handled in positional.
@@ -575,6 +575,7 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
         end
         for i in length(undos_pv):-1:1; unmake_move!(b, result.pv[i], undos_pv[i]); end
         what = _describe_material(swing, pv_queen, pv_rook)
+        isempty(what) && (what = "ground")
         return is_cap ?
             "I played $our_san — losing $what, but it's the best I can do. $note" :
             "I played $our_san — my best move, though it leads to losing $what. $note"
