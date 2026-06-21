@@ -46,12 +46,32 @@ Base.@kwdef struct EngineConfig
     # Check extensions: moves that give check are searched 1 ply deeper,
     # ensuring forced mating sequences are found through LMR reductions.
 
+    pvs              ::Bool = true
+    # Principal variation search: the first move at each node is searched with
+    # the full (α, β) window; every later move gets a cheap null-window scout
+    # search (α, α+1) and is only re-searched with the full window if the scout
+    # beats α.  With good move ordering the scout almost always fails low,
+    # saving most of the work on non-PV moves.
+
+    see              ::Bool = true
+    # Static exchange evaluation: resolve the full capture sequence on the
+    # target square (with x-rays) to decide whether a capture loses material.
+    # Used to (a) order SEE-losing captures after quiet moves and (b) prune
+    # them entirely in quiescence search.
+
+    lazy_eval        ::Bool = true
+    # Lazy evaluation: when the cheap eval core (material + tapered PST +
+    # tempo) is more than LAZY_EVAL_MARGIN outside the (α, β) window, return
+    # the core directly instead of computing mobility / king safety / pawn
+    # structure.  The remaining terms cannot move the score back inside the
+    # window, so the bound-relative search result is unchanged.
+
     # ── Evaluation terms ───────────────────────────────────────────────────────
     # Each term adds a centipawn bonus/penalty to the static eval.
     # Disabling one shows how much it contributes to play quality.
 
     eval_mobility    ::Bool = true
-    # +4/3/2/1 cp per reachable square for N/B/R/Q (own-piece squares excluded).
+    # +2/2/2/1 cp per safe reachable square for N/B/R/Q (own-piece squares excluded).
     # Rewards active pieces; penalises blocked bishops and rooks behind pawns.
 
     eval_pins        ::Bool = true
@@ -104,6 +124,11 @@ Base.@kwdef struct EngineConfig
     # significant time for the pawn to advance.  Bonus: +30 cp per passed pawn
     # whose enemy king is cut off from the promotion side of the board.
 
+    eval_pawn_majority    ::Bool = true
+    # Flank pawn majority: +15 cp per flank (queenside or kingside) where we
+    # have more pawns than the opponent.  A majority creates a potential passed
+    # pawn by advancing, making it a lasting structural advantage.
+
     eval_connected_passers ::Bool = true
     # Connected passed pawns bonus: two or more passed pawns on adjacent files
     # support each other and are very difficult to stop.  +25 cp per pawn that
@@ -113,6 +138,59 @@ Base.@kwdef struct EngineConfig
     # Knight distance penalty in deep endgames (phase < 10): a knight far from
     # all pawns is nearly useless.  Penalty = min_pawn_distance × (10-phase) ÷ 5
     # centipawns, capped at 20 cp.  Incentivises repositioning the knight.
+
+    # ── New search heuristics ──────────────────────────────────────────────────
+
+    rfp              ::Bool = true
+    # Reverse futility pruning (static null move): at depth ≤ 7, if
+    # static_eval − 90×depth ≥ beta the position is already too good to
+    # bother searching — return the margin-adjusted score immediately.
+
+    lmp              ::Bool = true
+    # Late move pruning: at depth ≤ 3, once we have searched more than
+    # LMP_QUIET_LIMIT[depth] quiet moves without raising alpha, skip the rest.
+    # Positions where many quiet moves all fail low are almost always resolved
+    # by the first few moves; additional quiet moves cost time for no gain.
+
+    iir              ::Bool = true
+    # Internal iterative reduction: when no hash move is available at depth ≥ 4
+    # the move ordering is poor, so reduce depth by 1 to cheaply find a good
+    # move for the TT.  The next iteration then starts with a reliable hash move.
+
+    history_malus    ::Bool = true
+    # History malus: quiet moves that were searched and failed to raise alpha
+    # (i.e. lost material or were simply bad) have their history score penalised
+    # by −depth².  This improves move ordering by making the history table
+    # reflect not just which moves cause cutoffs but also which moves fail low.
+
+    # ── New evaluation terms ───────────────────────────────────────────────────
+
+    countermove      ::Bool = true
+    # Countermove heuristic: record the quiet move that caused a beta cutoff in
+    # response to each opponent move.  Score it at 65,000 in move ordering so it
+    # is tried just after killers.  Refines ordering when killers don't apply.
+
+    probcut          ::Bool = true
+    # Probcut: at depth ≥ 5, run a shallow null-window search on captures with
+    # beta+200 as the threshold.  If a capture beats the raised threshold, the
+    # position is "too good" and we return immediately without a full search.
+
+    singular_ext     ::Bool = true
+    # Singular extensions: when the TT move at depth ≥ 6 is the only good option
+    # (all other moves fail below tt_score−2*depth in a reduced search), extend
+    # it by 1 ply to explore the forced line more deeply.
+
+    eval_kbnk        ::Bool = true
+    # K+B+N vs lone K endgame evaluation: add a mating bonus that guides the
+    # winning king to the bishop-coloured corner and penalises the losing king
+    # for staying near the centre.  Without this the engine often fails to
+    # convert within the 50-move rule.
+
+    eval_mopup       ::Bool = true
+    # Mopup evaluation: when one side has an overwhelming material lead and the
+    # opponent has a lone king (or near-bare king), add a large bonus for
+    # (a) driving the bare king to an edge/corner and (b) bringing our king
+    # close.  Activates only when phase < 6 and material advantage > 400 cp.
 end
 
 """The default full-strength configuration (all features enabled)."""

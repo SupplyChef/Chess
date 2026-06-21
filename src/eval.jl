@@ -1,8 +1,8 @@
 # Static evaluation. Positive = White is better (centipawns).
 
 # ── Piece values ───────────────────────────────────────────────────────────────
-# Indexed by Int(kind)+1: NoPiece=0 Pawn=100 Knight=320 Bishop=330 Rook=500 Queen=900 King=20000
-const PIECE_VALUE = (0, 100, 320, 330, 500, 900, 20_000)
+# Indexed by Int(kind)+1: NoPiece=0 Pawn=100 Knight=320 Bishop=330 Rook=500 Queen=1000 King=20000
+const PIECE_VALUE = (0, 100, 320, 330, 500, 1000, 20_000)
 
 # ── Piece-square tables ────────────────────────────────────────────────────────
 # 64 entries written rank-8 → rank-1, file-a → file-h (visual board order).
@@ -57,8 +57,8 @@ const PST_PAWN_MG = Int16[
      0,  0,  0,  0,  0,  0,  0,  0,
     50, 50, 50, 50, 50, 50, 50, 50,
     10, 10, 20, 30, 30, 20, 10, 10,
-     5,  5, 10, 25, 25, 10,  5,  5,
-     0,  0,  0, 20, 20,  0,  0,  0,
+     5,  5, 10, 20, 20, 10,  5,  5,
+     0,  0,  0, 15, 15,  0,  0,  0,
      5, -5,-10,  0,  0,-10, -5,  5,
      5, 10, 10,-20,-20, 10, 10,  5,
      0,  0,  0,  0,  0,  0,  0,  0,
@@ -264,12 +264,12 @@ const (_BACKWARD_W, _BACKWARD_B) = _build_backward_masks()
 
 # Bonus in centipawns for a passed pawn based on how far advanced it is.
 # Indexed by rank_of(s)+1 (1=rank1 … 8=rank8); ranks 1 and 8 unused for pawns.
-# Growth is intentionally steep: a pawn on rank 7 is one move from a queen
-# (~900 cp swing) so even a 120 cp bonus still heavily undersells the threat.
-# The gap between rank 6 and rank 5 reflects that a 7th-rank pawn often queens
-# immediately regardless of what the opponent does.
-const PASSED_BONUS_W = (0, 0, 15, 30, 55, 85, 120, 0)
-const PASSED_BONUS_B = (0, 120, 85, 55, 30, 15,   0, 0)
+# The curve is intentionally steep to create urgency: each rank gain must look
+# more attractive than the defensive alternative, otherwise the engine sits on
+# a "winning" eval without converting.  A rank-7 pawn is essentially a free queen.
+# The rank-2→3 jump (+25 cp) ensures even newly-passed pawns are pushed promptly.
+const PASSED_BONUS_W = (0, 0, 15, 35, 60,  90, 130, 0)
+const PASSED_BONUS_B = (0, 130,  90, 60, 35, 15,   0, 0)
 
 @inline _passed_bonus(s::Square, c::Color)::Int =
     c == White ? PASSED_BONUS_W[rank_of(s)+1] : PASSED_BONUS_B[rank_of(s)+1]
@@ -371,17 +371,20 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         # by an enemy pawn.  We reuse the passed-pawn corridor mask (minus the
         # knight's own file) to test whether any enemy pawn can advance to an
         # adjacent file at any rank in front of the knight.
-        # Full outpost (+35): no enemy pawn in the corridor at all.
-        # Semi-outpost (+15): enemy pawn is in the corridor but its immediate
-        # advance square is blocked, so it cannot drive the knight away soon.
+        # Full outpost: +32 if pawn-supported (hard to dislodge), +20 otherwise.
+        # Semi-outpost: +14 if pawn-supported, +8 otherwise.
         for s in BitIter(bb(b, c, Knight))
             in_opp_half = c == White ? rank_of(s) >= 4 : rank_of(s) <= 3
             in_opp_half || continue
+            # Pawn-supported: a friendly pawn defends the knight's square.
+            # Equivalently: pawn_attacks(s, other(c)) gives the squares that
+            # could host a pawn of color c to defend s diagonally.
+            pawn_supported = (pawn_attacks(s, other(c)) & bb(b, c, Pawn)) != BB(0)
             pmask = (c == White ? _PASSED_W[s+1] : _PASSED_B[s+1]) &
                     ~FILE_MASK[file_of(s)+1]
             challenger = pmask & enemy_pawns
             if challenger == 0
-                score += sign * 35
+                score += sign * (pawn_supported ? 32 : 20)
             else
                 # Semi-outpost: all challenger pawns are immediately blocked.
                 # Enemy pawn advances toward our side (decreasing rank for Black
@@ -395,7 +398,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                         all_blocked = false; break
                     end
                 end
-                all_blocked && (score += sign * 15)
+                all_blocked && (score += sign * (pawn_supported ? 14 : 8))
             end
         end
 
@@ -405,14 +408,14 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         for s in BitIter(bb(b, c, Knight) | bb(b, c, Bishop))
             in_opp_half = c == White ? rank_of(s) >= 4 : rank_of(s) <= 3
             in_opp_half || continue
-            (pawn_attacks(s, c) & enemy_pawns) == 0 && (score += sign * 8)
+            (pawn_attacks(s, c) & enemy_pawns) == 0 && (score += sign * 4)
         end
     end
 
-    # Bishop pair bonus (+30): two bishops outperform two knights or bishop+knight
-    # in open positions because they cover both diagonal colors.
+    # Bishop pair bonus: scales with board openness (inverse of phase).
+    # 20 cp at full material (closed positions) → 30 cp at bare endgame (open).
     for c in (White, Black)
-        count_bits(bb(b, c, Bishop)) >= 2 && (score += (c == White ? 1 : -1) * 30)
+        count_bits(bb(b, c, Bishop)) >= 2 && (score += (c == White ? 1 : -1) * (20 + (24 - ph) * 10 ÷ 24))
     end
 
     if cfg.eval_mobility
@@ -424,34 +427,37 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             for s in BitIter(bb(b, c, Knight))
                 atk  = knight_attacks(s) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 6 + unsf * 2)
+                score += sign * safe                  # 1 cp per safe move (was 2+1)
                 # Trapped knight penalty
                 safe == 0 && (score -= sign * 100)
-                safe == 1 && (score -= sign * 50)
+                safe == 1 && (score -= sign * 25)
             end
             for s in BitIter(bb(b, c, Bishop))
                 atk  = bishop_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 5 + unsf * 2)
-                # Trapped bishop penalty
+                score += sign * (safe ÷ 2)            # 1 cp per 2 safe moves (was 1 each)
+                # Restriction penalty — bishops need open diagonals
                 safe == 0 && (score -= sign * 100)
-                safe == 1 && (score -= sign * 50)
+                safe == 1 && (score -= sign * 25)
+                safe == 2 && (score -= sign * 10)
+                safe == 3 && (score -= sign * 4)
             end
             for s in BitIter(bb(b, c, Rook))
                 atk  = rook_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 4 + unsf * 1)
-                # Trapped rook penalty (e.g. cornered by pawns)
+                score += sign * (safe ÷ 2)            # 1 cp per 2 safe moves (was 1 each)
+                # Restriction penalty — rooks need open files/ranks
                 safe == 0 && (score -= sign * 100)
+                safe == 1 && (score -= sign * 18)
+                safe == 2 && (score -= sign * 6)
             end
             for s in BitIter(bb(b, c, Queen))
                 atk  = queen_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                unsf = count_bits(atk &  their_atk)
-                score += sign * (safe * 2 + unsf * 1)
+                score += sign * (safe ÷ 3)            # 1 cp per 3 safe moves (was 1 each)
+                # A trapped queen is catastrophic — far worse than a trapped minor piece.
+                safe == 0 && (score -= sign * 150)
+                safe <= 2 && safe > 0 && (score -= sign * 30)
             end
         end
     end
@@ -467,7 +473,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 (rook_attacks(cs, occ)       & (bb(b, c, Rook)   | bb(b, c, Queen)))       != 0 && (ctrl += 1)
                 (king_attacks(cs)            & bb(b, c, King))                              != 0 && (ctrl += 1)
             end
-            score += sign * ctrl * 3
+            score += sign * ctrl
         end
     end
 
@@ -600,7 +606,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 # Our rook behind our passed pawn — the classic battery.
                 for rs in BitIter(my_rooks & FILE_MASK[f+1])
                     behind = c == White ? rank_of(rs) < r : rank_of(rs) > r
-                    if behind; score += sign * 45; break; end
+                    if behind; score += sign * 25; break; end
                 end
                 # Enemy rook in front of our passed pawn — blockading it.
                 # We reward the rook's OWNER (the blocking side) via sign flip.
@@ -671,6 +677,68 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         end
     end
 
+    # ── K+B+N vs lone K ───────────────────────────────────────────────────────
+    # B+N mate requires driving the bare king to a corner of the bishop's colour.
+    # The existing king-tropism terms are insufficient for this rare but important
+    # technique.  We add a large bonus that scales with how close the bare king
+    # is to the correct corner and how close the winning king is to the bare king.
+    if cfg.eval_kbnk
+        for c in (White, Black)
+            sign = c == White ? 1 : -1
+            their_c = other(c)
+            # Winning side must have exactly K+B+N.
+            (bb(b, c, Rook)   | bb(b, c, Queen)  | bb(b, c, Pawn)) != BB(0) && continue
+            count_bits(bb(b, c, Knight)) == 1     || continue
+            count_bits(bb(b, c, Bishop)) == 1     || continue
+            # Losing side must be a bare king.
+            (bb(b, their_c, Rook)   | bb(b, their_c, Queen)  |
+             bb(b, their_c, Bishop) | bb(b, their_c, Knight) |
+             bb(b, their_c, Pawn)) != BB(0)       && continue
+
+            bish_sq    = lsb(bb(b, c, Bishop))
+            bish_color = (file_of(bish_sq) + rank_of(bish_sq)) & 1
+            their_k    = lsb(bb(b, their_c, King))
+            kf = file_of(their_k); kr = rank_of(their_k)
+            # Correct corners: a1=(0,0) and h8=(7,7) are light (sum even),
+            #                  a8=(0,7) and h1=(7,0) are dark (sum odd).
+            corner_dist = if bish_color == 0   # light bishop → a1 or h8
+                min(kf + kr, (7 - kf) + (7 - kr))
+            else                               # dark bishop → a8 or h1
+                min(kf + (7 - kr), (7 - kf) + kr)
+            end
+            score += sign * (14 - corner_dist) * 12   # up to +168 cp
+            our_k  = lsb(bb(b, c, King))
+            score += sign * (7 - _chebyshev(our_k, their_k)) * 8   # up to +56 cp
+        end
+    end
+
+    # ── Mopup evaluation ──────────────────────────────────────────────────────
+    # When one side has a decisive material advantage and the opponent is down
+    # to a bare (or near-bare) king, the winning side earns bonuses for
+    # (a) pushing the losing king to a corner and (b) bringing its own king
+    # close.  This is additive to the existing king-tropism terms but activates
+    # more aggressively when the material gap is large.
+    if cfg.eval_mopup && ph < 6
+        for c in (White, Black)
+            sign    = c == White ? 1 : -1
+            their_c = other(c)
+            # Losing side: no pieces except the king (bare king).
+            (bb(b, their_c, Rook)   | bb(b, their_c, Queen)  |
+             bb(b, their_c, Bishop) | bb(b, their_c, Knight) |
+             bb(b, their_c, Pawn)) != BB(0)       && continue
+            # Winning side must have a significant material edge.
+            Int(b.material) * sign < 400           && continue
+
+            their_k    = lsb(bb(b, their_c, King))
+            their_kf   = file_of(their_k)
+            their_kr   = rank_of(their_k)
+            corner_dist = min(their_kf, 7 - their_kf, their_kr, 7 - their_kr)
+            our_k       = lsb(bb(b, c, King))
+            score += sign * (7 - corner_dist) * 15           # up to +105 cp
+            score += sign * (7 - _chebyshev(our_k, their_k)) * 12   # up to +84 cp
+        end
+    end
+
     score
 end
 
@@ -703,10 +771,10 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             n = count_bits(fp)
             # Doubled pawns: penalty per extra pawn on the same file.
             # The lead pawn is neutral; each additional pawn is a liability
-            # because it cannot protect the one ahead of it.  −25 cp reflects
+            # because it cannot protect the one ahead of it.  −12 cp reflects
             # that doubled pawns also create weaknesses on the adjacent files
             # that the opponent can target with a rook or majority.
-            n > 1 && (score += sign * (n - 1) * (-25))
+            n > 1 && (score += sign * (n - 1) * (-12))
             # Isolated pawns: no friendly pawn on either adjacent file means
             # this pawn can never be defended by another pawn.  −20 cp is larger
             # than the doubled penalty because an isolated pawn is a permanent
@@ -723,6 +791,30 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 ocb_only && (bonus = bonus ÷ 2)
                 score += sign * bonus
                 passed_bb |= sq_bb(s)
+                # Free passer: no piece of either colour stands between the
+                # pawn and its promotion square, AND no friendly pawn trails
+                # behind it on the same file (doubled pawns are not truly free).
+                promo_rank = c == White ? 7 : 0
+                pawn_rank  = rank_of(s)
+                pawn_file  = file_of(s)
+                path_clear = true
+                if c == White
+                    for r in (pawn_rank + 1):(promo_rank - 1)
+                        (all_occ(b) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
+                    end
+                    # disqualify if a friendly pawn sits behind on the same file
+                    for r in 1:(pawn_rank - 1)
+                        (bb(b, c, Pawn) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
+                    end
+                else
+                    for r in (promo_rank + 1):(pawn_rank - 1)
+                        (all_occ(b) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
+                    end
+                    for r in (pawn_rank + 1):6
+                        (bb(b, c, Pawn) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
+                    end
+                end
+                path_clear && (score += sign * 15)
             else
                 # Backward pawn detection: no friendly pawns in the support zone,
                 # and the square in front is attacked by an enemy pawn.
@@ -739,14 +831,32 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         end
 
         # Connected passed pawns: adjacent passers support each other and are
-        # very difficult to stop together.
+        # very difficult to stop together — a lone piece cannot handle both
+        # simultaneously.  The bonus is large enough to clearly outweigh the
+        # cost of pushing versus making defensive moves.
         if cfg.eval_connected_passers
             for s in BitIter(passed_bb)
                 f = file_of(s)
                 neighbor = (f > 0 ? FILE_MASK[f]   : BB(0)) |
                            (f < 7 ? FILE_MASK[f+2] : BB(0))
-                (passed_bb & neighbor) != 0 && (score += sign * 25)
+                (passed_bb & neighbor) != 0 && (score += sign * 30)
             end
+        end
+
+        # Flank pawn majority: more pawns on one flank creates a potential
+        # passed pawn by advancing — a long-term structural advantage.
+        if cfg.eval_pawn_majority
+            # Count files with at least one pawn (not total pawns), and only
+            # award the bonus when the opponent actually has pawns on that flank
+            # — an uncontested flank with no enemy pawns doesn't create a
+            # meaningful majority (the doubled-pawn test case has 2 white pawns
+            # on e but zero black pawns; that's not a structural advantage).
+            our_qs = count(f -> (pawns & FILE_MASK[f]) != BB(0), 1:4)
+            opp_qs = count(f -> (enemy_pawns & FILE_MASK[f]) != BB(0), 1:4)
+            our_ks = count(f -> (pawns & FILE_MASK[f]) != BB(0), 5:8)
+            opp_ks = count(f -> (enemy_pawns & FILE_MASK[f]) != BB(0), 5:8)
+            (opp_qs > 0 && our_qs > opp_qs) && (score += sign * 15)
+            (opp_ks > 0 && our_ks > opp_ks) && (score += sign * 15)
         end
     end
     score
@@ -802,35 +912,59 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
 
             for s in BitIter(bb(b, them, Knight))
                 if (knight_attacks(s) & king_zone) != 0
-                    enemy_atk_count += 1; enemy_atk_weight += 2
+                    enemy_atk_count += 1; enemy_atk_weight += 5
                 end
             end
             for s in BitIter(bb(b, them, Bishop))
                 if (bishop_attacks(s, occ) & king_zone) != 0
-                    enemy_atk_count += 1; enemy_atk_weight += 2
+                    enemy_atk_count += 1; enemy_atk_weight += 5
                 end
             end
             for s in BitIter(bb(b, them, Rook))
                 if (rook_attacks(s, occ) & king_zone) != 0
-                    enemy_atk_count += 1; enemy_atk_weight += 3
+                    enemy_atk_count += 1; enemy_atk_weight += 8
                 end
             end
             for s in BitIter(bb(b, them, Queen))
                 if (queen_attacks(s, occ) & king_zone) != 0
-                    enemy_atk_count += 1; enemy_atk_weight += 5
+                    enemy_atk_count += 1; enemy_atk_weight += 20
                 end
             end
 
             if enemy_atk_count >= 2
                 # Scale by phase: full strength at ph=24, vanishes at ph=0.
-                penalty = (enemy_atk_weight * enemy_atk_count * ph) ÷ 24
+                # Require at least 2 attackers (single piece probes aren't an attack).
+                # Use weight only — multiplying by count created quadratic scaling
+                # that let 4 attackers hit ~160cp, making piece sacrifices look free.
+                penalty = (enemy_atk_weight * ph) ÷ 24
                 score -= sign * penalty
             end
         end
 
+        # ── 2. Castling rights value ──────────────────────────────────────────────
+        # Having the right to castle is a concrete asset: it lets the king reach
+        # safety in one move.  Losing both rights forces the king to walk,
+        # costing tempo and exposing it to attack.
+        # Only meaningful in the middlegame (scales linearly with phase).
+        if ph >= 6
+            wt = (ph - 6) ÷ 2                        # 0 at ph=6, up to 9 at ph=24
+            has_ks = c == White ? (b.castling & CR_WK) != 0 : (b.castling & CR_BK) != 0
+            has_qs = c == White ? (b.castling & CR_WQ) != 0 : (b.castling & CR_BQ) != 0
+            score += sign * wt * (has_ks ? 5 : 0)
+            score += sign * wt * (has_qs ? 4 : 0)
+        end
+
+        # ── 3. Uncastled king in center ───────────────────────────────────────────
+        # A king stranded on the d or e file in the middlegame is a sitting target.
+        # The PST alone gives only −25 cp; add a phase-scaled penalty to capture
+        # the real danger (open lines, forced king walks, mating attacks).
+        if ph >= 8 && kf >= 3 && kf <= 4
+            center_penalty = (ph * 3)                 # up to −72 cp at full material
+            score -= sign * center_penalty
+        end
+
         if kf <= 2 || kf >= 5
             # King has castled — evaluate pawn shield and open-file penalties.
-
             # Close shield (1 rank ahead): +20 each
             r1 = kr + fwd
             if 0 <= r1 <= 7
@@ -929,6 +1063,33 @@ end
 _eval_tempo(b::Board)::Int = b.side == White ? 10 : -10
 
 # ── Public API ─────────────────────────────────────────────────────────────────
+
+# How far (in centipawns) the slow eval terms (mobility, king safety, pawn
+# structure, space, …) can realistically move the score away from the
+# material + PST core.  Chosen as a conservative bound: trapped-piece
+# penalties (−100), king-zone attack penalties, and stacked passer bonuses
+# rarely sum past ~400 cp in one direction.
+const LAZY_EVAL_MARGIN = 450
+
+"""
+    evaluate_lazy(b, cfg, alpha, beta) → Int
+
+Static evaluation from the **side-to-move** perspective, with a lazy shortcut:
+when the cheap core (material + tapered PST + tempo) already lies more than
+`LAZY_EVAL_MARGIN` outside the `(alpha, beta)` window, the core is returned
+directly — the remaining slow terms cannot bring the score back inside the
+window, so any bound-relative decision (stand-pat cutoff, futility test) is
+unaffected.  Otherwise falls through to the full `evaluate`.
+"""
+@inline function evaluate_lazy(b::Board, cfg::EngineConfig, alpha::Int, beta::Int)::Int
+    if cfg.lazy_eval
+        ph   = Int(clamp(b.phase, 0, 24))
+        core = Int(b.material) + (ph * Int(b.mg_score) + (24 - ph) * Int(b.eg_score)) ÷ 24
+        sc   = (b.side == White ? core : -core) + 10   # +10 tempo for the side to move
+        (sc - LAZY_EVAL_MARGIN >= beta || sc + LAZY_EVAL_MARGIN <= alpha) && return sc
+    end
+    (b.side == White ? 1 : -1) * total(evaluate(b, cfg))
+end
 
 function evaluate(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::EvalBreakdown
     ph = Int(clamp(b.phase, 0, 24))

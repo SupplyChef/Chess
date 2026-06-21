@@ -33,6 +33,7 @@ const ACTIVE_GAMES    = Set{String}()
 # all_moves[start+i].  score is result.score (our perspective, full depth) and
 # is used at game end to measure opponent deviation quality without re-searching.
 const PV_HISTORY      = Dict{String, Vector{Tuple{Int, Vector{Move}, Int}}}()
+const OPENING_POSTED  = Dict{String, Bool}()   # true once opening name has been posted
 
 # ── Lichess API helpers ────────────────────────────────────────────────────────
 
@@ -54,7 +55,10 @@ end
 
 function post_chat(game_id::String, text::String; room::String = "player")
     url  = "https://lichess.org/api/bot/game/$game_id/chat"
-    body = "room=$(_urlencode(room))&text=$(_urlencode(text))"
+    # Lichess hard-caps chat messages at 140 characters; longer posts are silently
+    # dropped by the API.  Truncate here so the message always goes through.
+    safe = length(text) <= 140 ? text : text[1:prevind(text, 140)] * "…"
+    body = "room=$(_urlencode(room))&text=$(_urlencode(safe))"
     hdrs = vcat(AUTH_HEADER, ["Content-Type" => "application/x-www-form-urlencoded"])
     try
         HTTP.post(url, hdrs, body; readtimeout = 5, connecttimeout = 5)
@@ -84,33 +88,26 @@ end
 
 # ── Board helpers ──────────────────────────────────────────────────────────────
 
-# Apply a space-separated UCI move list to board, updating position_counts.
-# Returns the list of Move objects played.
-function apply_moves!(board::Board, moves_str::AbstractString,
-                      counts::Dict{UInt64, Int})::Vector{Move}
-    played = Move[]
-    isempty(strip(moves_str)) && return played
-    for uci in split(strip(moves_str))
-        isempty(uci) && continue
-        try
-            m = move_from_uci(board, String(uci))
-            make_move!(board, m)
-            counts[board.hash] = get(counts, board.hash, 0) + 1
-            push!(played, m)
-        catch e
-            @warn "Skipping illegal move $uci: $e"
-        end
-    end
-    played
-end
+# apply_moves! is defined in Chess.fen (src/fen.jl) and exported from the module.
 
-# Spend 1/60 of remaining time per move (geometric decay: remaining(n) = R*(59/60)^n,
-# which never reaches zero).  No "expected moves" estimate that breaks in long games.
-# Max cap at 4% of remaining keeps us safe if a single position explodes.
+# Spend 1/60 of remaining time per move.  The recurrence is:
+#   R[n+1] = R[n]*(59/60) + increment
+# Time per move = remaining÷60 + increment×½.
+# Fixed point of the recurrence R_{n+1} = R_n − time(R_n) + I:
+#   R*/60 + I/2 = I  →  R* = 30×I  (≈ 60 s for 3+2)
+# The clock stabilises at a safe level; thinking time at the fixed point ≈ I.
+# For no-increment games the formula reduces to remaining÷60 (unchanged).
+# Max cap: 5% of remaining + ¾ of increment, but always keep at least 3×increment
+# (or 1 s) on the clock so a burst of complex positions can't cause flagging.
 function time_for_move(remaining_ms::Int, increment_ms::Int, ::Int)::Int
-    base_ms = remaining_ms ÷ 60 + increment_ms * 3 ÷ 4
-    max_ms  = max(min(remaining_ms * 4 ÷ 100, remaining_ms - 500), 50)
-    clamp(base_ms, 50, max_ms)
+    base_ms  = remaining_ms ÷ 60 + increment_ms ÷ 2
+    # Safety: keep more buffer to cover HTTP latency (~200ms/move) and bursts.
+    # For no-increment games the old 1 s floor was too thin once the clock
+    # dropped below ~5 s, causing flagging due to network overhead.
+    safety   = max(4 * increment_ms, 2_500)
+    max_ms   = max(min(remaining_ms * 4 ÷ 100 + increment_ms * 3 ÷ 4,
+                       remaining_ms - safety), 20)
+    clamp(base_ms, 20, max_ms)
 end
 
 # ── PV deviation analysis ─────────────────────────────────────────────────────
@@ -176,8 +173,12 @@ end
 # ── Core game logic ────────────────────────────────────────────────────────────
 
 # Coaching: explain the opponent's last move using a quick background search.
-function _coaching_async(game_id::String, moves_played::Vector{Move})
+function _coaching_async(game_id::String, moves_played::Vector{Move}, remaining_ms::Int)
     length(moves_played) == 0 && return
+    # Capture the engine's score from just before the opponent moved.
+    prev_score = let hist = get(PV_HISTORY, game_id, Tuple{Int,Vector{Move},Int}[])
+        isempty(hist) ? nothing : hist[end][3]
+    end
     @async begin
         try
             b_coach = board_from_fen(STARTPOS)
@@ -185,8 +186,26 @@ function _coaching_async(game_id::String, moves_played::Vector{Move})
             prev_str = join(move_to_uci.(moves_played[1:end-1]), " ")
             apply_moves!(b_coach, prev_str, c_coach)
             opp_move = moves_played[end]
-            r_coach  = search_move(b_coach, 1_500; si = SearchInfo(), verbose = false)
+            # Cap coaching time: at most 10% of our remaining clock or 500ms.
+            # Julia @async tasks are cooperative — a long coaching search holds
+            # the CPU and delays our next main search if the opponent plays fast.
+            coaching_ms = clamp(remaining_ms ÷ 10, 50, 500)
+            r_coach  = search_move(b_coach, coaching_ms; si = SearchInfo(), verbose = false)
             msg = explain_opponent_move(b_coach, opp_move, r_coach)
+            # Critical moment detection: flag when opponent's move shifted the
+            # position significantly in their favour.
+            if prev_score !== nothing && r_coach.move != NULL_MOVE
+                # prev_score: our side (positive = we were ahead).
+                # r_coach.score: from side-to-move (opponent) perspective.
+                # score_drop < 0 means we lost ground.
+                score_drop = prev_score + r_coach.score
+                if score_drop < -80
+                    prefix = abs(score_drop) >= 200 ?
+                        "⚠ Critical moment! " :
+                        "Key move — changed the game. "
+                    msg = isempty(msg) ? prefix : prefix * msg
+                end
+            end
             isempty(msg) || post_chat(game_id, msg; room = "player")
         catch e
             @warn "Coaching error: $e"
@@ -240,9 +259,25 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
     # Append the PV in UCI so the explanation can be cross-checked against the line.
     last_opp = isempty(moves_played) ? nothing : moves_played[end]
     msg = explain_move(result, board, color; last_opp_move = last_opp)
-    msg_with_pv = isempty(result.pv) ? msg : "$msg [PV: $pv_str]"
+    # Fit PV tag within the 140-char Lichess limit: include it only if it fits.
+    pv_tag = isempty(result.pv) ? "" : " [PV: $pv_str]"
+    msg_with_pv = length(msg) + length(pv_tag) <= 140 ? msg * pv_tag :
+                  length(msg) <= 140 ? msg :
+                  msg[1:prevind(msg, 137)] * "…"
     @async post_chat(game_id, msg_with_pv; room = "player")
     @async post_chat(game_id, msg_with_pv; room = "spectator")
+
+    # Opening name: post once per game when we reach move 4–8.
+    n_moves = length(moves_played)
+    if 4 <= n_moves <= 8 && !get(OPENING_POSTED, game_id, false)
+        uci_list = move_to_uci.(moves_played)
+        opening  = _opening_name(uci_list)
+        if !isempty(opening)
+            @async post_chat(game_id, "Opening: $opening"; room = "player")
+            @async post_chat(game_id, "Opening: $opening"; room = "spectator")
+        end
+        OPENING_POSTED[game_id] = true
+    end
 
     # Follow-up: strategic outlook based on PV endpoint vs root eval.
     outcome_msg = explain_pv_outcome(result, board, color)
@@ -253,12 +288,17 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
 
     # Coaching: explain the opponent's last move. Runs after our move is submitted
     # so it doesn't compete with the main search or interleave info output.
-    opp_just_moved && _coaching_async(game_id, moves_played)
+    opp_just_moved && _coaching_async(game_id, moves_played, remaining_ms)
 
-    # Advance our local board to stay in sync.
+    # Advance our local board to stay in sync so the board.side guard prevents
+    # replaying if a duplicate event fires before the next gameState rebuild.
+    # We do NOT manually update POSITION_COUNTS here: the next gameState event
+    # triggers a full rebuild via apply_moves!, which correctly counts every
+    # position from both sides.  Updating counts here would race with that
+    # rebuild and double-count engine-side positions while leaving opponent
+    # positions at their correct count — the "us vs them" asymmetry that caused
+    # the engine to treat its own recent positions as already repeated.
     make_move!(board, result.move)
-    counts = POSITION_COUNTS[game_id]
-    counts[board.hash] = get(counts, board.hash, 0) + 1
 end
 
 function play_game(game_id::String)
