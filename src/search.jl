@@ -802,7 +802,15 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                         if score > alpha
                             alpha = score
                             if alpha >= beta
-                                # No need to update killers for hash move
+                                # Write to TT before returning so _extract_pv can
+                                # follow the PV through this cut node.
+                                store_score = best_score
+                                if best_score > MATE_SCORE - MOVE_STACK_SIZE
+                                    store_score = best_score + ply
+                                elseif best_score < -(MATE_SCORE - MOVE_STACK_SIZE)
+                                    store_score = best_score - ply
+                                end
+                                _tt_put!(si.tt, b.hash, depth, store_score, TT_LOWER, best_move)
                                 return best_score
                             end
                         end
