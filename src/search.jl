@@ -48,10 +48,12 @@ end
                            depth::Int, score::Int, flag::UInt8, move::Move)
     idx = (hash & (TT_SIZE - 1)) + 1
     @inbounds e = tt[idx]
-    # Replace if: empty slot, different position (hash collision — stale entry),
-    # or same position at shallower depth.  Crucially, same-key deeper entries
-    # are preserved so a depth-3 re-search can't destroy a depth-17 result.
-    if e.key == 0 || e.key != hash || e.depth < depth
+    # Replace if: empty slot, different position (hash collision), or same/shallower
+    # depth.  Same-depth replacement is required so aspiration window re-searches
+    # (which revisit the same depth with a wider window) can overwrite stale
+    # TT_UPPER/LOWER entries from the earlier narrow-window pass.  Only strictly
+    # deeper entries (depth > current search depth) are preserved.
+    if e.key == 0 || e.key != hash || e.depth <= depth
         @inbounds tt[idx] = TTEntry(hash, Int32(score), Int16(depth), flag, move)
     end
 end
@@ -1243,5 +1245,30 @@ function search_move(b::Board, time_ms::Int;
     # If trickiness did pick a different move, re-extract — the cached PV no
     # longer matches the selected move and we accept a potentially shorter line.
     pv = best_move == id_best_move ? best_pv : _extract_pv(b, si.tt, best_move, 10)
+
+    # Draw rescue: if the search found a losing score but the game history already
+    # contains a position that we can reach in one move (prior_counts >= 2 means
+    # it has appeared twice before — playing to it now creates the 3rd occurrence
+    # and Lichess auto-enforces the draw), prefer that drawing move.
+    # Also check if we are already IN a repeated position (prior_counts[root] >= 2)
+    # and don't have a BETTER score elsewhere; in that case any move is fine but
+    # we log it so the caller can claim the draw if needed.
+    if best_score < 0
+        ml_rescue = si.move_stack[2]
+        generate_moves!(ml_rescue, b)
+        for i in 1:length(ml_rescue)
+            m = ml_rescue[i]
+            undo = make_move!(b, m)
+            can_draw = get(prior_counts, b.hash, 0) >= 2
+            unmake_move!(b, m, undo)
+            if can_draw
+                best_move  = m
+                best_score = 0
+                pv         = [m]
+                break
+            end
+        end
+    end
+
     SearchResult(best_move, best_score, best_depth, si.nodes, evaluate(b, si.config), pv)
 end
