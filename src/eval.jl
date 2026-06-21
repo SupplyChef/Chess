@@ -909,6 +909,7 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             king_zone = king_attacks(ks) | sq_bb(ks)
             enemy_atk_count  = 0
             enemy_atk_weight = 0
+            queen_attacking  = false
 
             for s in BitIter(bb(b, them, Knight))
                 if (knight_attacks(s) & king_zone) != 0
@@ -928,6 +929,7 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             for s in BitIter(bb(b, them, Queen))
                 if (queen_attacks(s, occ) & king_zone) != 0
                     enemy_atk_count += 1; enemy_atk_weight += 20
+                    queen_attacking = true
                 end
             end
 
@@ -936,7 +938,27 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 # Require at least 2 attackers (single piece probes aren't an attack).
                 # Use weight only — multiplying by count created quadratic scaling
                 # that let 4 attackers hit ~160cp, making piece sacrifices look free.
-                penalty = (enemy_atk_weight * ph) ÷ 24
+                #
+                # Sustained-attack factor: reduce penalty when the attacker lacks
+                # follow-through capability.
+                #   - No queen in the attack zone → ÷2 (minor-piece attacks stall
+                #     without the queen's long-range coverage).
+                #   - Attacker has ≤2 non-pawn pieces total → ×2/5 (the attackers
+                #     are their entire army; no reinforcements can join).
+                # Represented as integer fraction sus_num/sus_den (no floats).
+                them_piece_count = count_bits(
+                    bb(b, them, Knight) | bb(b, them, Bishop) |
+                    bb(b, them, Rook)   | bb(b, them, Queen))
+                sus_num = 4
+                sus_den = 4
+                if !queen_attacking
+                    sus_den *= 2
+                end
+                if them_piece_count <= 2
+                    sus_num *= 2
+                    sus_den *= 5
+                end
+                penalty = (enemy_atk_weight * ph * sus_num) ÷ (24 * sus_den)
                 score -= sign * penalty
             end
         end
