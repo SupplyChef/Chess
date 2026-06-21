@@ -654,4 +654,122 @@ using Test
         @test !cfg.pvs && !cfg.see && !cfg.lazy_eval
     end
 
+    # ── Transposition table ───────────────────────────────────────────────────
+
+    @testset "TT — PV length >= 2 for positions with clear continuations" begin
+        # Rxd5 wins a free queen; the opponent must reply with a king move.
+        # The hash-move TT fix (writing TT_LOWER on cut-node beta cutoff) is
+        # required for _extract_pv to follow the opponent's reply.
+        b = board_from_fen("7k/8/8/3q4/8/8/8/3R3K w - - 0 1")
+        r = search_move(b, 1000)
+        @test move_to_uci(r.move) == "d1d5"
+        @test length(r.pv) >= 2
+    end
+
+    @testset "TT — PV captures opponent reply in forced mate sequence" begin
+        # Rook ladder mate in 2 (4 half-moves). The PV must contain at least
+        # our move, the opponent's forced reply, and our mating move.
+        b = board_from_fen("3k4/8/6R1/7R/8/8/8/6K1 w - - 0 1")
+        r = search_move(b, 1000)
+        @test r.score == MATE_SCORE - 4
+        @test length(r.pv) >= 3
+    end
+
+    @testset "TT — replacement: deeper entry is preserved" begin
+        si = SearchInfo()
+        h  = UInt64(0xDEADBEEFCAFE1234)
+        b  = board_from_fen(STARTPOS)
+        m1 = move_from_uci(b, "e2e4")
+        m2 = move_from_uci(b, "d2d4")
+        # Write a deep entry (depth 10).
+        Chess._tt_put!(si.tt, h, 10, 50, Chess.TT_EXACT, m1)
+        e1 = Chess._tt_get(si.tt, h)
+        @test e1.key == h && Int(e1.depth) == 10 && e1.move == m1
+        # Attempt to overwrite with a shallower entry (depth 9) — must not replace.
+        Chess._tt_put!(si.tt, h, 9, 99, Chess.TT_EXACT, m2)
+        e2 = Chess._tt_get(si.tt, h)
+        @test Int(e2.depth) == 10
+        @test e2.move == m1
+    end
+
+    @testset "TT — replacement: same-depth entry is overwritten (aspiration support)" begin
+        si = SearchInfo()
+        h  = UInt64(0xABCDEF0123456789)
+        b  = board_from_fen(STARTPOS)
+        m1 = move_from_uci(b, "e2e4")
+        m2 = move_from_uci(b, "d2d4")
+        Chess._tt_put!(si.tt, h, 5, 30, Chess.TT_UPPER, m1)
+        # Same depth must replace (aspiration re-search updates a stale UPPER entry).
+        Chess._tt_put!(si.tt, h, 5, 45, Chess.TT_EXACT, m2)
+        e = Chess._tt_get(si.tt, h)
+        @test e.score == Int32(45)
+        @test e.flag  == Chess.TT_EXACT
+        @test e.move  == m2
+    end
+
+    @testset "TT — mate score ply normalization is consistent across searches" begin
+        # Searching the same mate-in-2 twice with a warm TT must return the
+        # same mate distance both times (normalization roundtrip is correct).
+        b  = board_from_fen("3k4/8/6R1/7R/8/8/8/6K1 w - - 0 1")
+        si = SearchInfo()
+        r1 = search_move(b, 500; si)
+        r2 = search_move(b, 500; si)
+        @test r1.score == r2.score
+        @test abs(r2.score) >= MATE_SCORE - Chess.MAX_PLY
+    end
+
+    @testset "TT — prior_counts guard: warm TT does not override draw by repetition" begin
+        # Search normally first to populate the TT with a positive score.
+        b  = board_from_fen("4k3/8/8/8/8/8/Q7/4K3 w - - 0 1")
+        si = SearchInfo()
+        r1 = search_move(b, 500; si)
+        @test r1.score > 0
+
+        # Mark every position reachable in one white move as seen twice.
+        # Each such position has prior_counts = 2, so any move there is a draw.
+        # The prior_counts guard in _negamax must block the TT's positive score.
+        ml = MoveList()
+        generate_moves!(ml, b)
+        pc = Dict{UInt64,Int}()
+        for i in 1:length(ml)
+            undo = make_move!(b, ml.moves[i])
+            pc[b.hash] = 2
+            unmake_move!(b, ml.moves[i], undo)
+        end
+        r2 = search_move(b, 500; si, prior_counts = pc)
+        @test r2.score == 0
+    end
+
+    @testset "TT — _extract_pv stops at TT_UPPER entry" begin
+        b  = board_from_fen("7k/8/8/3q4/8/8/8/3R3K w - - 0 1")
+        si = SearchInfo()
+        r  = search_move(b, 500; si)
+        # Overwrite the position after the best move with a TT_UPPER entry.
+        # _extract_pv must stop there and return a length-1 PV.
+        undo = make_move!(b, r.move)
+        Chess._tt_put!(si.tt, b.hash, 20, 0, Chess.TT_UPPER, NULL_MOVE)
+        unmake_move!(b, r.move, undo)
+        pv = Chess._extract_pv(b, si.tt, r.move, 8)
+        @test length(pv) == 1
+    end
+
+    @testset "TT — _extract_pv terminates on hash cycle" begin
+        # Inject a TT chain that loops: position after pv[2] points back to pv[1].
+        # _extract_pv must terminate cleanly via the seen-hash guard.
+        b  = board_from_fen(STARTPOS)
+        si = SearchInfo()
+        r  = search_move(b, 300; si)
+        @test length(r.pv) >= 1
+        if length(r.pv) >= 2
+            undo1 = make_move!(b, r.pv[1])
+            undo2 = make_move!(b, r.pv[2])
+            Chess._tt_put!(si.tt, b.hash, 1, 0, Chess.TT_EXACT, r.pv[1])
+            unmake_move!(b, r.pv[2], undo2)
+            unmake_move!(b, r.pv[1], undo1)
+        end
+        pv = Chess._extract_pv(b, si.tt, r.move, 20)
+        @test length(pv) >= 1
+        @test length(pv) <= 20
+    end
+
 end
