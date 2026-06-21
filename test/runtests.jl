@@ -399,7 +399,7 @@ using Test
     @testset "Regression - no phantom queen sacrifice with bounded prior_counts" begin
         # The bug: apply_moves! included pre-capture positions in prior_counts, causing
         # phantom draws for queen continuations and pushing the engine toward sacrificing
-        # the queen to reach a K+N+B vs K endgame (a "fresh" position not in prior_counts).
+        # the queen to reach a K+N+B vs K endgame (a \"fresh\" position not in prior_counts).
         #
         # The fix: apply_moves! now clears prior_counts after each capture/pawn push.
         # After the game's Kxb5 capture at move 45, prior_counts contains only the
@@ -413,7 +413,7 @@ using Test
 
         r = search_move(b, 2000; prior_counts=pc)
 
-        # Engine must not sacrifice the queen (Qb6+ = "a7b6").
+        # Engine must not sacrifice the queen (Qb6+ = \"a7b6\").
         @test move_to_uci(r.move) != "a7b6"
         # Score must clearly beat K+N+B material (~650 cp).
         @test r.score > 650
@@ -480,10 +480,10 @@ using Test
     end
 
     @testset "Commentary - pin escape" begin
-        # White Queen on b1, White Knight on c1, Black Rook on h1. Knight is pinned.
-        # k7/8/8/8/8/8/8/1QN4r: b1=Q, c1=N, h1=r.
-        b = board_from_fen("k7/8/8/8/8/8/8/1QN4r w - - 0 1")
-        move = move_from_uci(b, "c1d3")
+        # White king on e1, White rook on e2, Black queen on e8. Rook is pinned.
+        # Moving the king off the e-file escapes the pin on the rook.
+        b = board_from_fen("4q3/8/8/8/8/8/4R3/4K3 w - - 0 1")
+        move = move_from_uci(b, "e1d1")
         res = SearchResult(move, 0, 1, 1, evaluate(b), Move[move])
         exp = explain_move(res, b, White)
         @test occursin("escaping the pin", exp)
