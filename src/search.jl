@@ -48,10 +48,12 @@ end
                            depth::Int, score::Int, flag::UInt8, move::Move)
     idx = (hash & (TT_SIZE - 1)) + 1
     @inbounds e = tt[idx]
-    # Replace if: empty slot, different position (hash collision — stale entry),
-    # or same position at shallower depth.  Crucially, same-key deeper entries
-    # are preserved so a depth-3 re-search can't destroy a depth-17 result.
-    if e.key == 0 || e.key != hash || e.depth < depth
+    # Replace if: empty slot, different position (hash collision), or same/shallower
+    # depth.  Same-depth replacement is required so aspiration window re-searches
+    # (which revisit the same depth with a wider window) can overwrite stale
+    # TT_UPPER/LOWER entries from the earlier narrow-window pass.  Only strictly
+    # deeper entries (depth > current search depth) are preserved.
+    if e.key == 0 || e.key != hash || e.depth <= depth
         @inbounds tt[idx] = TTEntry(hash, Int32(score), Int16(depth), flag, move)
     end
 end
