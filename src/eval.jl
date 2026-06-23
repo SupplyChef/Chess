@@ -387,18 +387,11 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 score += sign * (pawn_supported ? 32 : 20)
             else
                 # Semi-outpost: all challenger pawns are immediately blocked.
-                # Enemy pawn advances toward our side (decreasing rank for Black
-                # challengers, increasing rank for White challengers).
-                all_blocked = true
-                for ep in BitIter(challenger)
-                    fwd_sq = c == White ? ep - 8 : ep + 8
-                    if 0 <= fwd_sq <= 63 && (occ & sq_bb(fwd_sq)) != 0
-                        # this challenger pawn is blocked — OK
-                    else
-                        all_blocked = false; break
-                    end
-                end
-                all_blocked && (score += sign * (pawn_supported ? 14 : 8))
+                # A White challenger at sq ep is blocked when sq ep+8 is occupied
+                # (occ >> 8 shifts occupancy down so bit ep is set iff ep+8 occupied).
+                # Symmetric shift for Black (advance = -8).
+                blocked = c == White ? (challenger & (occ >> 8)) : (challenger & (occ << 8))
+                blocked == challenger && (score += sign * (pawn_supported ? 14 : 8))
             end
         end
 
