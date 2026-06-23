@@ -860,9 +860,10 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             # moved beyond its starting rank — gives the engine a direct eval
             # reward for advancing the lagging pawn and keeping the group moving.
             #
-            # Cohesion penalty: −8 cp per rank gap beyond 2 between the leading
-            # and trailing majority pawn — discourages racing one pawn far ahead
-            # of its partners, which a single piece can blockade.
+            # Cohesion penalty: −5 cp per rank gap beyond 2 between the leading
+            # and trailing majority pawn — a soft nudge against lone-wolf advances,
+            # capped so the total never goes negative (a majority is always an
+            # asset, never a liability regardless of spread).
             start_rank = c == White ? 1 : 6  # rank_of is 0-based
 
             for (has_maj, flank_range) in ((opp_qs > 0 && our_qs > opp_qs, 1:4),
@@ -873,8 +874,8 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 trailing = c == White ? minimum(ranks) : maximum(ranks)
                 leading  = c == White ? maximum(ranks) : minimum(ranks)
                 adv = max(0, c == White ? trailing - start_rank : start_rank - trailing)
-                gap_penalty = max(0, abs(leading - trailing) - 2) * 8
-                score += sign * (20 + adv * 5 - gap_penalty)
+                gap_penalty = max(0, abs(leading - trailing) - 2) * 5
+                score += sign * max(0, 20 + adv * 5 - gap_penalty)
             end
         end
     end
