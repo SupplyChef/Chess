@@ -866,15 +866,24 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             # asset, never a liability regardless of spread).
             start_rank = c == White ? 1 : 6  # rank_of is 0-based
 
-            for (has_maj, flank_range) in ((opp_qs > 0 && our_qs > opp_qs, 1:4),
-                                           (opp_ks > 0 && our_ks > opp_ks, 5:8))
-                !has_maj && continue
-                maj_bb = reduce(|, (pawns & FILE_MASK[f] for f in flank_range), init=BB(0))
-                ranks = [rank_of(s) for s in BitIter(maj_bb)]
-                trailing = c == White ? minimum(ranks) : maximum(ranks)
-                leading  = c == White ? maximum(ranks) : minimum(ranks)
-                adv = max(0, c == White ? trailing - start_rank : start_rank - trailing)
-                gap_penalty = max(0, abs(leading - trailing) - 2) * 5
+            if opp_qs > 0 && our_qs > opp_qs
+                maj_bb = (pawns & FILE_MASK[1]) | (pawns & FILE_MASK[2]) |
+                         (pawns & FILE_MASK[3]) | (pawns & FILE_MASK[4])
+                min_rank = Int(trailing_zeros(maj_bb)) >> 3
+                max_rank = (63 - Int(leading_zeros(maj_bb))) >> 3
+                trailing_rank = c == White ? min_rank : max_rank
+                adv = max(0, c == White ? trailing_rank - start_rank : start_rank - trailing_rank)
+                gap_penalty = max(0, max_rank - min_rank - 2) * 5
+                score += sign * max(0, 20 + adv * 5 - gap_penalty)
+            end
+            if opp_ks > 0 && our_ks > opp_ks
+                maj_bb = (pawns & FILE_MASK[5]) | (pawns & FILE_MASK[6]) |
+                         (pawns & FILE_MASK[7]) | (pawns & FILE_MASK[8])
+                min_rank = Int(trailing_zeros(maj_bb)) >> 3
+                max_rank = (63 - Int(leading_zeros(maj_bb))) >> 3
+                trailing_rank = c == White ? min_rank : max_rank
+                adv = max(0, c == White ? trailing_rank - start_rank : start_rank - trailing_rank)
+                gap_penalty = max(0, max_rank - min_rank - 2) * 5
                 score += sign * max(0, 20 + adv * 5 - gap_penalty)
             end
         end
