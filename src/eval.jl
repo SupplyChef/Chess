@@ -855,8 +855,27 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             opp_qs = count(f -> (enemy_pawns & FILE_MASK[f]) != BB(0), 1:4)
             our_ks = count(f -> (pawns & FILE_MASK[f]) != BB(0), 5:8)
             opp_ks = count(f -> (enemy_pawns & FILE_MASK[f]) != BB(0), 5:8)
-            (opp_qs > 0 && our_qs > opp_qs) && (score += sign * 15)
-            (opp_ks > 0 && our_ks > opp_ks) && (score += sign * 15)
+
+            # Advancement bonus: +5 cp per rank the *trailing* majority pawn has
+            # moved beyond its starting rank — gives the engine a direct eval
+            # reward for advancing the lagging pawn and keeping the group moving.
+            #
+            # Cohesion penalty: −8 cp per rank gap beyond 2 between the leading
+            # and trailing majority pawn — discourages racing one pawn far ahead
+            # of its partners, which a single piece can blockade.
+            start_rank = c == White ? 1 : 6  # rank_of is 0-based
+
+            for (has_maj, flank_range) in ((opp_qs > 0 && our_qs > opp_qs, 1:4),
+                                           (opp_ks > 0 && our_ks > opp_ks, 5:8))
+                !has_maj && continue
+                maj_bb = reduce(|, (pawns & FILE_MASK[f] for f in flank_range), init=BB(0))
+                ranks = [rank_of(s) for s in BitIter(maj_bb)]
+                trailing = c == White ? minimum(ranks) : maximum(ranks)
+                leading  = c == White ? maximum(ranks) : minimum(ranks)
+                adv = max(0, c == White ? trailing - start_rank : start_rank - trailing)
+                gap_penalty = max(0, abs(leading - trailing) - 2) * 8
+                score += sign * (20 + adv * 5 - gap_penalty)
+            end
         end
     end
     score
