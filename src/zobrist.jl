@@ -40,3 +40,12 @@ function compute_hash(b::Board)::UInt64
     b.ep_square != -1 && (h ⊻= zob_ep(b.ep_square))
     h
 end
+
+function compute_pawn_hash(b::Board)::UInt64
+    h = UInt64(0)
+    for s in 0:63
+        p = b.piece_on[s+1]
+        p.kind == Pawn && (h ⊻= zob_piece(p.color, Pawn, s))
+    end
+    h
+end

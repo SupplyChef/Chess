@@ -15,6 +15,7 @@ struct UndoInfo
     halfmove::Int
     captured_sq::Int    # differs from to_sq for en-passant
     hash::UInt64
+    pawn_hash::UInt64
 end
 
 function make_move!(b::Board, m::Move)::UndoInfo
@@ -22,12 +23,13 @@ function make_move!(b::Board, m::Move)::UndoInfo
     us = b.side; them = other(us)
     moving_kind = b.piece_on[fr+1].kind
 
-    captured_kind = NoPiece
-    captured_sq   = to
-    ep_sq_save    = b.ep_square
-    cast_save     = b.castling
-    hm_save       = b.halfmove
-    hash_save     = b.hash
+    captured_kind  = NoPiece
+    captured_sq    = to
+    ep_sq_save     = b.ep_square
+    cast_save      = b.castling
+    hm_save        = b.halfmove
+    hash_save      = b.hash
+    pawn_hash_save = b.pawn_hash
 
     # XOR out the parts of the Zobrist hash that are about to change.
     # Castling rights and en-passant square each have their own Zobrist key
@@ -38,6 +40,7 @@ function make_move!(b::Board, m::Move)::UndoInfo
 
     _remove_piece!(b, us, moving_kind, fr)
     b.hash ⊻= zob_piece(us, moving_kind, fr)
+    moving_kind == Pawn && (b.pawn_hash ⊻= zob_piece(us, Pawn, fr))
 
     if fl == MF_EP
         # The captured pawn is NOT on the to-square; it's on the same rank as
@@ -45,17 +48,22 @@ function make_move!(b::Board, m::Move)::UndoInfo
         captured_sq   = to + (us == White ? -8 : 8)
         captured_kind = Pawn
         _remove_piece!(b, them, Pawn, captured_sq)
-        b.hash ⊻= zob_piece(them, Pawn, captured_sq)
+        b.hash      ⊻= zob_piece(them, Pawn, captured_sq)
+        b.pawn_hash ⊻= zob_piece(them, Pawn, captured_sq)
     elseif (fl & MF_CAPTURE) != 0
         captured_kind = b.piece_on[to+1].kind
         _remove_piece!(b, them, captured_kind, to)
         b.hash ⊻= zob_piece(them, captured_kind, to)
+        captured_kind == Pawn && (b.pawn_hash ⊻= zob_piece(them, Pawn, to))
     end
 
     # On promotion the piece that lands differs from the piece that left.
+    # The pawn disappears from the board (already XOR'd out above); the promoted
+    # piece is not a pawn so pawn_hash needs no further update here.
     place_kind = (fl & MF_PROMO) != 0 ? promo_kind(m) : moving_kind
     _add_piece!(b, us, place_kind, to)
     b.hash ⊻= zob_piece(us, place_kind, to)
+    place_kind == Pawn && (b.pawn_hash ⊻= zob_piece(us, Pawn, to))
 
     # Castling moves the rook as well; the king's move was handled above.
     if fl == MF_KS_CAST
@@ -86,13 +94,14 @@ function make_move!(b::Board, m::Move)::UndoInfo
     if us == Black; b.fullmove += 1; end
     b.side = them
 
-    UndoInfo(captured_kind, ep_sq_save, cast_save, hm_save, captured_sq, hash_save)
+    UndoInfo(captured_kind, ep_sq_save, cast_save, hm_save, captured_sq, hash_save, pawn_hash_save)
 end
 
 function unmake_move!(b::Board, m::Move, undo::UndoInfo)
-    # Restoring the saved hash is safer than re-deriving it — avoids any
+    # Restoring saved hashes is safer than re-deriving them — avoids any
     # risk of hash drift from floating-point or ordering differences.
     b.hash      = undo.hash
+    b.pawn_hash = undo.pawn_hash
     b.side      = other(b.side)
     us = b.side; them = other(us)
     fr = from_sq(m); to = to_sq(m); fl = flags(m)
