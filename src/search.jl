@@ -426,7 +426,13 @@ end
 #
 # When in check we cannot stand pat (the king may be lost) and must consider
 # all evasions, not just captures.
-function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::Int
+# qs_depth tracks how many levels deep we are within quiescence search.
+# At qs_depth == 0 (the entry point from _negamax at depth 0) we also
+# generate quiet moves and search those that give check, catching forced
+# mate threats (e.g. Rh2#) that are invisible to a pure capture search.
+# At qs_depth >= 1 we revert to captures only to bound the search.
+function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo,
+                  qs_depth::Int = 0)::Int
     si.nodes += 1
     if (si.nodes & 0x3FF) == 0 && time() >= si.time_limit
         si.stop = true
@@ -460,6 +466,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     in_check = king_in_check(b, b.side)
 
     orig_alpha = alpha
+    stand_pat  = 0
     if !in_check
         stand_pat = evaluate_lazy(b, si.config, alpha, beta)
         stand_pat >= beta && return stand_pat
@@ -467,10 +474,15 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     end
 
     ml = si.move_stack[min(ply, MOVE_STACK_SIZE)]
-    in_check ? generate_moves!(ml, b) : generate_captures!(ml, b)
+    # At qs_depth 0, generate all moves so we can detect quiet checks (e.g. a
+    # quiet rook move that mates).  Deeper levels use captures only for speed.
+    if in_check || qs_depth == 0
+        generate_moves!(ml, b)
+    else
+        generate_captures!(ml, b)
+    end
 
-    # No captures/promos available and not in check: this is a quiet position,
-    # return alpha (= stand_pat).  In check with no evasions: checkmate.
+    # No moves: checkmate if in check, quiet position otherwise.
     length(ml) == 0 && return in_check ? -(MATE_SCORE - ply) : alpha
 
     _score_moves!(ml, b, NULL_MOVE, si.killers, si.history, si.countermoves, NULL_MOVE, ply, si.config, 1)
@@ -478,27 +490,40 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     best      = in_check ? -(MATE_SCORE - ply) : alpha
     best_move = NULL_MOVE
     for i in 1:length(ml)
-        m = _pick_move!(ml, i)
+        m  = _pick_move!(ml, i)
+        fl = flags(m)
+        is_capture_m = (fl & MF_CAPTURE) != 0 || fl == MF_EP
+        is_promo_m   = (fl & MF_PROMO) != 0
+        is_quiet_m   = !in_check && !is_capture_m && !is_promo_m
 
-        # SEE pruning: a qsearch move list holds only captures and promotions,
-        # and _move_score gives SEE-losing captures a negative score.  Picks
-        # are in descending score order, so once a losing capture surfaces,
-        # everything that remains loses material too — stop searching.
-        # Not applied in check (the list holds evasions, all must be tried).
+        # SEE pruning: SEE-losing captures score negative; since quiet moves at
+        # qs_depth 0 score ≥ 0, the break fires only after all non-capture checks
+        # have been processed.  Not applied in check (all evasions must be tried).
         !in_check && @inbounds(ml.scores[i]) < 0 && break
 
-        # Delta pruning: skip captures that can't raise alpha even in the best case.
-        # Guard: only when not in check (stand_pat is defined) and not a promotion
-        # (the queen upgrade adds ~800 cp that isn't reflected in the captured piece value).
-        if !in_check && !is_promo(m)
-            fl_m     = flags(m)
-            cap_kind = fl_m == MF_EP ? Pawn : b.piece_on[to_sq(m)+1].kind
-            @inbounds PIECE_VALUE[Int(cap_kind)+1] + stand_pat + DELTA_MARGIN <= alpha && continue
+        if is_quiet_m
+            # Quiet move: only search it when it gives check to the opponent.
+            # We must make the move to test — unmake immediately if no check.
+            undo = make_move!(b, m)
+            if !king_in_check(b, b.side)
+                unmake_move!(b, m, undo)
+                continue
+            end
+            score = -_quiesce(b, -beta, -alpha, ply + 1, si, qs_depth + 1)
+            unmake_move!(b, m, undo)
+        else
+            # Capture / promotion: existing delta-pruning and SEE logic.
+            # Delta pruning: skip captures that can't raise alpha even in the best case.
+            # Guard: only when not in check (stand_pat is defined) and not a promotion
+            # (the queen upgrade adds ~800 cp that isn't reflected in the captured piece value).
+            if !in_check && !is_promo_m
+                cap_kind = fl == MF_EP ? Pawn : b.piece_on[to_sq(m)+1].kind
+                @inbounds PIECE_VALUE[Int(cap_kind)+1] + stand_pat + DELTA_MARGIN <= alpha && continue
+            end
+            undo  = make_move!(b, m)
+            score = -_quiesce(b, -beta, -alpha, ply + 1, si, qs_depth + 1)
+            unmake_move!(b, m, undo)
         end
-
-        undo  = make_move!(b, m)
-        score = -_quiesce(b, -beta, -alpha, ply + 1, si)
-        unmake_move!(b, m, undo)
 
         si.stop && break
 
@@ -510,7 +535,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
         alpha >= beta && break
     end
 
-    # Record the best capture in the TT so _extract_pv can extend the PV
+    # Record the best move in the TT so _extract_pv can extend the PV
     # through qsearch moves (e.g. show the recapture after a winning capture).
     # Only written when a move actually improved over the initial bound; without
     # this, the PV stops at the last negamax move (a capture) and the material
