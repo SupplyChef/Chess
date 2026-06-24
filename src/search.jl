@@ -286,6 +286,11 @@ const ASPIRATION_DELTA  = 75             # initial aspiration window half-width 
 # and are skipped.  Roughly: 1 pawn at depth 1, 2 pawns at depth 2.
 const FUTILITY_MARGIN = (0, 150, 300)
 
+# Pre-computed LMR reduction table: LMR_TABLE[depth, move_index] avoids calling
+# log() on every search node.  Capped at 62; actual cap to depth-2 applied inline.
+const LMR_TABLE = [clamp(1 + floor(Int, log(max(1,d)) * log(max(1,i)) / 2.5), 0, 62)
+                   for d in 1:64, i in 1:256]
+
 # Reverse futility pruning: if static_eval − RFP_MARGIN×depth ≥ beta the node
 # is already winning enough that searching it further cannot change the outcome.
 const RFP_MARGIN = 90   # centipawns per depth level
@@ -698,12 +703,9 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         pc_beta  = beta + 200
         pc_depth = depth - 4
         ml_pc    = si.move_stack[min(ply, MOVE_STACK_SIZE)]
-        generate_moves!(ml_pc, b)
+        generate_captures!(ml_pc, b)
         for k in 1:length(ml_pc)
             mc  = ml_pc.moves[k]
-            flc = flags(mc)
-            is_cap_pc = (flc & MF_CAPTURE) != 0 || flc == MF_EP
-            is_cap_pc || continue
             _path_push!(si, b.hash)
             undo_pc = make_move!(b, mc)
             pc_score = -_negamax(b, pc_depth, -pc_beta, -pc_beta + 1, ply + 1, si, false, mc)
@@ -862,7 +864,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         # Capped at depth-2 so the reduced search is always at least depth 1.
         reduction = 0
         if cfg.lmr && depth >= 3 && i > 2 && !is_capture && !is_promo && !gives_check && !in_check
-            reduction = clamp(1 + floor(Int, log(depth) * log(i) / 2.5), 0, depth - 2)
+            reduction = min(LMR_TABLE[min(depth,64), min(i,256)], depth - 2)
             # When already significantly behind, search harder — critical quiet moves
             # (e.g. discovered attacks) are likely ordered late and would otherwise
             # be reduced too much, causing large evaluation swings.
