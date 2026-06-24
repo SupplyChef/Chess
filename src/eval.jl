@@ -1,8 +1,10 @@
 # Static evaluation. Positive = White is better (centipawns).
 
 # ── Piece values ───────────────────────────────────────────────────────────────
-# Indexed by Int(kind)+1: NoPiece=0 Pawn=100 Knight=320 Bishop=330 Rook=500 Queen=1000 King=20000
-const PIECE_VALUE = (0, 100, 320, 330, 500, 1000, 20_000)
+# Indexed by Int(kind)+1: NoPiece=0 Pawn=100 Knight=320 Bishop=335 Rook=500 Queen=1000 King=20000
+# Bishop-knight gap (15 cp) exceeds the doubled-pawn penalty (12 cp), so trading
+# a bishop for a knight purely to create doubled pawns is not considered worthwhile.
+const PIECE_VALUE = (0, 100, 320, 335, 500, 1000, 20_000)
 
 # ── Piece-square tables ────────────────────────────────────────────────────────
 # 64 entries written rank-8 → rank-1, file-a → file-h (visual board order).
