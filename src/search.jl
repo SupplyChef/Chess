@@ -716,6 +716,13 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         end
         _path_pop!(si)
         !si.stop && null_score >= beta && return beta
+        # Null-move threat signal: if even after passing our turn the score is
+        # much worse than alpha, the opponent has a strong forcing continuation
+        # (e.g. a quiet move that sets up a mating net).  Record this so LMR
+        # reduces less aggressively below, giving such moves one extra ply.
+        null_threat = !si.stop && null_score < alpha - 200
+    else
+        null_threat = false
     end
 
     # ── Probcut ───────────────────────────────────────────────────────────────
@@ -894,6 +901,10 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             # (e.g. discovered attacks) are likely ordered late and would otherwise
             # be reduced too much, causing large evaluation swings.
             static_eval < alpha - 200 && (reduction = max(0, reduction - 1))
+            # When null-move search reveals the opponent has a strong threat
+            # (quiet mating nets, zugzwang, etc.), reduce LMR by one extra ply
+            # so those forcing quiet moves are searched one level deeper.
+            null_threat && (reduction = max(0, reduction - 1))
         end
 
         # ── Principal variation search ───────────────────────────────────────
