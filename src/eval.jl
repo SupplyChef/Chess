@@ -39,6 +39,7 @@ function _init_eval!()
             end
         end
     end
+    _init_pawn_tt!()
 end
 
 # Chebyshev (chessboard) distance: the number of king moves between two squares.
@@ -735,7 +736,23 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     score
 end
 
-function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
+# ── Pawn evaluation cache ──────────────────────────────────────────────────────
+# Pawn structure (doubled/isolated/passed/backward/majority) depends only on
+# pawn positions.  Since pawn moves are only ~10-15% of all moves, the pawn
+# configuration is unchanged for ~85-90% of eval calls.  A small fixed-size
+# cache keyed by b.pawn_hash eliminates redundant computation.
+const _PAWN_TT_SIZE = 1 << 14   # 16 384 entries ≈ 256 KB
+struct _PawnEntry
+    key   ::UInt64
+    score ::Int32
+end
+const _PAWN_TT = Vector{_PawnEntry}(undef, _PAWN_TT_SIZE)
+
+function _init_pawn_tt!()
+    fill!(_PAWN_TT, _PawnEntry(UInt64(0), Int32(0)))
+end
+
+function _eval_pawn_structure_impl(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     score = 0
 
     # Opposite-colored bishops with no other pieces: passed pawn bonuses halved.
@@ -784,29 +801,24 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 ocb_only && (bonus = bonus ÷ 2)
                 score += sign * bonus
                 passed_bb |= sq_bb(s)
-                # Free passer: no piece of either colour stands between the
-                # pawn and its promotion square, AND no friendly pawn trails
-                # behind it on the same file (doubled pawns are not truly free).
-                promo_rank = c == White ? 7 : 0
-                pawn_rank  = rank_of(s)
-                pawn_file  = file_of(s)
-                path_clear = true
+                # Free passer: path to promotion is clear of all pieces, AND no
+                # friendly pawn sits behind on the same file (doubled pawns are
+                # not truly free).  Use bitboard masks instead of rank loops:
+                #
+                #   _PASSED_W[s+1] covers files f-1..f+1 with ranks > r.
+                #   Masked to the pawn's file and excluding the promo rank (rank 7
+                #   for White = RANK_MASK[8]) gives exactly the path squares.
+                #   _PASSED_B[s+1] similarly covers ranks < r; masked to file f
+                #   gives the squares behind the pawn.
+                pawn_file = file_of(s)
                 if c == White
-                    for r in (pawn_rank + 1):(promo_rank - 1)
-                        (all_occ(b) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
-                    end
-                    # disqualify if a friendly pawn sits behind on the same file
-                    for r in 1:(pawn_rank - 1)
-                        (bb(b, c, Pawn) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
-                    end
+                    fwd_mask    = _PASSED_W[s+1] & FILE_MASK[pawn_file+1] & ~RANK_MASK[8]
+                    behind_mask = _PASSED_B[s+1] & FILE_MASK[pawn_file+1]
                 else
-                    for r in (promo_rank + 1):(pawn_rank - 1)
-                        (all_occ(b) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
-                    end
-                    for r in (pawn_rank + 1):6
-                        (bb(b, c, Pawn) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
-                    end
+                    fwd_mask    = _PASSED_B[s+1] & FILE_MASK[pawn_file+1] & ~RANK_MASK[1]
+                    behind_mask = _PASSED_W[s+1] & FILE_MASK[pawn_file+1]
                 end
+                path_clear = (all_occ(b) & fwd_mask) == 0 && (bb(b, c, Pawn) & behind_mask) == 0
                 path_clear && (score += sign * 15)
             else
                 # Backward pawn detection: no friendly pawns in the support zone,
@@ -872,6 +884,15 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         end
     end
     score
+end
+
+@inline function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
+    idx = (b.pawn_hash % _PAWN_TT_SIZE) + 1
+    pe  = @inbounds _PAWN_TT[idx]
+    pe.key == b.pawn_hash && return Int(pe.score)
+    s = _eval_pawn_structure_impl(b, cfg)
+    @inbounds _PAWN_TT[idx] = _PawnEntry(b.pawn_hash, Int32(s))
+    s
 end
 
 # ── King-safety pawn shield ────────────────────────────────────────────────────

@@ -121,6 +121,7 @@ mutable struct Board
     halfmove  ::Int             # plies since last pawn move or capture (50-move rule)
     fullmove  ::Int
     hash      ::UInt64          # Zobrist hash, updated incrementally in make_move!
+    pawn_hash ::UInt64          # Zobrist hash of pawn positions only (for pawn eval cache)
 
     # Incremental evaluation state
     mg_score  ::Int32           # total MG PST + material (ex King), from White's perspective
@@ -138,6 +139,7 @@ mutable struct Board
             0x0,
             0,
             1,
+            UInt64(0),
             UInt64(0),
             Int32(0),
             Int32(0),
