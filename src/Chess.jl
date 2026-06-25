@@ -19,6 +19,7 @@ include("zobrist.jl")
 include("fen.jl")
 include("movegen.jl")
 include("config.jl")
+include("syzygy.jl")
 include("eval.jl")
 include("search.jl")
 include("selfplay.jl")
@@ -71,6 +72,13 @@ export
     MatchResult, selfplay,
     # explain
     explain_move, explain_opponent_move, explain_pv_outcome,
+    # syzygy
+    syzygy_init!, syzygy_probe_wdl,
+    WDL_LOSS, WDL_BLESSED_LOSS, WDL_DRAW, WDL_CURSED_WIN, WDL_WIN, TB_LARGEST,
+    # internal syzygy helpers (needed by tests)
+    TRIANGLE, LOWER, DIAG, KK_IDX, BINOMIAL, PIVFAC,
+    _board_key, _recalc_key, _enc_type_from_name,
+    _offdiag, _flipdiag, _load_wdl_table, _INITIALIZED,
     # perft
     perft, perft_divide, run_perft_suite, PERFT_SUITE
 
