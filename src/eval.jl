@@ -786,7 +786,7 @@ function _eval_pawn_structure_impl(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)
             # because it cannot protect the one ahead of it.  −12 cp reflects
             # that doubled pawns also create weaknesses on the adjacent files
             # that the opponent can target with a rook or majority.
-            n > 1 && (score += sign * (n - 1) * (-12))
+            n > 1 && (score += sign * (n - 1) * (-20))
             # Isolated pawns: no friendly pawn on either adjacent file means
             # this pawn can never be defended by another pawn.  −20 cp is larger
             # than the doubled penalty because an isolated pawn is a permanent
@@ -1136,7 +1136,7 @@ _eval_tempo(b::Board)::Int = b.side == White ? 10 : -10
 # material + PST core.  Chosen as a conservative bound: trapped-piece
 # penalties (−100), king-zone attack penalties, and stacked passer bonuses
 # rarely sum past ~400 cp in one direction.
-const LAZY_EVAL_MARGIN = 450
+const LAZY_EVAL_MARGIN = 200
 
 """
     evaluate_lazy(b, cfg, alpha, beta) → Int
