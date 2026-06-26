@@ -107,3 +107,65 @@ function selfplay(cfg_a::EngineConfig, cfg_b::EngineConfig;
 
     MatchResult(wins, draws, losses)
 end
+
+# ── Elo estimation ────────────────────────────────────────────────────────────
+# Logistic approximation: Δelo = 400 × log10(score_a / score_b).
+# Returns 0 when either side has no score to avoid log(0).
+function _elo_delta(r::MatchResult)::Float64
+    w = r.wins  + 0.5 * r.draws
+    l = r.losses + 0.5 * r.draws
+    (w <= 0 || l <= 0) && return w > l ? 400.0 : -400.0
+    400.0 * log10(w / l)
+end
+
+"""
+    ablation_suite(; games=30, time_ms=200, verbose=true)
+
+Run a structured ablation: for each search feature flag, play `DEFAULT_CONFIG` vs
+the version with that single flag disabled.  Prints Δelo for each flag and returns
+a sorted vector of `(feature, result, elo)` NamedTuples.
+
+**Interpreting results:**
+- Δelo > 0  → feature helps (as expected)
+- Δelo < -10 → feature *hurts*; likely a bug or bad parameter value
+- |Δelo| < 15 at 30 games → statistically insignificant; increase `games` to 100+
+"""
+function ablation_suite(;
+        games::Int    = 30,
+        time_ms::Int  = 200,
+        verbose::Bool = true)
+
+    flags = [
+        (:null_move,        EngineConfig(null_move=false)),
+        (:lmr,              EngineConfig(lmr=false)),
+        (:rfp,              EngineConfig(rfp=false)),
+        (:futility,         EngineConfig(futility=false)),
+        (:lmp,              EngineConfig(lmp=false)),
+        (:probcut,          EngineConfig(probcut=false)),
+        (:singular_ext,     EngineConfig(singular_ext=false)),
+        (:pvs,              EngineConfig(pvs=false)),
+        (:aspiration,       EngineConfig(aspiration=false)),
+        (:see,              EngineConfig(see=false)),
+        (:iir,              EngineConfig(iir=false)),
+        (:history_malus,    EngineConfig(history_malus=false)),
+        (:countermove,      EngineConfig(countermove=false)),
+        (:check_extensions, EngineConfig(check_extensions=false)),
+    ]
+
+    results = NamedTuple{(:feature, :result, :elo), Tuple{Symbol, MatchResult, Float64}}[]
+    verbose && @printf("%-20s  %s\n", "feature (ON vs OFF)", "W   D   L   Δelo")
+    verbose && println(repeat('-', 52))
+
+    for (name, cfg_off) in flags
+        r   = selfplay(DEFAULT_CONFIG, cfg_off; games=games, time_ms=time_ms, verbose=false)
+        elo = _elo_delta(r)
+        push!(results, (feature=name, result=r, elo=elo))
+        verbose && @printf("%-20s  W:%-3d D:%-3d L:%-3d  %+.0f\n",
+                           name, r.wins, r.draws, r.losses, elo)
+    end
+
+    sort!(results; by = x -> -x.elo)
+    verbose && println()
+    verbose && println("(sorted by Elo above; negative Δelo = that feature is hurting strength)")
+    results
+end
