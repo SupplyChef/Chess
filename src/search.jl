@@ -4,8 +4,8 @@
 # ── Constants ─────────────────────────────────────────────────────────────────
 const MATE_SCORE = 30_000   # a forced mate scores MATE_SCORE - ply
 const MAX_PLY    = 64
-const TT_BITS    = 22
-const TT_SIZE    = 1 << TT_BITS   # ~4M entries
+const TT_BITS    = 23
+const TT_SIZE    = 1 << TT_BITS   # ~8M entries
 
 # TT flag meanings (from the perspective of the side to move at that node):
 #   EXACT  — the stored score is the true minimax value (alpha was raised and
@@ -337,6 +337,11 @@ mutable struct SearchInfo
     path_counts  ::Dict{UInt64,Int}
     prior_counts ::Dict{UInt64,Int}
     config       ::EngineConfig
+    # Cached count of how many times the root position appeared in the game
+    # before this search.  A Dict lookup on si.prior_counts is O(1) but still
+    # measurable at ~1M nodes/s; caching it here avoids the lookup on the hot
+    # repetition path inside _negamax.
+    root_prior_count::Int
 end
 
 function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
@@ -355,6 +360,7 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
         Dict{UInt64,Int}(),
         Dict{UInt64,Int}(),
         cfg,
+        0,
     )
 end
 
@@ -1100,7 +1106,8 @@ function search_move(b::Board, time_ms::Int;
     si.nodes        = 0
     si.time_start   = time()
     si.time_limit   = si.time_start + time_ms / 1000.0
-    si.prior_counts = prior_counts
+    si.prior_counts      = prior_counts
+    si.root_prior_count  = get(prior_counts, b.hash, 0)
     empty!(si.path)
     empty!(si.path_counts)
     fill!(si.killers, NULL_MOVE)
@@ -1270,7 +1277,7 @@ function search_move(b::Board, time_ms::Int;
     if best_score < 0
         # If the root position itself has appeared >= 2 times before, this IS the
         # 3rd occurrence and Lichess will auto-enforce the draw.  Score it as 0.
-        if get(prior_counts, b.hash, 0) >= 2
+        if si.root_prior_count >= 2
             best_score = 0
             pv         = isempty(pv) ? [best_move] : pv
         else

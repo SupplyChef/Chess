@@ -743,7 +743,7 @@ end
 # pawn positions.  Since pawn moves are only ~10-15% of all moves, the pawn
 # configuration is unchanged for ~85-90% of eval calls.  A small fixed-size
 # cache keyed by b.pawn_hash eliminates redundant computation.
-const _PAWN_TT_SIZE = 1 << 14   # 16 384 entries ≈ 256 KB
+const _PAWN_TT_SIZE = 1 << 16   # 65 536 entries ≈ 1 MB
 struct _PawnEntry
     key   ::UInt64
     score ::Int32
