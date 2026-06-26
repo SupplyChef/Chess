@@ -1236,7 +1236,7 @@ function search_move(b::Board, time_ms::Int;
     # Skip trickiness on a low time budget: the pass costs up to 10% of the
     # per-move allocation, which is unacceptable when the clock is tight.
     trick_budget_ms = clamp(time_ms ÷ 10, 0, 60)
-    if best_depth >= 4 && length(completed_roots) >= 2 && !is_capture(best_move) &&
+    if false && best_depth >= 4 && length(completed_roots) >= 2 && !is_capture(best_move) &&
        trick_budget_ms >= 10
         sort!(completed_roots; by = first, rev = true)
         threshold = completed_roots[1][1] - 30
