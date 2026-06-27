@@ -80,13 +80,13 @@ function _see_ge(b::Board, m::Move, threshold::Int)::Bool
     t  = to_sq(m)
 
     victim_v = fl == MF_EP ? PIECE_VALUE[Int(Pawn)+1] :
-                             PIECE_VALUE[Int(b.piece_on[t+1].kind)+1]
+                             @inbounds PIECE_VALUE[Int(b.piece_on[t+1].kind)+1]
     # Best case: we win the victim and nothing recaptures.
     swap = victim_v - threshold
     swap < 0 && return false
     # Worst case: we lose the mover right back.  If that still meets the
     # threshold, no need to look at the board at all.
-    swap = PIECE_VALUE[Int(b.piece_on[fr+1].kind)+1] - swap
+    swap = @inbounds PIECE_VALUE[Int(b.piece_on[fr+1].kind)+1] - swap
     swap <= 0 && return true
 
     occupied = all_occ(b) ⊻ sq_bb(fr) ⊻ sq_bb(t)
@@ -165,8 +165,8 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
 
     fl = flags(m)
     if (fl & MF_CAPTURE) != 0 || fl == MF_EP
-        victim  = fl == MF_EP ? Pawn : b.piece_on[to_sq(m)+1].kind
-        aggr    = b.piece_on[from_sq(m)+1].kind
+        victim  = fl == MF_EP ? Pawn : @inbounds b.piece_on[to_sq(m)+1].kind
+        aggr    = @inbounds b.piece_on[from_sq(m)+1].kind
         # Victim weight dominates (×10) so any more-valuable capture outranks
         # any less-valuable capture regardless of the aggressor.
         mvv_lva = _MVV[Int(victim)+1] * 10 - _MVV[Int(aggr)+1]
@@ -514,7 +514,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
         # (the queen upgrade adds ~800 cp that isn't reflected in the captured piece value).
         if !in_check && !is_promo(m)
             fl_m     = flags(m)
-            cap_kind = fl_m == MF_EP ? Pawn : b.piece_on[to_sq(m)+1].kind
+            cap_kind = fl_m == MF_EP ? Pawn : @inbounds b.piece_on[to_sq(m)+1].kind
             @inbounds PIECE_VALUE[Int(cap_kind)+1] + stand_pat + DELTA_MARGIN <= alpha && continue
         end
 

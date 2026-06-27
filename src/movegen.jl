@@ -21,7 +21,7 @@ end
 function make_move!(b::Board, m::Move)::UndoInfo
     fr = from_sq(m); to = to_sq(m); fl = flags(m)
     us = b.side; them = other(us)
-    moving_kind = b.piece_on[fr+1].kind
+    moving_kind = @inbounds b.piece_on[fr+1].kind
 
     captured_kind  = NoPiece
     captured_sq    = to
@@ -51,7 +51,7 @@ function make_move!(b::Board, m::Move)::UndoInfo
         b.hash      ⊻= zob_piece(them, Pawn, captured_sq)
         b.pawn_hash ⊻= zob_piece(them, Pawn, captured_sq)
     elseif (fl & MF_CAPTURE) != 0
-        captured_kind = b.piece_on[to+1].kind
+        captured_kind = @inbounds b.piece_on[to+1].kind
         _remove_piece!(b, them, captured_kind, to)
         b.hash ⊻= zob_piece(them, captured_kind, to)
         captured_kind == Pawn && (b.pawn_hash ⊻= zob_piece(them, Pawn, to))
@@ -110,7 +110,7 @@ function unmake_move!(b::Board, m::Move, undo::UndoInfo)
     b.castling  = undo.castling
     b.halfmove  = undo.halfmove
 
-    moved_kind = b.piece_on[to+1].kind
+    moved_kind = @inbounds b.piece_on[to+1].kind
     _remove_piece!(b, us, moved_kind, to)
 
     # On promotion the piece on `to` is the promoted piece, not the pawn —
@@ -135,14 +135,14 @@ end
 
 @inline function _remove_piece!(b::Board, c::Color, k::PieceKind, s::Square)
     mask = sq_bb(s)
-    b.bb[Int(c)+1, Int(k)+1] &= ~mask
-    b.occ[Int(c)+1]          &= ~mask
-    b.piece_on[s+1]           = NO_PIECE
+    @inbounds b.bb[Int(c)+1, Int(k)+1] &= ~mask
+    @inbounds b.occ[Int(c)+1]          &= ~mask
+    @inbounds b.piece_on[s+1]           = NO_PIECE
 
     # Incremental eval
-    mg = MG_TABLE[Int(c)+1, Int(k)+1, s+1]
-    eg = EG_TABLE[Int(c)+1, Int(k)+1, s+1]
-    v  = k == King ? 0 : PIECE_VALUE[Int(k)+1]
+    @inbounds mg = MG_TABLE[Int(c)+1, Int(k)+1, s+1]
+    @inbounds eg = EG_TABLE[Int(c)+1, Int(k)+1, s+1]
+    @inbounds v  = k == King ? 0 : PIECE_VALUE[Int(k)+1]
 
     if c == White
         b.mg_score -= mg
@@ -158,14 +158,14 @@ end
 
 @inline function _add_piece!(b::Board, c::Color, k::PieceKind, s::Square)
     mask = sq_bb(s)
-    b.bb[Int(c)+1, Int(k)+1] |= mask
-    b.occ[Int(c)+1]          |= mask
-    b.piece_on[s+1]           = Piece(c, k)
+    @inbounds b.bb[Int(c)+1, Int(k)+1] |= mask
+    @inbounds b.occ[Int(c)+1]          |= mask
+    @inbounds b.piece_on[s+1]           = Piece(c, k)
 
     # Incremental eval
-    mg = MG_TABLE[Int(c)+1, Int(k)+1, s+1]
-    eg = EG_TABLE[Int(c)+1, Int(k)+1, s+1]
-    v  = k == King ? 0 : PIECE_VALUE[Int(k)+1]
+    @inbounds mg = MG_TABLE[Int(c)+1, Int(k)+1, s+1]
+    @inbounds eg = EG_TABLE[Int(c)+1, Int(k)+1, s+1]
+    @inbounds v  = k == King ? 0 : PIECE_VALUE[Int(k)+1]
 
     if c == White
         b.mg_score += mg
@@ -242,7 +242,7 @@ function _filter_legal_precalculated!(ml::MoveList, b::Board, pin_mask::BB, chec
     ks = lsb(bb(b, us, King))
 
     write_idx = 0
-    for i in 1:ml.count[]
+    @inbounds for i in 1:ml.count[]
         m = ml.moves[i]
         fr = from_sq(m); to = to_sq(m); fl = flags(m)
         moving_kind = b.piece_on[fr+1].kind
