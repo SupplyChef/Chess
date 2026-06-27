@@ -149,10 +149,10 @@ mutable struct Board
     end
 end
 
-@inline all_occ(b::Board) = b.occ[1] | b.occ[2]
+@inline all_occ(b::Board) = @inbounds b.occ[1] | b.occ[2]
 
-@inline bb(b::Board, c::Color, k::PieceKind) = b.bb[Int(c)+1, Int(k)+1]
-@inline set_bb!(b::Board, c::Color, k::PieceKind, v::BB) = (b.bb[Int(c)+1, Int(k)+1] = v)
+@inline bb(b::Board, c::Color, k::PieceKind) = @inbounds b.bb[Int(c)+1, Int(k)+1]
+@inline set_bb!(b::Board, c::Color, k::PieceKind, v::BB) = (@inbounds b.bb[Int(c)+1, Int(k)+1] = v)
 
 # ── Castling right constants ────────────────────────────────────────────────────
 const CR_WK = 0x1
