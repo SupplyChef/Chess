@@ -1,6 +1,5 @@
 # syzygy.jl — Pure Julia Syzygy WDL tablebase prober
 # Reference: python-chess chess/syzygy.py (Ronald de Man format)
-using Mmap
 
 # ── WDL result constants (from side-to-move perspective) ─────────────────────
 const WDL_LOSS         = 0
@@ -576,7 +575,7 @@ end
 # ── File loading ──────────────────────────────────────────────────────────────
 function _load_wdl_table(path::String, name::String)::Union{WdlTable,Nothing}
     try
-        data = Mmap.mmap(path, Vector{UInt8})
+        data = read(path)
         length(data) < 5 && return nothing
         data[1:4] == WDL_MAGIC || return nothing
 
