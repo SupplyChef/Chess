@@ -121,6 +121,7 @@ mutable struct Board
     halfmove  ::Int             # plies since last pawn move or capture (50-move rule)
     fullmove  ::Int
     hash      ::UInt64          # Zobrist hash, updated incrementally in make_move!
+    pawn_hash ::UInt64          # Zobrist hash of pawn positions only (for pawn eval cache)
 
     # Incremental evaluation state
     mg_score  ::Int32           # total MG PST + material (ex King), from White's perspective
@@ -139,6 +140,7 @@ mutable struct Board
             0,
             1,
             UInt64(0),
+            UInt64(0),
             Int32(0),
             Int32(0),
             Int32(0),
@@ -147,10 +149,10 @@ mutable struct Board
     end
 end
 
-@inline all_occ(b::Board) = b.occ[1] | b.occ[2]
+@inline all_occ(b::Board) = @inbounds b.occ[1] | b.occ[2]
 
-@inline bb(b::Board, c::Color, k::PieceKind) = b.bb[Int(c)+1, Int(k)+1]
-@inline set_bb!(b::Board, c::Color, k::PieceKind, v::BB) = (b.bb[Int(c)+1, Int(k)+1] = v)
+@inline bb(b::Board, c::Color, k::PieceKind) = @inbounds b.bb[Int(c)+1, Int(k)+1]
+@inline set_bb!(b::Board, c::Color, k::PieceKind, v::BB) = (@inbounds b.bb[Int(c)+1, Int(k)+1] = v)
 
 # ── Castling right constants ────────────────────────────────────────────────────
 const CR_WK = 0x1

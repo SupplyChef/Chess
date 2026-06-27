@@ -4,8 +4,8 @@
 # ── Constants ─────────────────────────────────────────────────────────────────
 const MATE_SCORE = 30_000   # a forced mate scores MATE_SCORE - ply
 const MAX_PLY    = 64
-const TT_BITS    = 22
-const TT_SIZE    = 1 << TT_BITS   # ~4M entries
+const TT_BITS    = 23
+const TT_SIZE    = 1 << TT_BITS   # ~8M entries
 
 # TT flag meanings (from the perspective of the side to move at that node):
 #   EXACT  — the stored score is the true minimax value (alpha was raised and
@@ -80,13 +80,13 @@ function _see_ge(b::Board, m::Move, threshold::Int)::Bool
     t  = to_sq(m)
 
     victim_v = fl == MF_EP ? PIECE_VALUE[Int(Pawn)+1] :
-                             PIECE_VALUE[Int(b.piece_on[t+1].kind)+1]
+                             @inbounds PIECE_VALUE[Int(b.piece_on[t+1].kind)+1]
     # Best case: we win the victim and nothing recaptures.
     swap = victim_v - threshold
     swap < 0 && return false
     # Worst case: we lose the mover right back.  If that still meets the
     # threshold, no need to look at the board at all.
-    swap = PIECE_VALUE[Int(b.piece_on[fr+1].kind)+1] - swap
+    swap = @inbounds PIECE_VALUE[Int(b.piece_on[fr+1].kind)+1] - swap
     swap <= 0 && return true
 
     occupied = all_occ(b) ⊻ sq_bb(fr) ⊻ sq_bb(t)
@@ -165,8 +165,8 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
 
     fl = flags(m)
     if (fl & MF_CAPTURE) != 0 || fl == MF_EP
-        victim  = fl == MF_EP ? Pawn : b.piece_on[to_sq(m)+1].kind
-        aggr    = b.piece_on[from_sq(m)+1].kind
+        victim  = fl == MF_EP ? Pawn : @inbounds b.piece_on[to_sq(m)+1].kind
+        aggr    = @inbounds b.piece_on[from_sq(m)+1].kind
         # Victim weight dominates (×10) so any more-valuable capture outranks
         # any less-valuable capture regardless of the aggressor.
         mvv_lva = _MVV[Int(victim)+1] * 10 - _MVV[Int(aggr)+1]
@@ -286,6 +286,11 @@ const ASPIRATION_DELTA  = 75             # initial aspiration window half-width 
 # and are skipped.  Roughly: 1 pawn at depth 1, 2 pawns at depth 2.
 const FUTILITY_MARGIN = (0, 150, 300)
 
+# Pre-computed LMR reduction table: LMR_TABLE[depth, move_index] avoids calling
+# log() on every search node.  Capped at 62; actual cap to depth-2 applied inline.
+const LMR_TABLE = [clamp(1 + floor(Int, log(max(1,d)) * log(max(1,i)) / 2.5), 0, 62)
+                   for d in 1:64, i in 1:256]
+
 # Reverse futility pruning: if static_eval − RFP_MARGIN×depth ≥ beta the node
 # is already winning enough that searching it further cannot change the outcome.
 const RFP_MARGIN = 90   # centipawns per depth level
@@ -332,6 +337,20 @@ mutable struct SearchInfo
     path_counts  ::Dict{UInt64,Int}
     prior_counts ::Dict{UInt64,Int}
     config       ::EngineConfig
+    # Cached count of how many times the root position appeared in the game
+    # before this search.  A Dict lookup on si.prior_counts is O(1) but still
+    # measurable at ~1M nodes/s; caching it here avoids the lookup on the hot
+    # repetition path inside _negamax.
+    root_prior_count::Int
+    # ── Diagnostic counters (reset each search_move call) ─────────────────────
+    # beta_cutoffs / first_move_cutoffs — track move ordering quality.
+    #   first_move_cutoffs / beta_cutoffs should be 85–90% for well-ordered search.
+    # tt_probes / tt_hits / tt_cutoffs — track transposition table effectiveness.
+    beta_cutoffs       ::Int64
+    first_move_cutoffs ::Int64
+    tt_probes          ::Int64
+    tt_hits            ::Int64
+    tt_cutoffs         ::Int64
 end
 
 function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
@@ -350,6 +369,8 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
         Dict{UInt64,Int}(),
         Dict{UInt64,Int}(),
         cfg,
+        0,
+        Int64(0), Int64(0), Int64(0), Int64(0), Int64(0),
     )
 end
 
@@ -435,7 +456,9 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
 
     # TT Probe
     tte = _tt_get(si.tt, b.hash)
+    si.tt_probes += 1
     if tte.key == b.hash
+        si.tt_hits += 1
         sc = Int(tte.score)
         if sc > MATE_SCORE - MOVE_STACK_SIZE
             sc -= ply
@@ -443,13 +466,17 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
             sc += ply
         end
         if tte.flag == TT_EXACT
+            si.tt_cutoffs += 1
             return sc
         elseif tte.flag == TT_LOWER
             alpha = max(alpha, sc)
         else
             beta = min(beta, sc)
         end
-        alpha >= beta && return sc
+        if alpha >= beta
+            si.tt_cutoffs += 1
+            return sc
+        end
     end
 
     in_check = king_in_check(b, b.side)
@@ -487,7 +514,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
         # (the queen upgrade adds ~800 cp that isn't reflected in the captured piece value).
         if !in_check && !is_promo(m)
             fl_m     = flags(m)
-            cap_kind = fl_m == MF_EP ? Pawn : b.piece_on[to_sq(m)+1].kind
+            cap_kind = fl_m == MF_EP ? Pawn : @inbounds b.piece_on[to_sq(m)+1].kind
             @inbounds PIECE_VALUE[Int(cap_kind)+1] + stand_pat + DELTA_MARGIN <= alpha && continue
         end
 
@@ -599,8 +626,10 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # upper bound, and we narrow (or cut) the window accordingly.
     tte       = _tt_get(si.tt, b.hash)
     hash_move = NULL_MOVE
+    si.tt_probes += 1
     if tte.key == b.hash
         hash_move = tte.move
+        si.tt_hits += 1
         # Don't allow TT cutoffs for positions already seen in the game (prior_counts > 0).
         # A TT entry stored before this position entered a repetition cycle would mask
         # the draw: the search would short-circuit before traversing the 3-4 move loop
@@ -619,13 +648,17 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                 sc += ply
             end
             if tte.flag == TT_EXACT
+                si.tt_cutoffs += 1
                 return sc
             elseif tte.flag == TT_LOWER
                 alpha = max(alpha, sc)
             else
                 beta = min(beta, sc)
             end
-            alpha >= beta && return sc
+            if alpha >= beta
+                si.tt_cutoffs += 1
+                return sc
+            end
         end
     end
 
@@ -698,12 +731,9 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         pc_beta  = beta + 200
         pc_depth = depth - 4
         ml_pc    = si.move_stack[min(ply, MOVE_STACK_SIZE)]
-        generate_moves!(ml_pc, b)
+        generate_captures!(ml_pc, b)
         for k in 1:length(ml_pc)
             mc  = ml_pc.moves[k]
-            flc = flags(mc)
-            is_cap_pc = (flc & MF_CAPTURE) != 0 || flc == MF_EP
-            is_cap_pc || continue
             _path_push!(si, b.hash)
             undo_pc = make_move!(b, mc)
             pc_score = -_negamax(b, pc_depth, -pc_beta, -pc_beta + 1, ply + 1, si, false, mc)
@@ -802,6 +832,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                         if score > alpha
                             alpha = score
                             if alpha >= beta
+                                si.beta_cutoffs += 1
+                                si.first_move_cutoffs += 1  # hash move is always first tried
                                 # Write to TT before returning so _extract_pv can
                                 # follow the PV through this cut node.
                                 store_score = best_score
@@ -862,7 +894,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         # Capped at depth-2 so the reduced search is always at least depth 1.
         reduction = 0
         if cfg.lmr && depth >= 3 && i > 2 && !is_capture && !is_promo && !gives_check && !in_check
-            reduction = clamp(1 + floor(Int, log(depth) * log(i) / 2.5), 0, depth - 2)
+            reduction = min(LMR_TABLE[min(depth,64), min(i,256)], depth - 2)
             # When already significantly behind, search harder — critical quiet moves
             # (e.g. discovered attacks) are likely ordered late and would otherwise
             # be reduced too much, causing large evaluation swings.
@@ -908,6 +940,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             if score > alpha
                 alpha = score
                 if alpha >= beta
+                    si.beta_cutoffs += 1
+                    i == loop_start && (si.first_move_cutoffs += 1)
                     if !is_capture && !is_promo
                         _update_killers!(si.killers, ply, m)
                         _update_history!(si.history, m, depth)
@@ -1094,11 +1128,17 @@ function search_move(b::Board, time_ms::Int;
         return SearchResult(NULL_MOVE, score, 0, Int64(0), evaluate(b, si.config), Move[])
     end
 
-    si.stop         = false
-    si.nodes        = 0
+    si.stop                = false
+    si.nodes               = 0
+    si.beta_cutoffs        = 0
+    si.first_move_cutoffs  = 0
+    si.tt_probes           = 0
+    si.tt_hits             = 0
+    si.tt_cutoffs          = 0
     si.time_start   = time()
     si.time_limit   = si.time_start + time_ms / 1000.0
-    si.prior_counts = prior_counts
+    si.prior_counts      = prior_counts
+    si.root_prior_count  = get(prior_counts, b.hash, 0)
     empty!(si.path)
     empty!(si.path_counts)
     fill!(si.killers, NULL_MOVE)
@@ -1121,12 +1161,14 @@ function search_move(b::Board, time_ms::Int;
     prev_best_move   = NULL_MOVE
     time_hard_limit  = si.time_start + time_ms * 3 / 2 / 1000.0
 
-    prev_score = 0
+    prev_score       = 0
+    prev_iter_nodes  = Int64(0)   # nodes used by the previous depth iteration (for EBF)
     for depth in 1:MAX_PLY
         # Age history scores so data from the most-recent iteration carries more
         # weight than data from shallow early iterations.  ÷4 (not ÷2) keeps
         # useful signal from recent depths rather than erasing it too quickly.
         si.history .÷= 4
+        nodes_before_depth = si.nodes
 
         # Aspiration windows: search with a narrow window centred on the previous
         # iteration's score.  If the true score lies outside, we get a fail-low
@@ -1178,8 +1220,16 @@ function search_move(b::Board, time_ms::Int;
         pv_moves   = _extract_pv(b, si.tt, best_move, 8)
         best_pv    = copy(pv_moves)
         pv_str     = join(move_to_uci.(pv_moves), " ")
-        verbose && @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  pv %s\n",
-                           depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, pv_str)
+        if verbose
+            this_depth_nodes = si.nodes - nodes_before_depth
+            ebf    = prev_iter_nodes > 0 ? this_depth_nodes / prev_iter_nodes : 0.0
+            fmc    = si.beta_cutoffs > 0 ? round(Int, 100 * si.first_move_cutoffs / si.beta_cutoffs) : 0
+            tth    = si.tt_probes > 0    ? round(Int, 100 * si.tt_hits    / si.tt_probes)            : 0
+            ttc    = si.tt_hits > 0      ? round(Int, 100 * si.tt_cutoffs / si.tt_hits)              : 0
+            @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  fmc %2d%%  tth %2d%%  ttc %2d%%  ebf %4.2f  pv %s\n",
+                    depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, fmc, tth, ttc, ebf, pv_str)
+            prev_iter_nodes = this_depth_nodes
+        end
 
         # Time extension: when the position is genuinely unstable — score swings
         # more than 150 cp from the previous depth, or the best move changes —
@@ -1227,7 +1277,7 @@ function search_move(b::Board, time_ms::Int;
     # Skip trickiness on a low time budget: the pass costs up to 10% of the
     # per-move allocation, which is unacceptable when the clock is tight.
     trick_budget_ms = clamp(time_ms ÷ 10, 0, 60)
-    if best_depth >= 4 && length(completed_roots) >= 2 && !is_capture(best_move) &&
+    if false && best_depth >= 4 && length(completed_roots) >= 2 && !is_capture(best_move) &&
        trick_budget_ms >= 10
         sort!(completed_roots; by = first, rev = true)
         threshold = completed_roots[1][1] - 30
@@ -1268,7 +1318,7 @@ function search_move(b::Board, time_ms::Int;
     if best_score < 0
         # If the root position itself has appeared >= 2 times before, this IS the
         # 3rd occurrence and Lichess will auto-enforce the draw.  Score it as 0.
-        if get(prior_counts, b.hash, 0) >= 2
+        if si.root_prior_count >= 2
             best_score = 0
             pv         = isempty(pv) ? [best_move] : pv
         else

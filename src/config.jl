@@ -125,9 +125,10 @@ Base.@kwdef struct EngineConfig
     # whose enemy king is cut off from the promotion side of the board.
 
     eval_pawn_majority    ::Bool = true
-    # Flank pawn majority: +15 cp per flank (queenside or kingside) where we
-    # have more pawns than the opponent.  A majority creates a potential passed
-    # pawn by advancing, making it a lasting structural advantage.
+    # Flank pawn majority: +20 cp base per flank where we outnumber the
+    # opponent, plus +5 cp per rank the trailing majority pawn has advanced
+    # (rewards keeping the group moving), minus 8 cp per rank of gap beyond 2
+    # between the leading and trailing pawn (penalises lone-wolf advances).
 
     eval_connected_passers ::Bool = true
     # Connected passed pawns bonus: two or more passed pawns on adjacent files

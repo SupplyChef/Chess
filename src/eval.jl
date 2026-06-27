@@ -1,8 +1,10 @@
 # Static evaluation. Positive = White is better (centipawns).
 
 # ── Piece values ───────────────────────────────────────────────────────────────
-# Indexed by Int(kind)+1: NoPiece=0 Pawn=100 Knight=320 Bishop=330 Rook=500 Queen=1000 King=20000
-const PIECE_VALUE = (0, 100, 320, 330, 500, 1000, 20_000)
+# Indexed by Int(kind)+1: NoPiece=0 Pawn=100 Knight=320 Bishop=335 Rook=500 Queen=1000 King=20000
+# Bishop-knight gap (15 cp) exceeds the doubled-pawn penalty (12 cp), so trading
+# a bishop for a knight purely to create doubled pawns is not considered worthwhile.
+const PIECE_VALUE = (0, 100, 320, 335, 500, 1000, 20_000)
 
 # ── Piece-square tables ────────────────────────────────────────────────────────
 # 64 entries written rank-8 → rank-1, file-a → file-h (visual board order).
@@ -39,6 +41,7 @@ function _init_eval!()
             end
         end
     end
+    _init_pawn_tt!()
 end
 
 # Chebyshev (chessboard) distance: the number of king moves between two squares.
@@ -387,18 +390,11 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 score += sign * (pawn_supported ? 32 : 20)
             else
                 # Semi-outpost: all challenger pawns are immediately blocked.
-                # Enemy pawn advances toward our side (decreasing rank for Black
-                # challengers, increasing rank for White challengers).
-                all_blocked = true
-                for ep in BitIter(challenger)
-                    fwd_sq = c == White ? ep - 8 : ep + 8
-                    if 0 <= fwd_sq <= 63 && (occ & sq_bb(fwd_sq)) != 0
-                        # this challenger pawn is blocked — OK
-                    else
-                        all_blocked = false; break
-                    end
-                end
-                all_blocked && (score += sign * (pawn_supported ? 14 : 8))
+                # A White challenger at sq ep is blocked when sq ep+8 is occupied
+                # (occ >> 8 shifts occupancy down so bit ep is set iff ep+8 occupied).
+                # Symmetric shift for Black (advance = -8).
+                blocked = c == White ? (challenger & (occ >> 8)) : (challenger & (occ << 8))
+                blocked == challenger && (score += sign * (pawn_supported ? 14 : 8))
             end
         end
 
@@ -742,7 +738,23 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     score
 end
 
-function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
+# ── Pawn evaluation cache ──────────────────────────────────────────────────────
+# Pawn structure (doubled/isolated/passed/backward/majority) depends only on
+# pawn positions.  Since pawn moves are only ~10-15% of all moves, the pawn
+# configuration is unchanged for ~85-90% of eval calls.  A small fixed-size
+# cache keyed by b.pawn_hash eliminates redundant computation.
+const _PAWN_TT_SIZE = 1 << 16   # 65 536 entries ≈ 1 MB
+struct _PawnEntry
+    key   ::UInt64
+    score ::Int32
+end
+const _PAWN_TT = Vector{_PawnEntry}(undef, _PAWN_TT_SIZE)
+
+function _init_pawn_tt!()
+    fill!(_PAWN_TT, _PawnEntry(UInt64(0), Int32(0)))
+end
+
+function _eval_pawn_structure_impl(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     score = 0
 
     # Opposite-colored bishops with no other pieces: passed pawn bonuses halved.
@@ -774,7 +786,7 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             # because it cannot protect the one ahead of it.  −12 cp reflects
             # that doubled pawns also create weaknesses on the adjacent files
             # that the opponent can target with a rook or majority.
-            n > 1 && (score += sign * (n - 1) * (-12))
+            n > 1 && (score += sign * (n - 1) * (-20))
             # Isolated pawns: no friendly pawn on either adjacent file means
             # this pawn can never be defended by another pawn.  −20 cp is larger
             # than the doubled penalty because an isolated pawn is a permanent
@@ -791,29 +803,24 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 ocb_only && (bonus = bonus ÷ 2)
                 score += sign * bonus
                 passed_bb |= sq_bb(s)
-                # Free passer: no piece of either colour stands between the
-                # pawn and its promotion square, AND no friendly pawn trails
-                # behind it on the same file (doubled pawns are not truly free).
-                promo_rank = c == White ? 7 : 0
-                pawn_rank  = rank_of(s)
-                pawn_file  = file_of(s)
-                path_clear = true
+                # Free passer: path to promotion is clear of all pieces, AND no
+                # friendly pawn sits behind on the same file (doubled pawns are
+                # not truly free).  Use bitboard masks instead of rank loops:
+                #
+                #   _PASSED_W[s+1] covers files f-1..f+1 with ranks > r.
+                #   Masked to the pawn's file and excluding the promo rank (rank 7
+                #   for White = RANK_MASK[8]) gives exactly the path squares.
+                #   _PASSED_B[s+1] similarly covers ranks < r; masked to file f
+                #   gives the squares behind the pawn.
+                pawn_file = file_of(s)
                 if c == White
-                    for r in (pawn_rank + 1):(promo_rank - 1)
-                        (all_occ(b) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
-                    end
-                    # disqualify if a friendly pawn sits behind on the same file
-                    for r in 1:(pawn_rank - 1)
-                        (bb(b, c, Pawn) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
-                    end
+                    fwd_mask    = _PASSED_W[s+1] & FILE_MASK[pawn_file+1] & ~RANK_MASK[8]
+                    behind_mask = _PASSED_B[s+1] & FILE_MASK[pawn_file+1]
                 else
-                    for r in (promo_rank + 1):(pawn_rank - 1)
-                        (all_occ(b) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
-                    end
-                    for r in (pawn_rank + 1):6
-                        (bb(b, c, Pawn) & sq_bb(sq(pawn_file, r))) != 0 && (path_clear = false; break)
-                    end
+                    fwd_mask    = _PASSED_B[s+1] & FILE_MASK[pawn_file+1] & ~RANK_MASK[1]
+                    behind_mask = _PASSED_W[s+1] & FILE_MASK[pawn_file+1]
                 end
+                path_clear = (all_occ(b) & fwd_mask) == 0 && (bb(b, c, Pawn) & behind_mask) == 0
                 path_clear && (score += sign * 15)
             else
                 # Backward pawn detection: no friendly pawns in the support zone,
@@ -855,11 +862,49 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             opp_qs = count(f -> (enemy_pawns & FILE_MASK[f]) != BB(0), 1:4)
             our_ks = count(f -> (pawns & FILE_MASK[f]) != BB(0), 5:8)
             opp_ks = count(f -> (enemy_pawns & FILE_MASK[f]) != BB(0), 5:8)
-            (opp_qs > 0 && our_qs > opp_qs) && (score += sign * 15)
-            (opp_ks > 0 && our_ks > opp_ks) && (score += sign * 15)
+
+            # Advancement bonus: +5 cp per rank the *trailing* majority pawn has
+            # moved beyond its starting rank — gives the engine a direct eval
+            # reward for advancing the lagging pawn and keeping the group moving.
+            #
+            # Cohesion penalty: −5 cp per rank gap beyond 2 between the leading
+            # and trailing majority pawn — a soft nudge against lone-wolf advances,
+            # capped so the total never goes negative (a majority is always an
+            # asset, never a liability regardless of spread).
+            start_rank = c == White ? 1 : 6  # rank_of is 0-based
+
+            if opp_qs > 0 && our_qs > opp_qs
+                maj_bb = (pawns & FILE_MASK[1]) | (pawns & FILE_MASK[2]) |
+                         (pawns & FILE_MASK[3]) | (pawns & FILE_MASK[4])
+                min_rank = Int(trailing_zeros(maj_bb)) >> 3
+                max_rank = (63 - Int(leading_zeros(maj_bb))) >> 3
+                trailing_rank = c == White ? min_rank : max_rank
+                adv = max(0, c == White ? trailing_rank - start_rank : start_rank - trailing_rank)
+                gap_penalty = max(0, max_rank - min_rank - 2) * 5
+                score += sign * max(0, 20 + adv * 5 - gap_penalty)
+            end
+            if opp_ks > 0 && our_ks > opp_ks
+                maj_bb = (pawns & FILE_MASK[5]) | (pawns & FILE_MASK[6]) |
+                         (pawns & FILE_MASK[7]) | (pawns & FILE_MASK[8])
+                min_rank = Int(trailing_zeros(maj_bb)) >> 3
+                max_rank = (63 - Int(leading_zeros(maj_bb))) >> 3
+                trailing_rank = c == White ? min_rank : max_rank
+                adv = max(0, c == White ? trailing_rank - start_rank : start_rank - trailing_rank)
+                gap_penalty = max(0, max_rank - min_rank - 2) * 5
+                score += sign * max(0, 20 + adv * 5 - gap_penalty)
+            end
         end
     end
     score
+end
+
+@inline function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
+    idx = (b.pawn_hash % _PAWN_TT_SIZE) + 1
+    pe  = @inbounds _PAWN_TT[idx]
+    pe.key == b.pawn_hash && return Int(pe.score)
+    s = _eval_pawn_structure_impl(b, cfg)
+    @inbounds _PAWN_TT[idx] = _PawnEntry(b.pawn_hash, Int32(s))
+    s
 end
 
 # ── King-safety pawn shield ────────────────────────────────────────────────────
@@ -1091,7 +1136,7 @@ _eval_tempo(b::Board)::Int = b.side == White ? 10 : -10
 # material + PST core.  Chosen as a conservative bound: trapped-piece
 # penalties (−100), king-zone attack penalties, and stacked passer bonuses
 # rarely sum past ~400 cp in one direction.
-const LAZY_EVAL_MARGIN = 450
+const LAZY_EVAL_MARGIN = 200
 
 """
     evaluate_lazy(b, cfg, alpha, beta) → Int
