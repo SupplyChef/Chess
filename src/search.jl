@@ -342,6 +342,15 @@ mutable struct SearchInfo
     # measurable at ~1M nodes/s; caching it here avoids the lookup on the hot
     # repetition path inside _negamax.
     root_prior_count::Int
+    # ── Diagnostic counters (reset each search_move call) ─────────────────────
+    # beta_cutoffs / first_move_cutoffs — track move ordering quality.
+    #   first_move_cutoffs / beta_cutoffs should be 85–90% for well-ordered search.
+    # tt_probes / tt_hits / tt_cutoffs — track transposition table effectiveness.
+    beta_cutoffs       ::Int64
+    first_move_cutoffs ::Int64
+    tt_probes          ::Int64
+    tt_hits            ::Int64
+    tt_cutoffs         ::Int64
 end
 
 function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
@@ -361,6 +370,7 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
         Dict{UInt64,Int}(),
         cfg,
         0,
+        Int64(0), Int64(0), Int64(0), Int64(0), Int64(0),
     )
 end
 
@@ -446,7 +456,9 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
 
     # TT Probe
     tte = _tt_get(si.tt, b.hash)
+    si.tt_probes += 1
     if tte.key == b.hash
+        si.tt_hits += 1
         sc = Int(tte.score)
         if sc > MATE_SCORE - MOVE_STACK_SIZE
             sc -= ply
@@ -454,13 +466,17 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
             sc += ply
         end
         if tte.flag == TT_EXACT
+            si.tt_cutoffs += 1
             return sc
         elseif tte.flag == TT_LOWER
             alpha = max(alpha, sc)
         else
             beta = min(beta, sc)
         end
-        alpha >= beta && return sc
+        if alpha >= beta
+            si.tt_cutoffs += 1
+            return sc
+        end
     end
 
     in_check = king_in_check(b, b.side)
@@ -610,8 +626,10 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # upper bound, and we narrow (or cut) the window accordingly.
     tte       = _tt_get(si.tt, b.hash)
     hash_move = NULL_MOVE
+    si.tt_probes += 1
     if tte.key == b.hash
         hash_move = tte.move
+        si.tt_hits += 1
         # Don't allow TT cutoffs for positions already seen in the game (prior_counts > 0).
         # A TT entry stored before this position entered a repetition cycle would mask
         # the draw: the search would short-circuit before traversing the 3-4 move loop
@@ -630,13 +648,17 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                 sc += ply
             end
             if tte.flag == TT_EXACT
+                si.tt_cutoffs += 1
                 return sc
             elseif tte.flag == TT_LOWER
                 alpha = max(alpha, sc)
             else
                 beta = min(beta, sc)
             end
-            alpha >= beta && return sc
+            if alpha >= beta
+                si.tt_cutoffs += 1
+                return sc
+            end
         end
     end
 
@@ -810,6 +832,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                         if score > alpha
                             alpha = score
                             if alpha >= beta
+                                si.beta_cutoffs += 1
+                                si.first_move_cutoffs += 1  # hash move is always first tried
                                 # Write to TT before returning so _extract_pv can
                                 # follow the PV through this cut node.
                                 store_score = best_score
@@ -916,6 +940,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             if score > alpha
                 alpha = score
                 if alpha >= beta
+                    si.beta_cutoffs += 1
+                    i == loop_start && (si.first_move_cutoffs += 1)
                     if !is_capture && !is_promo
                         _update_killers!(si.killers, ply, m)
                         _update_history!(si.history, m, depth)
@@ -1102,8 +1128,13 @@ function search_move(b::Board, time_ms::Int;
         return SearchResult(NULL_MOVE, score, 0, Int64(0), evaluate(b, si.config), Move[])
     end
 
-    si.stop         = false
-    si.nodes        = 0
+    si.stop                = false
+    si.nodes               = 0
+    si.beta_cutoffs        = 0
+    si.first_move_cutoffs  = 0
+    si.tt_probes           = 0
+    si.tt_hits             = 0
+    si.tt_cutoffs          = 0
     si.time_start   = time()
     si.time_limit   = si.time_start + time_ms / 1000.0
     si.prior_counts      = prior_counts
@@ -1130,12 +1161,14 @@ function search_move(b::Board, time_ms::Int;
     prev_best_move   = NULL_MOVE
     time_hard_limit  = si.time_start + time_ms * 3 / 2 / 1000.0
 
-    prev_score = 0
+    prev_score       = 0
+    prev_iter_nodes  = Int64(0)   # nodes used by the previous depth iteration (for EBF)
     for depth in 1:MAX_PLY
         # Age history scores so data from the most-recent iteration carries more
         # weight than data from shallow early iterations.  ÷4 (not ÷2) keeps
         # useful signal from recent depths rather than erasing it too quickly.
         si.history .÷= 4
+        nodes_before_depth = si.nodes
 
         # Aspiration windows: search with a narrow window centred on the previous
         # iteration's score.  If the true score lies outside, we get a fail-low
@@ -1187,8 +1220,16 @@ function search_move(b::Board, time_ms::Int;
         pv_moves   = _extract_pv(b, si.tt, best_move, 8)
         best_pv    = copy(pv_moves)
         pv_str     = join(move_to_uci.(pv_moves), " ")
-        verbose && @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  pv %s\n",
-                           depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, pv_str)
+        if verbose
+            this_depth_nodes = si.nodes - nodes_before_depth
+            ebf    = prev_iter_nodes > 0 ? this_depth_nodes / prev_iter_nodes : 0.0
+            fmc    = si.beta_cutoffs > 0 ? round(Int, 100 * si.first_move_cutoffs / si.beta_cutoffs) : 0
+            tth    = si.tt_probes > 0    ? round(Int, 100 * si.tt_hits    / si.tt_probes)            : 0
+            ttc    = si.tt_hits > 0      ? round(Int, 100 * si.tt_cutoffs / si.tt_hits)              : 0
+            @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  fmc %2d%%  tth %2d%%  ttc %2d%%  ebf %4.2f  pv %s\n",
+                    depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, fmc, tth, ttc, ebf, pv_str)
+            prev_iter_nodes = this_depth_nodes
+        end
 
         # Time extension: when the position is genuinely unstable — score swings
         # more than 150 cp from the previous depth, or the best move changes —

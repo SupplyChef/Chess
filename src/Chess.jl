@@ -22,6 +22,7 @@ include("config.jl")
 include("eval.jl")
 include("search.jl")
 include("selfplay.jl")
+include("epd.jl")
 include("explain.jl")
 include("perft.jl")
 
@@ -68,7 +69,9 @@ export
     # search
     SearchInfo, SearchResult, search_move, MATE_SCORE,
     # selfplay
-    MatchResult, selfplay,
+    MatchResult, selfplay, ablation_suite,
+    # epd
+    EPDEntry, EPDResult, run_epd_suite, epd_failures,
     # explain
     explain_move, explain_opponent_move, explain_pv_outcome,
     # perft
