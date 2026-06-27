@@ -12,6 +12,8 @@
 module Chess
 
 using Printf
+using LinearAlgebra
+using Random
 
 include("types.jl")
 include("attacks.jl")
@@ -20,6 +22,10 @@ include("fen.jl")
 include("movegen.jl")
 include("config.jl")
 include("eval.jl")
+include("weights.jl")
+include("tune_eval.jl")
+include("tune_data.jl")
+include("tune.jl")
 include("search.jl")
 include("selfplay.jl")
 include("epd.jl")
@@ -64,6 +70,11 @@ export
     compute_hash,
     # eval
     EvalBreakdown, evaluate, total, explain, PIECE_VALUE,
+    # tuning
+    N_WEIGHTS, default_weights, weights_to_source,
+    extract_features, score_from_weights,
+    load_positions, build_feature_matrix, save_dataset, load_dataset,
+    tune_weights, run_tuning, sigmoid_loss,
     # config
     EngineConfig, DEFAULT_CONFIG,
     # search
