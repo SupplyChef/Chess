@@ -620,6 +620,7 @@ Defaults to `Chess/syzygy/` (next to `src/`) when no path is given.
 syzygy_init!() = syzygy_init!(get(ENV, "SYZYGY_PATH", _DEFAULT_SYZYGY_PATH))
 
 function syzygy_init!(path::String)::Bool
+    isdir(path) || return false
     empty!(_TABLES)
     TB_LARGEST[] = 0
     _INITIALIZED[] = false

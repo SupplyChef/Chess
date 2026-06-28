@@ -38,6 +38,7 @@ function __init__()
     _init_castling_masks!()
     _init_zobrist!()
     _init_eval!()
+    syzygy_init!()   # no-op and silent if Chess/syzygy/ doesn't exist or is empty
 end
 
 export
