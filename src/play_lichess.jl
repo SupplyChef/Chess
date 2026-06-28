@@ -326,6 +326,9 @@ function play_game(game_id::String)
                         SEARCH_INFOS[game_id]    = SearchInfo()
                         INCREMENTS[game_id]      = Int(get(event.clock, :increment, 0))
                         PV_HISTORY[game_id]      = Tuple{Int, Vector{Move}, Int}[]
+                        side = COLORS[game_id] == White ? "White" : "Black"
+                        println("Game $game_id  playing $side")
+                        print_engine_banner(SEARCH_INFOS[game_id])
 
                         moves_str = String(event.state.moves)
                         played    = apply_moves!(BOARDS[game_id], moves_str, POSITION_COUNTS[game_id])

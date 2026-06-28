@@ -346,11 +346,13 @@ mutable struct SearchInfo
     # beta_cutoffs / first_move_cutoffs — track move ordering quality.
     #   first_move_cutoffs / beta_cutoffs should be 85–90% for well-ordered search.
     # tt_probes / tt_hits / tt_cutoffs — track transposition table effectiveness.
+    # tb_hits — positions answered by the Syzygy endgame tablebase this search.
     beta_cutoffs       ::Int64
     first_move_cutoffs ::Int64
     tt_probes          ::Int64
     tt_hits            ::Int64
     tt_cutoffs         ::Int64
+    tb_hits            ::Int64
 end
 
 function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
@@ -370,7 +372,7 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
         Dict{UInt64,Int}(),
         cfg,
         0,
-        Int64(0), Int64(0), Int64(0), Int64(0), Int64(0),
+        Int64(0), Int64(0), Int64(0), Int64(0), Int64(0), Int64(0),
     )
 end
 
@@ -390,6 +392,64 @@ end
     else
         si.path_counts[h] = cnt
     end
+end
+
+# ── Engine banner ─────────────────────────────────────────────────────────────
+"""
+    print_engine_banner(si)
+
+Print a one-time summary of the engine configuration: TT size, Syzygy table
+coverage, and which search/eval features are currently enabled.  Call once at
+the start of each game so the log shows the exact setup used.
+"""
+function print_engine_banner(si::SearchInfo = SearchInfo())
+    cfg   = si.config
+    bar   = "─" ^ 62
+    println(bar)
+    println("Chess Engine")
+
+    # Transposition table
+    tt_mb = TT_SIZE * sizeof(TTEntry) ÷ (1024 * 1024)
+    @printf("  TT      %dM entries · %d MB\n", TT_SIZE ÷ 1_000_000, tt_mb)
+
+    # Syzygy tables
+    if _INITIALIZED[]
+        n = length(unique(t -> objectid(t), values(_TABLES)))
+        @printf("  Syzygy  %d WDL tables loaded · covers ≤%d pieces\n", n, TB_LARGEST[])
+    else
+        println("  Syzygy  not loaded  " *
+                "(place .rtbw files in Chess/syzygy/ or set SYZYGY_PATH)")
+    end
+
+    # Search features (show OFF ones so on is the obvious default)
+    search_flags = [("null_move", cfg.null_move), ("aspiration", cfg.aspiration),
+                    ("lmr", cfg.lmr), ("pvs", cfg.pvs), ("see", cfg.see),
+                    ("rfp", cfg.rfp), ("lmp", cfg.lmp), ("iir", cfg.iir),
+                    ("singular_ext", cfg.singular_ext), ("probcut", cfg.probcut),
+                    ("syzygy", cfg.syzygy)]
+    off = [n for (n, v) in search_flags if !v]
+    if isempty(off)
+        println("  Search  all heuristics ON")
+    else
+        println("  Search  OFF: ", join(off, "  "))
+    end
+
+    eval_flags = [("mobility", cfg.eval_mobility), ("pins", cfg.eval_pins),
+                  ("pawn_storm", cfg.eval_pawn_storm), ("space", cfg.eval_space),
+                  ("king_tropism", cfg.eval_king_tropism), ("center", cfg.eval_center),
+                  ("rook_passer", cfg.eval_rook_passer), ("complexity", cfg.eval_complexity),
+                  ("ocb_discount", cfg.eval_ocb_discount), ("wrong_bishop", cfg.eval_wrong_bishop),
+                  ("rook_cutoff", cfg.eval_rook_cutoff), ("pawn_majority", cfg.eval_pawn_majority),
+                  ("conn_passers", cfg.eval_connected_passers), ("kn_distance", cfg.eval_knight_distance),
+                  ("kbnk", cfg.eval_kbnk), ("mopup", cfg.eval_mopup)]
+    off_eval = [n for (n, v) in eval_flags if !v]
+    if isempty(off_eval)
+        println("  Eval    all terms ON")
+    else
+        println("  Eval    OFF: ", join(off_eval, "  "))
+    end
+
+    println(bar)
 end
 
 # ── Result ────────────────────────────────────────────────────────────────────
@@ -658,6 +718,28 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             if alpha >= beta
                 si.tt_cutoffs += 1
                 return sc
+            end
+        end
+    end
+
+    # ── Tablebase probe ────────────────────────────────────────────────────────
+    # If Syzygy tables are loaded and this is a ≤N-piece position with no
+    # castling rights, the WDL result is exact — no need to search further.
+    # Probe after the TT (cheaper) but before generating moves (expensive).
+    if si.config.syzygy && _INITIALIZED[] && b.castling == 0x0
+        n_pc = count_bits(all_occ(b))
+        if n_pc <= TB_LARGEST[]
+            wdl = syzygy_probe_wdl(b)
+            if wdl !== nothing
+                si.tb_hits += 1
+                tb_score = wdl == WDL_WIN          ?  (MATE_SCORE - ply) :
+                           wdl == WDL_LOSS         ? -(MATE_SCORE - ply) :
+                           wdl == WDL_CURSED_WIN   ?  1 :
+                           wdl == WDL_BLESSED_LOSS ? -1 : 0
+                flag = tb_score >= beta  ? TT_LOWER :
+                       tb_score <= alpha ? TT_UPPER : TT_EXACT
+                _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
+                return tb_score
             end
         end
     end
@@ -1135,6 +1217,7 @@ function search_move(b::Board, time_ms::Int;
     si.tt_probes           = 0
     si.tt_hits             = 0
     si.tt_cutoffs          = 0
+    si.tb_hits             = 0
     si.time_start   = time()
     si.time_limit   = si.time_start + time_ms / 1000.0
     si.prior_counts      = prior_counts
@@ -1163,6 +1246,9 @@ function search_move(b::Board, time_ms::Int;
 
     prev_score       = 0
     prev_iter_nodes  = Int64(0)   # nodes used by the previous depth iteration (for EBF)
+    verbose && println("# depth=ply  score=centipawns(side-to-move)  nps=knodes/s  " *
+                       "ord=move-order-quality%  tth=TT-hit%  ttc=TT-cutoff%  " *
+                       "tb=tablebase-hits  ebf=branching-factor  pv=best-line")
     for depth in 1:MAX_PLY
         # Age history scores so data from the most-recent iteration carries more
         # weight than data from shallow early iterations.  ÷4 (not ÷2) keeps
@@ -1226,8 +1312,8 @@ function search_move(b::Board, time_ms::Int;
             fmc    = si.beta_cutoffs > 0 ? round(Int, 100 * si.first_move_cutoffs / si.beta_cutoffs) : 0
             tth    = si.tt_probes > 0    ? round(Int, 100 * si.tt_hits    / si.tt_probes)            : 0
             ttc    = si.tt_hits > 0      ? round(Int, 100 * si.tt_cutoffs / si.tt_hits)              : 0
-            @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  fmc %2d%%  tth %2d%%  ttc %2d%%  ebf %4.2f  pv %s\n",
-                    depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, fmc, tth, ttc, ebf, pv_str)
+            @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  fmc %2d%%  tth %2d%%  ttc %2d%%  tb %6d  ebf %4.2f  pv %s\n",
+                    depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, fmc, tth, ttc, si.tb_hits, ebf, pv_str)
             prev_iter_nodes = this_depth_nodes
         end
 
