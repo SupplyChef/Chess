@@ -608,12 +608,17 @@ function _load_wdl_table(path::String, name::String)::Union{WdlTable,Nothing}
     end
 end
 
+const _DEFAULT_SYZYGY_PATH = joinpath(@__DIR__, "..", "syzygy")
+
 """
     syzygy_init!(path) -> Bool
 
 Scan `path` for .rtbw files and load all Syzygy WDL tables found.
 Returns `true` on success (≥1 table loaded). Sets `TB_LARGEST`.
+Defaults to `Chess/syzygy/` (next to `src/`) when no path is given.
 """
+syzygy_init!() = syzygy_init!(get(ENV, "SYZYGY_PATH", _DEFAULT_SYZYGY_PATH))
+
 function syzygy_init!(path::String)::Bool
     empty!(_TABLES)
     TB_LARGEST[] = 0
