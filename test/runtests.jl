@@ -779,17 +779,18 @@ using Test
     # ── Draw rescue ───────────────────────────────────────────────────────────
 
     @testset "Draw rescue — prefers safe draw move over SEE-losing draw move" begin
-        # White is losing (rook vs queen).
-        # Position: white Ka1 Rb5, black Ka8 Qh5.
-        # Two rook squares are marked as seen >= 2 times in prior_counts:
-        #   Rb8 — rook lands adjacent to Ka8, king recaptures (SEE < 0: rook hangs)
-        #   Rb1 — safe retreat, no black attacker on b1 (SEE = 0)
-        # Without the SEE guard, draw rescue picks Rb8 (first draw candidate) and
-        # gives the rook away.  With the fix it skips Rb8 and picks Rb1.
-        b = board_from_fen("k7/8/8/1R5q/8/8/8/K7 w - - 0 1")
+        # White is losing: Ka1+Rc4 vs Ka8+Qf7.
+        # Qf7 attacks c4 diagonally (f7→e6→d5→c4), so the rook is hanging and
+        # white is clearly down material.
+        # Two rook destinations are marked as "seen twice" in prior_counts:
+        #   Rc7 — rook lands on rank 7, queen on f7 recaptures immediately (SEE < 0)
+        #   Rc8 — rook lands on c8, queen cannot reach it, Ka8 is 2 squares away (SEE = 0)
+        # Without the SEE guard the rescue picks the first draw candidate regardless
+        # of whether the piece survives.  With the fix it skips Rc7 and picks Rc8.
+        b = board_from_fen("k7/5q2/8/8/2R5/8/8/K7 w - - 0 1")
 
         pc = Dict{UInt64,Int}()
-        for uci in ("b5b8", "b5b1")
+        for uci in ("c4c7", "c4c8")
             m    = move_from_uci(b, uci)
             undo = make_move!(b, m)
             pc[b.hash] = 2
@@ -798,8 +799,8 @@ using Test
 
         r = search_move(b, 1000; prior_counts = pc)
 
-        # Draw rescue must NOT choose Rb8 (SEE-losing: king recaptures immediately).
-        @test move_to_uci(r.move) != "b5b8"
+        # Draw rescue must NOT choose Rc7 (SEE-losing: Qf7 recaptures along rank 7).
+        @test move_to_uci(r.move) != "c4c7"
         # Score must reflect a draw (not a material blunder).
         @test r.score >= 0
     end
@@ -807,9 +808,10 @@ using Test
     @testset "Draw rescue — root already seen twice scores as draw" begin
         # If the root position itself has appeared >= 2 times before, Lichess will
         # auto-enforce the draw on the next move.  The engine must report score 0.
-        b  = board_from_fen("k7/8/8/1R5q/8/8/8/K7 w - - 0 1")
+        # Ka1+Rc4 vs Ka8+Qf7: white is clearly losing (queen attacks the rook).
+        b  = board_from_fen("k7/5q2/8/8/2R5/8/8/K7 w - - 0 1")
         si = SearchInfo()
-        # Prime the TT with a negative score so the engine believes it's losing.
+        # Prime the TT so the engine has already established a negative score.
         _ = search_move(b, 200; si)
 
         # Now claim the root has been seen twice: this is the 3rd occurrence.
