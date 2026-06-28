@@ -1417,7 +1417,9 @@ function search_move(b::Board, time_ms::Int;
                 undo = make_move!(b, m)
                 can_draw = get(prior_counts, b.hash, 0) >= 2
                 unmake_move!(b, m, undo)
-                if can_draw
+                # Only rescue via this move if it doesn't immediately hang the piece
+                # (SEE < 0 means the opponent simply captures and the draw never happens).
+                if can_draw && _see_ge(b, m, 0)
                     best_move  = m
                     best_score = 0
                     pv         = [m]

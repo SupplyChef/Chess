@@ -776,6 +776,47 @@ using Test
         @test length(pv) <= 20
     end
 
+    # ── Draw rescue ───────────────────────────────────────────────────────────
+
+    @testset "Draw rescue — prefers safe draw move over SEE-losing draw move" begin
+        # White is losing (rook vs queen).
+        # Position: white Ka1 Ra5, black Ke8 Qh8.
+        # Two squares reachable by the rook are marked as seen >= 2 times:
+        #   Ra8 — rook lands on a8, attacked by Qh8 (SEE < 0: rook hangs)
+        #   Ra3 — rook lands on a3, no attacker (SEE >= 0: safe)
+        # Draw rescue must skip Ra8 and pick Ra3 (or another safe draw move).
+        b = board_from_fen("7q/8/8/R7/8/8/8/K3k3 w - - 0 1")
+
+        pc = Dict{UInt64,Int}()
+        for uci in ("a5a8", "a5a3")
+            m    = move_from_uci(b, uci)
+            undo = make_move!(b, m)
+            pc[b.hash] = 2
+            unmake_move!(b, m, undo)
+        end
+
+        r = search_move(b, 1000; prior_counts = pc)
+
+        # The draw rescue must NOT choose Ra8 (SEE-losing: queen recaptures).
+        @test move_to_uci(r.move) != "a5a8"
+        # It must report the draw score.
+        @test r.score >= 0
+    end
+
+    @testset "Draw rescue — root already seen twice scores as draw" begin
+        # If the root position itself has appeared >= 2 times before, Lichess will
+        # auto-enforce the draw on the next move.  The engine must report score 0.
+        b  = board_from_fen("7q/8/8/R7/8/8/8/K3k3 w - - 0 1")
+        si = SearchInfo()
+        # Prime the TT with a negative score so the engine believes it's losing.
+        _ = search_move(b, 200; si)
+
+        # Now claim the root has been seen twice: this is the 3rd occurrence.
+        pc = Dict{UInt64,Int}(b.hash => 2)
+        r  = search_move(b, 500; si, prior_counts = pc)
+        @test r.score == 0
+    end
+
     include("syzygy_test.jl")
 
 end
