@@ -381,6 +381,19 @@ function _init_wdl_table!(t::WdlTable)
     size = zeros(Int64, 6)
 
     data_ptr = 5
+
+    # Determine enc_type from actual file data rather than the filename heuristic.
+    # Read bside=0 piece codes and check for consecutive identical pieces:
+    # two identical adjacent codes means 3-leader encoding (enc_type=0), else KK (enc_type=2).
+    pcs0 = [Int(_r8(data, data_ptr + i + 1)) & 0x0f for i in 0:t.num-1]
+    t.enc_type = 2
+    for s in 2:t.num
+        if pcs0[s] == pcs0[s-1]
+            t.enc_type = 0
+            break
+        end
+    end
+
     _setup_pieces_piece!(t, data, data_ptr)
     data_ptr += t.num + 1
     data_ptr += (data_ptr & 1)
