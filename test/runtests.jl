@@ -780,15 +780,16 @@ using Test
 
     @testset "Draw rescue — prefers safe draw move over SEE-losing draw move" begin
         # White is losing (rook vs queen).
-        # Position: white Ka1 Ra5, black Ke8 Qh8.
-        # Two squares reachable by the rook are marked as seen >= 2 times:
-        #   Ra8 — rook lands on a8, attacked by Qh8 (SEE < 0: rook hangs)
-        #   Ra3 — rook lands on a3, no attacker (SEE >= 0: safe)
-        # Draw rescue must skip Ra8 and pick Ra3 (or another safe draw move).
-        b = board_from_fen("7q/8/8/R7/8/8/8/K3k3 w - - 0 1")
+        # Position: white Ka1 Rb5, black Ka8 Qh5.
+        # Two rook squares are marked as seen >= 2 times in prior_counts:
+        #   Rb8 — rook lands adjacent to Ka8, king recaptures (SEE < 0: rook hangs)
+        #   Rb1 — safe retreat, no black attacker on b1 (SEE = 0)
+        # Without the SEE guard, draw rescue picks Rb8 (first draw candidate) and
+        # gives the rook away.  With the fix it skips Rb8 and picks Rb1.
+        b = board_from_fen("k7/8/8/1R5q/8/8/8/K7 w - - 0 1")
 
         pc = Dict{UInt64,Int}()
-        for uci in ("a5a8", "a5a3")
+        for uci in ("b5b8", "b5b1")
             m    = move_from_uci(b, uci)
             undo = make_move!(b, m)
             pc[b.hash] = 2
@@ -797,16 +798,16 @@ using Test
 
         r = search_move(b, 1000; prior_counts = pc)
 
-        # The draw rescue must NOT choose Ra8 (SEE-losing: queen recaptures).
-        @test move_to_uci(r.move) != "a5a8"
-        # It must report the draw score.
+        # Draw rescue must NOT choose Rb8 (SEE-losing: king recaptures immediately).
+        @test move_to_uci(r.move) != "b5b8"
+        # Score must reflect a draw (not a material blunder).
         @test r.score >= 0
     end
 
     @testset "Draw rescue — root already seen twice scores as draw" begin
         # If the root position itself has appeared >= 2 times before, Lichess will
         # auto-enforce the draw on the next move.  The engine must report score 0.
-        b  = board_from_fen("7q/8/8/R7/8/8/8/K3k3 w - - 0 1")
+        b  = board_from_fen("k7/8/8/1R5q/8/8/8/K7 w - - 0 1")
         si = SearchInfo()
         # Prime the TT with a negative score so the engine believes it's losing.
         _ = search_move(b, 200; si)
