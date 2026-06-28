@@ -192,6 +192,11 @@ Base.@kwdef struct EngineConfig
     # opponent has a lone king (or near-bare king), add a large bonus for
     # (a) driving the bare king to an edge/corner and (b) bringing our king
     # close.  Activates only when phase < 6 and material advantage > 400 cp.
+
+    syzygy           ::Bool = true
+    # Syzygy endgame tablebase probe: when tables are loaded via syzygy_init!(),
+    # positions with ≤ TB_LARGEST pieces and no castling rights short-circuit
+    # the search with an exact WDL result.  Disable for ablation testing.
 end
 
 """The default full-strength configuration (all features enabled)."""

@@ -346,11 +346,13 @@ mutable struct SearchInfo
     # beta_cutoffs / first_move_cutoffs — track move ordering quality.
     #   first_move_cutoffs / beta_cutoffs should be 85–90% for well-ordered search.
     # tt_probes / tt_hits / tt_cutoffs — track transposition table effectiveness.
+    # tb_hits — positions answered by the Syzygy endgame tablebase this search.
     beta_cutoffs       ::Int64
     first_move_cutoffs ::Int64
     tt_probes          ::Int64
     tt_hits            ::Int64
     tt_cutoffs         ::Int64
+    tb_hits            ::Int64
 end
 
 function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
@@ -370,7 +372,7 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
         Dict{UInt64,Int}(),
         cfg,
         0,
-        Int64(0), Int64(0), Int64(0), Int64(0), Int64(0),
+        Int64(0), Int64(0), Int64(0), Int64(0), Int64(0), Int64(0),
     )
 end
 
@@ -658,6 +660,28 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             if alpha >= beta
                 si.tt_cutoffs += 1
                 return sc
+            end
+        end
+    end
+
+    # ── Tablebase probe ────────────────────────────────────────────────────────
+    # If Syzygy tables are loaded and this is a ≤N-piece position with no
+    # castling rights, the WDL result is exact — no need to search further.
+    # Probe after the TT (cheaper) but before generating moves (expensive).
+    if si.config.syzygy && _INITIALIZED[] && b.castling == 0x0
+        n_pc = count_bits(all_occ(b))
+        if n_pc <= TB_LARGEST[]
+            wdl = syzygy_probe_wdl(b)
+            if wdl !== nothing
+                si.tb_hits += 1
+                tb_score = wdl == WDL_WIN          ?  (MATE_SCORE - ply) :
+                           wdl == WDL_LOSS         ? -(MATE_SCORE - ply) :
+                           wdl == WDL_CURSED_WIN   ?  1 :
+                           wdl == WDL_BLESSED_LOSS ? -1 : 0
+                flag = tb_score >= beta  ? TT_LOWER :
+                       tb_score <= alpha ? TT_UPPER : TT_EXACT
+                _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
+                return tb_score
             end
         end
     end
@@ -1135,6 +1159,7 @@ function search_move(b::Board, time_ms::Int;
     si.tt_probes           = 0
     si.tt_hits             = 0
     si.tt_cutoffs          = 0
+    si.tb_hits             = 0
     si.time_start   = time()
     si.time_limit   = si.time_start + time_ms / 1000.0
     si.prior_counts      = prior_counts
@@ -1163,6 +1188,9 @@ function search_move(b::Board, time_ms::Int;
 
     prev_score       = 0
     prev_iter_nodes  = Int64(0)   # nodes used by the previous depth iteration (for EBF)
+    verbose && println("# depth=ply  score=centipawns(side-to-move)  nps=knodes/s  " *
+                       "ord=move-order-quality%  tth=TT-hit%  ttc=TT-cutoff%  " *
+                       "tb=tablebase-hits  ebf=branching-factor  pv=best-line")
     for depth in 1:MAX_PLY
         # Age history scores so data from the most-recent iteration carries more
         # weight than data from shallow early iterations.  ÷4 (not ÷2) keeps
@@ -1226,8 +1254,8 @@ function search_move(b::Board, time_ms::Int;
             fmc    = si.beta_cutoffs > 0 ? round(Int, 100 * si.first_move_cutoffs / si.beta_cutoffs) : 0
             tth    = si.tt_probes > 0    ? round(Int, 100 * si.tt_hits    / si.tt_probes)            : 0
             ttc    = si.tt_hits > 0      ? round(Int, 100 * si.tt_cutoffs / si.tt_hits)              : 0
-            @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  fmc %2d%%  tth %2d%%  ttc %2d%%  ebf %4.2f  pv %s\n",
-                    depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, fmc, tth, ttc, ebf, pv_str)
+            @printf("info depth %2d  score cp %+d  nodes %9d  nps %6dk  time %5dms  fmc %2d%%  tth %2d%%  ttc %2d%%  tb %6d  ebf %4.2f  pv %s\n",
+                    depth, score, si.nodes, nps ÷ 1_000, elapsed_ms, fmc, tth, ttc, si.tb_hits, ebf, pv_str)
             prev_iter_nodes = this_depth_nodes
         end
 
