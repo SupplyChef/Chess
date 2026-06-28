@@ -394,6 +394,64 @@ end
     end
 end
 
+# ── Engine banner ─────────────────────────────────────────────────────────────
+"""
+    print_engine_banner(si)
+
+Print a one-time summary of the engine configuration: TT size, Syzygy table
+coverage, and which search/eval features are currently enabled.  Call once at
+the start of each game so the log shows the exact setup used.
+"""
+function print_engine_banner(si::SearchInfo = SearchInfo())
+    cfg   = si.config
+    bar   = "─" ^ 62
+    println(bar)
+    println("Chess Engine")
+
+    # Transposition table
+    tt_mb = TT_SIZE * sizeof(TTEntry) ÷ (1024 * 1024)
+    @printf("  TT      %dM entries · %d MB\n", TT_SIZE ÷ 1_000_000, tt_mb)
+
+    # Syzygy tables
+    if _INITIALIZED[]
+        n = length(unique(t -> objectid(t), values(_TABLES)))
+        @printf("  Syzygy  %d WDL tables loaded · covers ≤%d pieces\n", n, TB_LARGEST[])
+    else
+        println("  Syzygy  not loaded  " *
+                "(place .rtbw files in Chess/syzygy/ or set SYZYGY_PATH)")
+    end
+
+    # Search features (show OFF ones so on is the obvious default)
+    search_flags = [("null_move", cfg.null_move), ("aspiration", cfg.aspiration),
+                    ("lmr", cfg.lmr), ("pvs", cfg.pvs), ("see", cfg.see),
+                    ("rfp", cfg.rfp), ("lmp", cfg.lmp), ("iir", cfg.iir),
+                    ("singular_ext", cfg.singular_ext), ("probcut", cfg.probcut),
+                    ("syzygy", cfg.syzygy)]
+    off = [n for (n, v) in search_flags if !v]
+    if isempty(off)
+        println("  Search  all heuristics ON")
+    else
+        println("  Search  OFF: ", join(off, "  "))
+    end
+
+    eval_flags = [("mobility", cfg.eval_mobility), ("pins", cfg.eval_pins),
+                  ("pawn_storm", cfg.eval_pawn_storm), ("space", cfg.eval_space),
+                  ("king_tropism", cfg.eval_king_tropism), ("center", cfg.eval_center),
+                  ("rook_passer", cfg.eval_rook_passer), ("complexity", cfg.eval_complexity),
+                  ("ocb_discount", cfg.eval_ocb_discount), ("wrong_bishop", cfg.eval_wrong_bishop),
+                  ("rook_cutoff", cfg.eval_rook_cutoff), ("pawn_majority", cfg.eval_pawn_majority),
+                  ("conn_passers", cfg.eval_connected_passers), ("kn_distance", cfg.eval_knight_distance),
+                  ("kbnk", cfg.eval_kbnk), ("mopup", cfg.eval_mopup)]
+    off_eval = [n for (n, v) in eval_flags if !v]
+    if isempty(off_eval)
+        println("  Eval    all terms ON")
+    else
+        println("  Eval    OFF: ", join(off_eval, "  "))
+    end
+
+    println(bar)
+end
+
 # ── Result ────────────────────────────────────────────────────────────────────
 struct SearchResult
     move ::Move

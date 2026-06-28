@@ -79,7 +79,7 @@ export
     # config
     EngineConfig, DEFAULT_CONFIG,
     # search
-    SearchInfo, SearchResult, search_move, MATE_SCORE,
+    SearchInfo, SearchResult, search_move, print_engine_banner, MATE_SCORE,
     # selfplay
     MatchResult, selfplay, ablation_suite,
     # epd
