@@ -776,4 +776,6 @@ using Test
         @test length(pv) <= 20
     end
 
+    include("syzygy_test.jl")
+
 end
