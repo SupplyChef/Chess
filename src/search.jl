@@ -724,20 +724,38 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # If Syzygy tables are loaded and this is a ≤N-piece position with no
     # castling rights, the WDL result is exact — no need to search further.
     # Probe after the TT (cheaper) but before generating moves (expensive).
+    #
+    # For WDL_LOSS / draws: cut off immediately — these are decisive.
+    # For WDL_WIN at internal nodes (depth > 0): do NOT return early.  Every
+    # winning position returns the same flat MATE_SCORE-ply, giving the search
+    # no gradient between "king cornered, mate in 5" and "king in the open, mate
+    # in 40".  Instead we raise alpha above 0 (so the engine can't accept a draw)
+    # and let the search continue so the mopup evaluation can differentiate
+    # winning positions and guide the queen toward actual progress.
+    # At leaf nodes (depth ≤ 0) we do return the TB score so qsearch can use it.
     if si.config.syzygy && _INITIALIZED[] && b.castling == 0x0
         n_pc = count_bits(all_occ(b))
         if n_pc <= TB_LARGEST[]
             wdl = syzygy_probe_wdl(b)
             if wdl !== nothing
                 si.tb_hits += 1
-                tb_score = wdl == WDL_WIN          ?  (MATE_SCORE - ply) :
-                           wdl == WDL_LOSS         ? -(MATE_SCORE - ply) :
-                           wdl == WDL_CURSED_WIN   ?  1 :
-                           wdl == WDL_BLESSED_LOSS ? -1 : 0
-                flag = tb_score >= beta  ? TT_LOWER :
-                       tb_score <= alpha ? TT_UPPER : TT_EXACT
-                _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
-                return tb_score
+                if wdl == WDL_LOSS
+                    tb_score = -(MATE_SCORE - ply)
+                    _tt_put!(si.tt, b.hash, depth, tb_score, TT_UPPER, NULL_MOVE)
+                    return tb_score
+                elseif wdl == WDL_DRAW || wdl == WDL_CURSED_WIN || wdl == WDL_BLESSED_LOSS
+                    tb_score = wdl == WDL_CURSED_WIN ? 1 : wdl == WDL_BLESSED_LOSS ? -1 : 0
+                    flag = tb_score >= beta ? TT_LOWER : tb_score <= alpha ? TT_UPPER : TT_EXACT
+                    _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
+                    return tb_score
+                else
+                    # WDL_WIN: let mopup eval guide the search at internal nodes.
+                    # Clamp alpha so the engine rejects draws and sub-optimal lines.
+                    alpha = max(alpha, 1)
+                    alpha >= beta && return alpha
+                    # At leaves, return the TB score so qsearch terminates correctly.
+                    depth <= 0 && return MATE_SCORE - ply
+                end
             end
         end
     end
