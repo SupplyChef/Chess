@@ -667,16 +667,14 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     _is_insufficient_material(b) && return 0
 
     # Repetition detection: sum occurrences in the game (prior_counts) and on the
-    # current search path (path_counts — O(1) Dict lookup).  reps >= 2 means this
-    # position has been seen at least twice before; one more visit creates a 3-fold
-    # repetition draw, so return 0.  We require >= 2 (not >= 1) so the engine
-    # cannot manufacture a fake draw by replaying its own last move: prior_counts=1
-    # means the position was seen once in the game, but the opponent has no obligation
-    # to repeat — only claim draw on the genuine third occurrence.
+    # current search path (path_counts — O(1) Dict lookup).  reps >= 1 means this
+    # position has been seen before; playing here again risks allowing the opponent
+    # to force a 3-fold repetition draw.  Treat it as a draw immediately so the
+    # engine is motivated to find progress (new positions) rather than cycling.
     # prior_counts is reset after every irreversible move so only genuinely
     # repeatable positions are counted.
     let reps = get(si.prior_counts, b.hash, 0) + get(si.path_counts, b.hash, 0)
-        reps >= 2 && return 0
+        reps >= 1 && return 0
     end
 
     # TT probe: if we have previously searched this position at sufficient depth,
@@ -726,20 +724,37 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # If Syzygy tables are loaded and this is a ≤N-piece position with no
     # castling rights, the WDL result is exact — no need to search further.
     # Probe after the TT (cheaper) but before generating moves (expensive).
+    #
+    # WDL_LOSS / draws: cut off immediately — result is exact.
+    # WDL_WIN: do NOT return a flat score.  Every winning TB position would
+    # score MATE_SCORE-ply — identical — so the search has no gradient and
+    # wanders randomly (K+Q vs K oscillation).  Instead we let the search
+    # continue normally so the full evaluation (mopup, king tropism, etc.)
+    # differentiates between winning positions at the leaves.  We set
+    # tb_win_node=true so the move loop below can prune any child move that
+    # would throw the win away (child is not WDL_LOSS from the opponent's
+    # perspective).  alpha is raised above 0 so the engine never accepts a draw.
+    tb_win_node = false
     if si.config.syzygy && _INITIALIZED[] && b.castling == 0x0
         n_pc = count_bits(all_occ(b))
         if n_pc <= TB_LARGEST[]
             wdl = syzygy_probe_wdl(b)
             if wdl !== nothing
                 si.tb_hits += 1
-                tb_score = wdl == WDL_WIN          ?  (MATE_SCORE - ply) :
-                           wdl == WDL_LOSS         ? -(MATE_SCORE - ply) :
-                           wdl == WDL_CURSED_WIN   ?  1 :
-                           wdl == WDL_BLESSED_LOSS ? -1 : 0
-                flag = tb_score >= beta  ? TT_LOWER :
-                       tb_score <= alpha ? TT_UPPER : TT_EXACT
-                _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
-                return tb_score
+                if wdl == WDL_WIN
+                    tb_win_node = true
+                    alpha = max(alpha, 1)
+                    alpha >= beta && return alpha
+                    # fall through — let normal search + eval run
+                else
+                    tb_score = wdl == WDL_LOSS         ? -(MATE_SCORE - ply) :
+                               wdl == WDL_CURSED_WIN   ?  1 :
+                               wdl == WDL_BLESSED_LOSS ? -1 : 0
+                    flag = tb_score >= beta  ? TT_LOWER :
+                           tb_score <= alpha ? TT_UPPER : TT_EXACT
+                    _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
+                    return tb_score
+                end
             end
         end
     end
@@ -896,6 +911,16 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                 else
                     _path_push!(si, b.hash)
                     undo = make_move!(b, m)
+                    # TB win filter: skip moves that throw away a won position.
+                    # After making the move the opponent is to move; WDL_LOSS
+                    # from their perspective means we are still winning.
+                    if tb_win_node && cfg.syzygy && _INITIALIZED[] &&
+                       b.castling == 0x0 && count_bits(all_occ(b)) <= TB_LARGEST[]
+                        cw = syzygy_probe_wdl(b)
+                        if cw !== nothing && cw != WDL_LOSS
+                            unmake_move!(b, m, undo); _path_pop!(si); break
+                        end
+                    end
                     gives_check = king_in_check(b, b.side)
                     extension = (cfg.check_extensions && gives_check && ply < MAX_PLY) ? 1 : sing_ext
 
@@ -965,6 +990,14 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         end
         _path_push!(si, b.hash)
         undo        = make_move!(b, m)
+        # TB win filter: skip moves that throw away a won position.
+        if tb_win_node && cfg.syzygy && _INITIALIZED[] &&
+           b.castling == 0x0 && count_bits(all_occ(b)) <= TB_LARGEST[]
+            cw = syzygy_probe_wdl(b)
+            if cw !== nothing && cw != WDL_LOSS
+                unmake_move!(b, m, undo); _path_pop!(si); continue
+            end
+        end
         gives_check = king_in_check(b, b.side)
 
         # ── Extensions and Late Move Reductions ──────────────────────────────
