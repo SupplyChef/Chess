@@ -333,7 +333,11 @@ function play_game(game_id::String)
                         moves_str = String(event.state.moves)
                         played    = apply_moves!(BOARDS[game_id], moves_str, POSITION_COUNTS[game_id])
                         remaining = Int(COLORS[game_id] == White ? event.state.wtime : event.state.btime)
-                        @async make_bot_move(game_id, played, remaining)
+                        @async try
+                            make_bot_move(game_id, played, remaining)
+                        catch e
+                            @error "make_bot_move crashed" game_id exception=(e, catch_backtrace())
+                        end
 
                     elseif event.type == "gameState"
                         if event.status ∉ ("created", "started")
@@ -369,7 +373,11 @@ function play_game(game_id::String)
                         moves_str = String(event.moves)
                         played    = apply_moves!(BOARDS[game_id], moves_str, POSITION_COUNTS[game_id])
                         remaining = Int(COLORS[game_id] == White ? event.wtime : event.btime)
-                        @async make_bot_move(game_id, played, remaining)
+                        @async try
+                            make_bot_move(game_id, played, remaining)
+                        catch e
+                            @error "make_bot_move crashed" game_id exception=(e, catch_backtrace())
+                        end
                     end
                 end
             end

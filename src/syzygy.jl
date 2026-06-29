@@ -429,7 +429,7 @@ end
 
 # ── Index encoding ────────────────────────────────────────────────────────────
 function _collect_squares(b::Board, pieces::Vector{Int},
-                           cmirror::Int, mirror::Int)::Vector{Int}
+                           cmirror::Int, mirror::Int)::Union{Vector{Int},Nothing}
     n   = length(pieces)
     pos = Vector{Int}(undef, n)
     i   = 0
@@ -443,8 +443,13 @@ function _collect_squares(b::Board, pieces::Vector{Int},
         color = (pc ⊻ cmirror) >> 3
         c     = color == 0 ? White : Black
         k     = PieceKind(ptype)
-        for sq in BitIter(bb(b, c, k))
+        sq_bb = bb(b, c, k)
+        # Guard: if the expected piece is absent from the board the table and
+        # board are out of sync. Return nothing rather than looping forever.
+        sq_bb == BB(0) && return nothing
+        for sq in BitIter(sq_bb)
             i += 1
+            i > n && return nothing   # more pieces on board than table expects
             pos[i] = sq ⊻ mirror
         end
     end
@@ -678,6 +683,7 @@ function _probe_wdl_table(t::WdlTable, b::Board)::Union{Int,Nothing}
     end
 
     pos = _collect_squares(b, t.pieces[bside+1], cmirror, mirror)
+    pos === nothing && return nothing
     idx = _encode_piece(t, bside, pos)
     idx < 0 && return nothing
 
@@ -705,5 +711,9 @@ function syzygy_probe_wdl(b::Board)::Union{Int,Nothing}
     end
     t.has_pawns && return nothing
 
-    _probe_wdl_table(t, b)
+    try
+        _probe_wdl_table(t, b)
+    catch
+        nothing
+    end
 end
