@@ -727,43 +727,31 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # castling rights, the WDL result is exact — no need to search further.
     # Probe after the TT (cheaper) but before generating moves (expensive).
     #
-    # WDL_WIN: return a mopup-gradient score (10_000 + corner/distance bonus,
-    # range 10_000..10_189).  This is above any normal eval but below MATE_SCORE,
-    # so the engine prefers winning moves without the overhead of a full subtree
-    # search.  The gradient drives the losing king toward the corner and our king
-    # toward it, eliminating K+Q vs K oscillation without probing every child move.
-    # Flat MATE_SCORE-ply was removed because every winning position scored the
-    # same, giving the engine no direction.  Falling through to full search was
-    # also removed because it made every won-endgame node probe ~20-30 child
-    # positions via the win filter, pushing the 1024-node time check interval from
-    # ~1.6 ms to ~50 ms and causing consistent time overruns.
+    # WDL_WIN: raise alpha above 0 so the engine never accepts a draw, then fall
+    # through to normal search so the full eval (mopup, king tropism, etc.) scores
+    # the leaves and provides a real gradient toward checkmate.  We do NOT probe
+    # child positions — normal move ordering and alpha-beta handle the rest without
+    # the ~20-30 extra TB probes per node that caused time overruns.
+    # WDL_LOSS / draws: cut off immediately — result is exact.
     if si.config.syzygy && _INITIALIZED[] && b.castling == 0x0
         n_pc = count_bits(all_occ(b))
         if n_pc <= TB_LARGEST[]
             wdl = syzygy_probe_wdl(b)
             if wdl !== nothing
                 si.tb_hits += 1
-                tb_score = if wdl == WDL_WIN
-                    their_k     = lsb(bb(b, other(b.side), King))
-                    their_kf    = file_of(their_k); their_kr = rank_of(their_k)
-                    corner_dist = min(their_kf, 7 - their_kf, their_kr, 7 - their_kr)
-                    our_k       = lsb(bb(b, b.side, King))
-                    mopup       = (7 - corner_dist) * 15 +
-                                  (7 - _chebyshev(our_k, their_k)) * 12
-                    10_000 + mopup   # range 10_000..10_189
-                elseif wdl == WDL_LOSS
-                    -(MATE_SCORE - ply)
-                elseif wdl == WDL_CURSED_WIN
-                    1
-                elseif wdl == WDL_BLESSED_LOSS
-                    -1
+                if wdl == WDL_WIN
+                    alpha = max(alpha, 1)
+                    alpha >= beta && return alpha
+                    # fall through — full eval + normal search runs
                 else
-                    0
+                    tb_score = wdl == WDL_LOSS         ? -(MATE_SCORE - ply) :
+                               wdl == WDL_CURSED_WIN   ?  1 :
+                               wdl == WDL_BLESSED_LOSS ? -1 : 0
+                    flag = tb_score >= beta  ? TT_LOWER :
+                           tb_score <= alpha ? TT_UPPER : TT_EXACT
+                    _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
+                    return tb_score
                 end
-                flag = tb_score >= beta  ? TT_LOWER :
-                       tb_score <= alpha ? TT_UPPER : TT_EXACT
-                _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
-                return tb_score
             end
         end
     end
