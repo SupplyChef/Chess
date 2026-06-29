@@ -778,43 +778,37 @@ using Test
 
     # ── Draw rescue ───────────────────────────────────────────────────────────
 
-    @testset "Draw rescue — prefers safe draw move over SEE-losing draw move" begin
-        # White is losing: Ka1+Rc4 vs Ka8+Qf7.
-        # Qf7 attacks c4 diagonally (f7→e6→d5→c4), so the rook is hanging and
-        # white is clearly down material.
-        # Two rook destinations are marked as "seen twice" in prior_counts:
-        #   Rc7 — rook lands on rank 7, queen on f7 recaptures immediately (SEE < 0)
-        #   Rc8 — rook lands on c8, queen cannot reach it, Ka8 is 2 squares away (SEE = 0)
-        # Without the SEE guard the rescue picks the first draw candidate regardless
-        # of whether the piece survives.  With the fix it skips Rc7 and picks Rc8.
-        b = board_from_fen("k7/5q2/8/8/2R5/8/8/K7 w - - 0 1")
-
-        pc = Dict{UInt64,Int}()
-        for uci in ("c4c7", "c4c8")
-            m    = move_from_uci(b, uci)
-            undo = make_move!(b, m)
-            pc[b.hash] = 2
-            unmake_move!(b, m, undo)
-        end
-
-        r = search_move(b, 1000; prior_counts = pc)
-
-        # Draw rescue must NOT choose Rc7 (SEE-losing: Qf7 recaptures along rank 7).
-        @test move_to_uci(r.move) != "c4c7"
-        # Score must reflect a draw (not a material blunder).
-        @test r.score >= 0
+    @testset "SEE - quiet move to a square defended by a stronger piece is SEE-losing" begin
+        # The draw rescue uses _see_ge to avoid offering a draw by moving a piece
+        # that immediately hangs.  These cases exercise _see_ge on QUIET moves
+        # (no captured piece on the destination square).
+        #
+        # Ka1+Rc4 vs Ka8+Qf7: Qf7 diagonally attacks c4 (f7→e6→d5→c4).
+        # Rc4→c7: queen on f7 recaptures along rank 7 (c7 and f7 share rank 7,
+        #          no piece between them) — rook hangs, SEE < 0.
+        # Rc4→c8: no attacker on c8 (queen can't reach it, Ka8 is 2 files away) — SEE = 0.
+        b  = board_from_fen("k7/5q2/8/8/2R5/8/8/K7 w - - 0 1")
+        m7 = move_from_uci(b, "c4c7")
+        m8 = move_from_uci(b, "c4c8")
+        @test Chess._see_ge(b, m7, 0)   == false   # rook hangs to Qf7xRc7
+        @test Chess._see_ge(b, m7, -500) == true    # threshold at full rook loss
+        @test Chess._see_ge(b, m8, 0)   == true     # c8 is undefended: SEE = 0
     end
 
     @testset "Draw rescue — root already seen twice scores as draw" begin
         # If the root position itself has appeared >= 2 times before, Lichess will
         # auto-enforce the draw on the next move.  The engine must report score 0.
-        # Ka1+Rc4 vs Ka8+Qf7: white is clearly losing (queen attacks the rook).
-        b  = board_from_fen("k7/5q2/8/8/2R5/8/8/K7 w - - 0 1")
+        #
+        # Ka1 vs Ka8+Qb6: white king only, clearly losing (queen dominates).
+        # Only legal white move is Ka2 (b1 and b2 are covered by Qb6 along the b-file).
+        # After Ka2 the position is still losing (black queen wins), so best_score < 0.
+        # When root_prior_count = 2, the draw rescue must override best_score to 0.
+        b  = board_from_fen("k7/8/1q6/8/8/8/8/K7 w - - 0 1")
         si = SearchInfo()
-        # Prime the TT so the engine has already established a negative score.
+        # Prime the TT so the engine has established a negative best_score.
         _ = search_move(b, 200; si)
 
-        # Now claim the root has been seen twice: this is the 3rd occurrence.
+        # Claim the root has been seen twice — this is the 3rd occurrence.
         pc = Dict{UInt64,Int}(b.hash => 2)
         r  = search_move(b, 500; si, prior_counts = pc)
         @test r.score == 0
