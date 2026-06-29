@@ -725,37 +725,41 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # castling rights, the WDL result is exact — no need to search further.
     # Probe after the TT (cheaper) but before generating moves (expensive).
     #
-    # For WDL_LOSS / draws: cut off immediately — these are decisive.
-    # For WDL_WIN at internal nodes (depth > 0): do NOT return early.  Every
-    # winning position returns the same flat MATE_SCORE-ply, giving the search
-    # no gradient between "king cornered, mate in 5" and "king in the open, mate
-    # in 40".  Instead we raise alpha above 0 (so the engine can't accept a draw)
-    # and let the search continue so the mopup evaluation can differentiate
-    # winning positions and guide the queen toward actual progress.
-    # At leaf nodes (depth ≤ 0) we do return the TB score so qsearch can use it.
+    # WDL_LOSS / draws: cut off immediately — result is exact.
+    # WDL_WIN: the flat MATE_SCORE-ply score gives every winning position an
+    # identical value, so the search has no gradient to follow and wanders
+    # randomly (K+Q vs K oscillation).  Instead, score wins as a large base
+    # (10_000, safely above any normal eval but well below MATE_SCORE) plus an
+    # inline mopup bonus measuring how cornered the losing king is and how close
+    # our king is — the same two terms used by eval.jl's mopup block.  The TB
+    # still cuts off the search efficiently; the mopup gives it direction.
     if si.config.syzygy && _INITIALIZED[] && b.castling == 0x0
         n_pc = count_bits(all_occ(b))
         if n_pc <= TB_LARGEST[]
             wdl = syzygy_probe_wdl(b)
             if wdl !== nothing
                 si.tb_hits += 1
-                if wdl == WDL_LOSS
+                if wdl == WDL_WIN
+                    their_k     = lsb(bb(b, other(b.side), King))
+                    kf          = file_of(their_k); kr = rank_of(their_k)
+                    corner_dist = min(kf, 7 - kf, kr, 7 - kr)
+                    our_k       = lsb(bb(b, b.side, King))
+                    mopup       = (7 - corner_dist) * 15 +
+                                  (7 - _chebyshev(our_k, their_k)) * 12
+                    tb_score    = 10_000 + mopup   # range 10_000 .. 10_189
+                elseif wdl == WDL_LOSS
                     tb_score = -(MATE_SCORE - ply)
-                    _tt_put!(si.tt, b.hash, depth, tb_score, TT_UPPER, NULL_MOVE)
-                    return tb_score
-                elseif wdl == WDL_DRAW || wdl == WDL_CURSED_WIN || wdl == WDL_BLESSED_LOSS
-                    tb_score = wdl == WDL_CURSED_WIN ? 1 : wdl == WDL_BLESSED_LOSS ? -1 : 0
-                    flag = tb_score >= beta ? TT_LOWER : tb_score <= alpha ? TT_UPPER : TT_EXACT
-                    _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
-                    return tb_score
+                elseif wdl == WDL_CURSED_WIN
+                    tb_score = 1
+                elseif wdl == WDL_BLESSED_LOSS
+                    tb_score = -1
                 else
-                    # WDL_WIN: let mopup eval guide the search at internal nodes.
-                    # Clamp alpha so the engine rejects draws and sub-optimal lines.
-                    alpha = max(alpha, 1)
-                    alpha >= beta && return alpha
-                    # At leaves, return the TB score so qsearch terminates correctly.
-                    depth <= 0 && return MATE_SCORE - ply
+                    tb_score = 0
                 end
+                flag = tb_score >= beta  ? TT_LOWER :
+                       tb_score <= alpha ? TT_UPPER : TT_EXACT
+                _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
+                return tb_score
             end
         end
     end
