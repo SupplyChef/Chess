@@ -727,16 +727,12 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # castling rights, the WDL result is exact — no need to search further.
     # Probe after the TT (cheaper) but before generating moves (expensive).
     #
+    # WDL_WIN: raise alpha above 0 so the engine never accepts a draw, then fall
+    # through to normal search so the full eval (mopup, king tropism, etc.) scores
+    # the leaves and provides a real gradient toward checkmate.  We do NOT probe
+    # child positions — normal move ordering and alpha-beta handle the rest without
+    # the ~20-30 extra TB probes per node that caused time overruns.
     # WDL_LOSS / draws: cut off immediately — result is exact.
-    # WDL_WIN: do NOT return a flat score.  Every winning TB position would
-    # score MATE_SCORE-ply — identical — so the search has no gradient and
-    # wanders randomly (K+Q vs K oscillation).  Instead we let the search
-    # continue normally so the full evaluation (mopup, king tropism, etc.)
-    # differentiates between winning positions at the leaves.  We set
-    # tb_win_node=true so the move loop below can prune any child move that
-    # would throw the win away (child is not WDL_LOSS from the opponent's
-    # perspective).  alpha is raised above 0 so the engine never accepts a draw.
-    tb_win_node = false
     if si.config.syzygy && _INITIALIZED[] && b.castling == 0x0
         n_pc = count_bits(all_occ(b))
         if n_pc <= TB_LARGEST[]
@@ -744,10 +740,9 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             if wdl !== nothing
                 si.tb_hits += 1
                 if wdl == WDL_WIN
-                    tb_win_node = true
                     alpha = max(alpha, 1)
                     alpha >= beta && return alpha
-                    # fall through — let normal search + eval run
+                    # fall through — full eval + normal search runs
                 else
                     tb_score = wdl == WDL_LOSS         ? -(MATE_SCORE - ply) :
                                wdl == WDL_CURSED_WIN   ?  1 :
@@ -913,16 +908,6 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                 else
                     _path_push!(si, b.hash)
                     undo = make_move!(b, m)
-                    # TB win filter: skip moves that throw away a won position.
-                    # After making the move the opponent is to move; WDL_LOSS
-                    # from their perspective means we are still winning.
-                    if tb_win_node && cfg.syzygy && _INITIALIZED[] &&
-                       b.castling == 0x0 && count_bits(all_occ(b)) <= TB_LARGEST[]
-                        cw = syzygy_probe_wdl(b)
-                        if cw !== nothing && cw != WDL_LOSS
-                            unmake_move!(b, m, undo); _path_pop!(si); break
-                        end
-                    end
                     gives_check = king_in_check(b, b.side)
                     extension = (cfg.check_extensions && gives_check && ply < MAX_PLY) ? 1 : sing_ext
 
@@ -992,14 +977,6 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         end
         _path_push!(si, b.hash)
         undo        = make_move!(b, m)
-        # TB win filter: skip moves that throw away a won position.
-        if tb_win_node && cfg.syzygy && _INITIALIZED[] &&
-           b.castling == 0x0 && count_bits(all_occ(b)) <= TB_LARGEST[]
-            cw = syzygy_probe_wdl(b)
-            if cw !== nothing && cw != WDL_LOSS
-                unmake_move!(b, m, undo); _path_pop!(si); continue
-            end
-        end
         gives_check = king_in_check(b, b.side)
 
         # ── Extensions and Late Move Reductions ──────────────────────────────
