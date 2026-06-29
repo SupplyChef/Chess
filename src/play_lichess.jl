@@ -271,7 +271,7 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
     n_moves = length(moves_played)
     if 4 <= n_moves <= 8 && !get(OPENING_POSTED, game_id, false)
         uci_list = move_to_uci.(moves_played)
-        opening  = _opening_name(uci_list)
+        opening  = Chess._opening_name(uci_list)
         if !isempty(opening)
             @async post_chat(game_id, "Opening: $opening"; room = "player")
             @async post_chat(game_id, "Opening: $opening"; room = "spectator")
