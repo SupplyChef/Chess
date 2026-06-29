@@ -63,18 +63,29 @@ end
     @test (sq(0,0) ⊻ 0x38) == sq(0,7)   # a1→a8 (flip rank)
 end
 
-@testset "Syzygy — enc_type from filename" begin
-    @test _enc_type_from_name("KRvK")   == 0   # j=3 → enc_type=0
-    @test _enc_type_from_name("KQvK")   == 0
-    @test _enc_type_from_name("KNvK")   == 0
-    @test _enc_type_from_name("KBvK")   == 0
-    @test _enc_type_from_name("KvK")    == 2   # j=2 → enc_type=2
-    @test _enc_type_from_name("KNNvK")  == 2   # N appears twice → j=2
-    @test _enc_type_from_name("KRRvK")  == 2
-    @test _enc_type_from_name("KBBvK")  == 2
-    @test _enc_type_from_name("KRBvK")  == 0   # K,R,B,K each once → j=4
-    @test _enc_type_from_name("KQvKR")  == 0   # all four once → j=4
-    @test _enc_type_from_name("KQvKQ")  == 0   # Q appears on both sides once each → j=4
+@testset "Syzygy — enc_type detection from piece codes (Bug 2 regression)" begin
+    # Piece codes: bits 0-2 = piece kind (King=6, Queen=5, Rook=4, Bishop=3, Knight=2, Pawn=1)
+    #              bit  3   = color (0=white, 1=black → 8 added)
+    # KRvK: [wK=6, wR=4, bK=14]  — no consecutive equal → KK encoding (enc_type=2)
+    @test _detect_enc_type([6, 4, 14]) == 2
+    # KQvK: [wK=6, wQ=5, bK=14]  — no consecutive equal → KK encoding
+    @test _detect_enc_type([6, 5, 14]) == 2
+    # KBvK / KNvK — same shape
+    @test _detect_enc_type([6, 3, 14]) == 2   # KBvK
+    @test _detect_enc_type([6, 2, 14]) == 2   # KNvK
+
+    # KNNvK: [wK=6, wN=2, wN=2, bK=14] — positions 2 & 3 are equal → 3-leader (enc_type=0)
+    @test _detect_enc_type([6, 2, 2, 14]) == 0
+    # KRRvK, KBBvK, KQQvK — same pattern: two identical pieces in a row
+    @test _detect_enc_type([6, 4, 4, 14]) == 0   # KRRvK
+    @test _detect_enc_type([6, 3, 3, 14]) == 0   # KBBvK
+    @test _detect_enc_type([6, 5, 5, 14]) == 0   # KQQvK
+
+    # KRBvK: [wK=6, wR=4, wB=3, bK=14] — all distinct → KK encoding
+    @test _detect_enc_type([6, 4, 3, 14]) == 2
+
+    # Edge: two-piece array (KvK) — no consecutive-equal check runs → KK
+    @test _detect_enc_type([6, 14]) == 2
 end
 
 @testset "Syzygy — material key" begin

@@ -376,11 +376,26 @@ function _setup_pieces_piece!(t::WdlTable, data::Vector{UInt8}, p_data::Int)
     end
 end
 
+# Determine enc_type from the bside=0 piece-code array read from the file.
+# Two identical adjacent codes (e.g. two knights) means 3-leader encoding (enc_type=0);
+# otherwise we use KK king-pair encoding (enc_type=2).
+function _detect_enc_type(pcs0::Vector{Int})::Int
+    for s in 2:length(pcs0)
+        pcs0[s] == pcs0[s-1] && return 0
+    end
+    return 2
+end
+
 function _init_wdl_table!(t::WdlTable)
     data = t.data
     size = zeros(Int64, 6)
 
     data_ptr = 5
+
+    # Override enc_type from actual file data rather than the filename heuristic.
+    pcs0 = [Int(_r8(data, data_ptr + i + 1)) & 0x0f for i in 0:t.num-1]
+    t.enc_type = _detect_enc_type(pcs0)
+
     _setup_pieces_piece!(t, data, data_ptr)
     data_ptr += t.num + 1
     data_ptr += (data_ptr & 1)
