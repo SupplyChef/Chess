@@ -724,34 +724,28 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
 
     # ── Tablebase probe ────────────────────────────────────────────────────────
     # If Syzygy tables are loaded and this is a ≤N-piece position with no
-    # castling rights, the WDL result is exact — no need to search further.
-    # Probe after the TT (cheaper) but before generating moves (expensive).
-    #
-    # WDL_WIN: raise alpha above 0 so the engine never accepts a draw, then fall
-    # through to normal search so the full eval (mopup, king tropism, etc.) scores
-    # the leaves and provides a real gradient toward checkmate.  We do NOT probe
-    # child positions — normal move ordering and alpha-beta handle the rest without
-    # the ~20-30 extra TB probes per node that caused time overruns.
-    # WDL_LOSS / draws: cut off immediately — result is exact.
+    # castling rights, the WDL result is exact — return immediately with an
+    # eval-based score that preserves a real gradient:
+    #   WDL_WIN          → max(1, eval)   — winning, but prefer positions closer to mate
+    #   WDL_LOSS         → min(-1, eval)  — losing, but prefer positions that resist longer
+    #   WDL_CURSED_WIN   → +1             — technically winning but 50-move rule: treat as draw-ish
+    #   WDL_BLESSED_LOSS → -1             — technically losing but 50-move rule: treat as draw-ish
+    #   WDL_DRAW         → 0
     if si.config.syzygy && _INITIALIZED[] && b.castling == 0x0
         n_pc = count_bits(all_occ(b))
         if n_pc <= TB_LARGEST[]
             wdl = syzygy_probe_wdl(b)
             if wdl !== nothing
                 si.tb_hits += 1
-                if wdl == WDL_WIN
-                    alpha = max(alpha, 1)
-                    alpha >= beta && return alpha
-                    # fall through — full eval + normal search runs
-                else
-                    tb_score = wdl == WDL_LOSS         ? -(MATE_SCORE - ply) :
-                               wdl == WDL_CURSED_WIN   ?  1 :
-                               wdl == WDL_BLESSED_LOSS ? -1 : 0
-                    flag = tb_score >= beta  ? TT_LOWER :
-                           tb_score <= alpha ? TT_UPPER : TT_EXACT
-                    _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
-                    return tb_score
-                end
+                ev = evaluate(b, si.config)
+                tb_score = wdl == WDL_WIN          ? max(1, ev)  :
+                           wdl == WDL_LOSS         ? min(-1, ev) :
+                           wdl == WDL_CURSED_WIN   ?  1          :
+                           wdl == WDL_BLESSED_LOSS ? -1          : 0
+                flag = tb_score >= beta  ? TT_LOWER :
+                       tb_score <= alpha ? TT_UPPER : TT_EXACT
+                _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
+                return tb_score
             end
         end
     end
