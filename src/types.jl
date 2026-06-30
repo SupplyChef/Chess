@@ -64,6 +64,8 @@ const MF_PRCAP_Q  = 0xF
 struct Move
     data::UInt32
 end
+Base.:(==)(a::Move, b::Move) = a.data === b.data
+Base.hash(m::Move, h::UInt) = hash(m.data, h)
 
 const NULL_MOVE = Move(0xFFFFFFFF)
 
@@ -112,7 +114,7 @@ end
 #   the hash of the position after a move is a handful of XOR operations.
 #   This is what makes TT probes O(1) — no full rehash after every move.
 mutable struct Board
-    bb        ::Matrix{BB}      # [color+1, kind] — 2×7; column 1 (NoPiece) unused
+    bb        ::Vector{BB}      # flat [Int(color) + 2*Int(kind) + 1]; length 14
     occ       ::Vector{BB}      # [color+1] — union of all pieces of that color
     piece_on  ::Vector{Piece}   # [sq+1] — fast O(1) lookup of piece on a square
     side      ::Color
@@ -131,7 +133,7 @@ mutable struct Board
 
     function Board()
         new(
-            zeros(BB, 2, 7),
+            zeros(BB, 14),
             zeros(BB, 2),
             fill(NO_PIECE, 64),
             White,
@@ -151,8 +153,9 @@ end
 
 @inline all_occ(b::Board) = @inbounds b.occ[1] | b.occ[2]
 
-@inline bb(b::Board, c::Color, k::PieceKind) = @inbounds b.bb[Int(c)+1, Int(k)+1]
-@inline set_bb!(b::Board, c::Color, k::PieceKind, v::BB) = (@inbounds b.bb[Int(c)+1, Int(k)+1] = v)
+@inline _bb_idx(c::Color, k::PieceKind) = Int(c) + 2*Int(k) + 1
+@inline bb(b::Board, c::Color, k::PieceKind) = @inbounds b.bb[_bb_idx(c, k)]
+@inline set_bb!(b::Board, c::Color, k::PieceKind, v::BB) = (@inbounds b.bb[_bb_idx(c, k)] = v)
 
 # ── Castling right constants ────────────────────────────────────────────────────
 const CR_WK = 0x1

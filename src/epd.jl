@@ -238,7 +238,7 @@ function run_epd_suite(epd_file::String;
     for (idx, entry) in enumerate(entries)
         b = board_from_fen(entry.fen)
         # Reset per-position state; TT is intentionally kept warm.
-        empty!(si.path); empty!(si.path_counts)
+        si.path_ptr = 0
         fill!(si.killers, NULL_MOVE)
         si.prior_counts = Dict{UInt64,Int}()
 

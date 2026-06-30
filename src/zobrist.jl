@@ -25,9 +25,9 @@ function _init_zobrist!()
 end
 
 @inline zob_piece(c::Color, k::PieceKind, s::Square)::UInt64 =
-    ZOBRIST_PIECE[Int(c)+1, Int(k)+1, s+1]
+    @inbounds ZOBRIST_PIECE[Int(c)+1, Int(k)+1, s+1]
 
-@inline zob_ep(s::Square)::UInt64 = ZOBRIST_EP[file_of(s)+1]
+@inline zob_ep(s::Square)::UInt64 = @inbounds ZOBRIST_EP[file_of(s)+1]
 
 function compute_hash(b::Board)::UInt64
     h = UInt64(0)

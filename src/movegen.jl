@@ -135,8 +135,8 @@ end
 
 @inline function _remove_piece!(b::Board, c::Color, k::PieceKind, s::Square)
     mask = sq_bb(s)
-    @inbounds b.bb[Int(c)+1, Int(k)+1] &= ~mask
-    @inbounds b.occ[Int(c)+1]          &= ~mask
+    @inbounds b.bb[Int(c) + 2*Int(k) + 1] &= ~mask
+    @inbounds b.occ[Int(c)+1]             &= ~mask
     @inbounds b.piece_on[s+1]           = NO_PIECE
 
     # Incremental eval
@@ -153,13 +153,13 @@ end
         b.eg_score += eg
         b.material += v
     end
-    b.phase -= PHASE_TABLE[Int(k)+1]
+    @inbounds b.phase -= PHASE_TABLE[Int(k)+1]
 end
 
 @inline function _add_piece!(b::Board, c::Color, k::PieceKind, s::Square)
     mask = sq_bb(s)
-    @inbounds b.bb[Int(c)+1, Int(k)+1] |= mask
-    @inbounds b.occ[Int(c)+1]          |= mask
+    @inbounds b.bb[Int(c) + 2*Int(k) + 1] |= mask
+    @inbounds b.occ[Int(c)+1]             |= mask
     @inbounds b.piece_on[s+1]           = Piece(c, k)
 
     # Incremental eval
@@ -176,7 +176,7 @@ end
         b.eg_score -= eg
         b.material -= v
     end
-    b.phase += PHASE_TABLE[Int(k)+1]
+    @inbounds b.phase += PHASE_TABLE[Int(k)+1]
 end
 
 # Castling-right loss mask per square: ANDed into b.castling after each move.
