@@ -325,16 +325,15 @@ mutable struct SearchInfo
     time_start  ::Float64
     time_limit  ::Float64
     # Draw detection state:
-    #   path         — Zobrist hashes on the current search path (root → parent).
-    #                  Maintained via _path_push!/_path_pop! which keep path_counts
-    #                  in sync; do not push/pop si.path directly.
-    #   path_counts  — hash → count map for O(1) repetition detection; mirrors path.
-    #   prior_counts — position counts from the GAME before the search started,
-    #                  supplied by the caller (play_lichess tracks these).  A
-    #                  position with count 2 is already in its second occurrence;
-    #                  one more repeat makes it a draw.
+    #   path / path_ptr — Zobrist hashes on the current search path (root → parent),
+    #                     stored as a pre-allocated fixed-size array with a stack pointer.
+    #                     Maintained via _path_push!/_path_pop!.
+    #   prior_counts    — position counts from the GAME before the search started,
+    #                     supplied by the caller (play_lichess tracks these).  A
+    #                     position with count 2 is already in its second occurrence;
+    #                     one more repeat makes it a draw.
     path         ::Vector{UInt64}
-    path_counts  ::Dict{UInt64,Int}
+    path_ptr     ::Int
     prior_counts ::Dict{UInt64,Int}
     config       ::EngineConfig
     # Cached count of how many times the root position appeared in the game
@@ -367,8 +366,8 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
         false,
         0.0,
         0.0,
-        UInt64[],
-        Dict{UInt64,Int}(),
+        zeros(UInt64, MOVE_STACK_SIZE),
+        0,
         Dict{UInt64,Int}(),
         cfg,
         0,
@@ -377,21 +376,13 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
 end
 
 # ── Path stack helpers ────────────────────────────────────────────────────────
-# path_counts mirrors the path vector as a hash→count map so the repetition
-# check in _negamax is O(1) rather than an O(depth) linear scan.
 @inline function _path_push!(si::SearchInfo, hash::UInt64)
-    push!(si.path, hash)
-    si.path_counts[hash] = get(si.path_counts, hash, 0) + 1
+    si.path_ptr += 1
+    @inbounds si.path[si.path_ptr] = hash
 end
 
 @inline function _path_pop!(si::SearchInfo)
-    h = pop!(si.path)
-    cnt = si.path_counts[h] - 1
-    if cnt == 0
-        delete!(si.path_counts, h)
-    else
-        si.path_counts[h] = cnt
-    end
+    si.path_ptr -= 1
 end
 
 # ── Engine banner ─────────────────────────────────────────────────────────────
@@ -667,7 +658,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     _is_insufficient_material(b) && return 0
 
     # Repetition detection: sum occurrences in the game (prior_counts) and on the
-    # current search path (path_counts — O(1) Dict lookup).  reps >= 2 means this
+    # current search path (linear scan of si.path, bounded by search depth).  reps >= 2 means this
     # position has been seen at least twice before; one more visit creates a 3-fold
     # repetition draw.  We require >= 2 (not >= 1) so the engine cannot manufacture
     # a fake draw by replaying its own last move: prior_counts=1 means the position
@@ -675,7 +666,11 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # (moves that scored +300 and would prune siblings now score 0 and don't).
     # prior_counts is reset after every irreversible move so only genuinely
     # repeatable positions are counted.
-    let reps = get(si.prior_counts, b.hash, 0) + get(si.path_counts, b.hash, 0)
+    let reps = get(si.prior_counts, b.hash, 0)
+        @inbounds for i in 1:si.path_ptr
+            si.path[i] == b.hash && (reps += 1)
+            reps >= 2 && break
+        end
         reps >= 2 && return 0
     end
 
@@ -1009,7 +1004,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         # Capped at depth-2 so the reduced search is always at least depth 1.
         reduction = 0
         if cfg.lmr && depth >= 3 && i > 2 && !is_capture && !is_promo && !gives_check && !in_check
-            reduction = min(LMR_TABLE[min(depth,64), min(i,256)], depth - 2)
+            reduction = min(@inbounds(LMR_TABLE[min(depth,64), min(i,256)]), depth - 2)
             # When already significantly behind, search harder — critical quiet moves
             # (e.g. discovered attacks) are likely ordered late and would otherwise
             # be reduced too much, causing large evaluation swings.
@@ -1255,8 +1250,7 @@ function search_move(b::Board, time_ms::Int;
     si.time_limit   = si.time_start + time_ms / 1000.0
     si.prior_counts      = prior_counts
     si.root_prior_count  = get(prior_counts, b.hash, 0)
-    empty!(si.path)
-    empty!(si.path_counts)
+    si.path_ptr = 0
     fill!(si.killers, NULL_MOVE)
     # Age history at move start (÷2 only — ÷8 was too aggressive and discarded
     # useful ordering signal built up during the engine's own search).
