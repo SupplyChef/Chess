@@ -1421,6 +1421,30 @@ function search_move(b::Board, time_ms::Int;
     # longer matches the selected move and we accept a potentially shorter line.
     pv = best_move == id_best_move ? best_pv : _extract_pv(b, si.tt, best_move, 10)
 
+    # SEE sanity check at the root: if the search selected a move that clearly loses
+    # material on exchange (SEE < -100cp) but the reported score is near zero or
+    # better, the result is almost certainly a TT artifact — a stale entry from a
+    # previous search stored score 0 for a position reached after this move when
+    # Black's pieces were elsewhere, so that entry causes a false TT cutoff in the
+    # current search and makes the move appear safe.  Guard: only trigger when the
+    # move is a capture (quiet moves can legitimately have negative SEE temporarily),
+    # the score is suspiciously high (> −200), and we have an alternative move.
+    if best_move != NULL_MOVE && best_score > -200
+        fl_bm = flags(best_move)
+        if ((fl_bm & MF_CAPTURE) != 0 || fl_bm == MF_EP) && !_see_ge(b, best_move, -100)
+            sort!(completed_roots; by = first, rev = true)
+            for (alt_score, alt_m) in completed_roots
+                if alt_m != best_move
+                    @warn "SEE safety override: $(move_to_uci(best_move)) (score=$best_score, SEE<-100) → $(move_to_uci(alt_m)) (score=$alt_score)"
+                    best_move  = alt_m
+                    best_score = alt_score
+                    pv         = _extract_pv(b, si.tt, best_move, 8)
+                    break
+                end
+            end
+        end
+    end
+
     # Draw rescue: if the search found a losing score but the game history already
     # contains a position that we can reach in one move (prior_counts >= 2 means
     # it has appeared twice before — playing to it now creates the 3rd occurrence
