@@ -752,6 +752,28 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         end
     end
 
+    # ── KPK bitbase probe ──────────────────────────────────────────────────────
+    # Built-in 3-man King+Pawn vs King tablebase, exact and needs no external
+    # files.  Same short-circuit pattern as the Syzygy probe above; skipped if
+    # Syzygy already produced a result (in_tb_win) since that's already exact.
+    if !in_tb_win && si.config.kpk_bitbase
+        wdl = kpk_probe_wdl(b)
+        if wdl !== nothing
+            si.tb_hits += 1
+            if wdl == WDL_WIN
+                alpha = max(alpha, 1)
+                alpha >= beta && return alpha
+                in_tb_win = true
+            else
+                tb_score = wdl == WDL_LOSS ? -(MATE_SCORE - ply) : 0
+                flag = tb_score >= beta  ? TT_LOWER :
+                       tb_score <= alpha ? TT_UPPER : TT_EXACT
+                _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
+                return tb_score
+            end
+        end
+    end
+
     # At horizon: drop into quiescence search rather than returning the static
     # eval, to avoid the "horizon effect" of missing captures on the next move.
     depth <= 0 && return _quiesce(b, alpha, beta, ply, si)

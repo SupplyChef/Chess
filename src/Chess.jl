@@ -22,6 +22,7 @@ include("fen.jl")
 include("movegen.jl")
 include("config.jl")
 include("syzygy.jl")
+include("kpk.jl")
 include("eval.jl")
 include("weights.jl")
 include("tune_eval.jl")
@@ -39,6 +40,7 @@ function __init__()
     _init_zobrist!()
     _init_eval!()
     syzygy_init!()   # no-op and silent if Chess/syzygy/ doesn't exist or is empty
+    _init_kpk!()
 end
 
 export
@@ -94,6 +96,8 @@ export
     TRIANGLE, LOWER, DIAG, KK_IDX, BINOMIAL, PIVFAC,
     _board_key, _recalc_key, _enc_type_from_name, _detect_enc_type,
     _offdiag, _flipdiag, _load_wdl_table, _INITIALIZED,
+    # kpk
+    kpk_probe_wdl, kpk_is_win, kpk_index, KPK_TOTAL,
     # perft
     perft, perft_divide, run_perft_suite, PERFT_SUITE
 

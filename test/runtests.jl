@@ -814,6 +814,132 @@ using Test
         @test r.score == 0
     end
 
+    # ── KPK bitbase ────────────────────────────────────────────────────────────
+    @testset "KPK bitbase" begin
+        @testset "Config flag exists and defaults on" begin
+            @test DEFAULT_CONFIG.kpk_bitbase == true
+            cfg = EngineConfig(kpk_bitbase = false)
+            @test !cfg.kpk_bitbase
+        end
+
+        @testset "Trivial win: defending king far away, pawn escorted home" begin
+            # White Ke7, pawn e6, Black king stuck on a1 — far too distant to
+            # interfere with the promotion, so this must always be a win.
+            wk = sq(4, 6)   # e7
+            bk = sq(0, 0)   # a1
+            ps = sq(4, 5)   # e6
+            @test kpk_is_win(0, wk, bk, ps)
+        end
+
+        @testset "Rook-pawn draw: defending king reaches the corner" begin
+            # Black king already sits on the queening corner with White's king
+            # too far away to dislodge it — classic rook-pawn fortress draw.
+            wk = sq(5, 4)   # f5
+            bk = sq(0, 7)   # a8
+            ps = sq(0, 4)   # a5
+            @test !kpk_is_win(1, wk, bk, ps)
+        end
+
+        @testset "Opposition win: king ahead of own pawn with the move" begin
+            # Kd6 vs Kd8, pawn d5, White to move: White has the opposition and
+            # walks the king to e7/c7 to escort the pawn through — a known win.
+            wk = sq(3, 5)   # d6
+            bk = sq(3, 7)   # d8
+            ps = sq(3, 4)   # d5
+            @test kpk_is_win(0, wk, bk, ps)
+        end
+
+        @testset "Opposition draw: defender has the move and holds the key square" begin
+            # Same kings/pawn but Black to move: Black keeps the opposition
+            # (...Kd7/Ke7 shuffling) and the pawn never escapes — a known draw.
+            wk = sq(3, 5)   # d6
+            bk = sq(3, 7)   # d8
+            ps = sq(3, 4)   # d5
+            @test !kpk_is_win(1, wk, bk, ps)
+        end
+
+        @testset "Central pawn far-advanced win" begin
+            # White Ke6, Black Ke8, pawn e5, White to move: White has the
+            # opposition one square closer to promotion — also a win.
+            wk = sq(4, 5)   # e6
+            bk = sq(4, 7)   # e8
+            ps = sq(4, 4)   # e5
+            @test kpk_is_win(0, wk, bk, ps)
+        end
+
+        @testset "Symmetry: result is invariant under horizontal mirroring" begin
+            # Flipping every square's file (a<->h, b<->g, ...) must preserve the
+            # classification, since the bitbase has no inherent file bias.
+            mirror_file(s) = (rank_of(s)) * 8 + (7 - file_of(s))
+            for (wk, bk, ps) in ((sq(1,4), sq(0,7), sq(0,4)),
+                                 (sq(3,5), sq(3,7), sq(3,4)),
+                                 (sq(4,5), sq(4,7), sq(4,4)))
+                for stm in (0, 1)
+                    a = kpk_is_win(stm, wk, bk, ps)
+                    b2 = kpk_is_win(stm, mirror_file(wk), mirror_file(bk), mirror_file(ps))
+                    @test a == b2
+                end
+            end
+        end
+
+        @testset "kpk_probe_wdl: White-to-move win is WDL_WIN for White" begin
+            b = board_from_fen("4k3/8/4K3/4P3/8/8/8/8 w - - 0 1")
+            @test kpk_probe_wdl(b) == WDL_WIN
+        end
+
+        @testset "kpk_probe_wdl: draw position returns WDL_DRAW" begin
+            b = board_from_fen("k7/8/1K6/P7/8/8/8/8 b - - 0 1")
+            @test kpk_probe_wdl(b) == WDL_DRAW
+        end
+
+        @testset "kpk_probe_wdl: Black holding the pawn mirrors correctly" begin
+            # Mirror image of the White-wins case above, with colors swapped:
+            # Black king e1 vs White king e3, black pawn e4, Black to move — a
+            # win for Black (the side with the pawn) by vertical symmetry.
+            b = board_from_fen("8/8/8/8/4p3/4k3/8/4K3 b - - 0 1")
+            @test kpk_probe_wdl(b) == WDL_WIN
+        end
+
+        @testset "kpk_probe_wdl: non-KPK material returns nothing" begin
+            @test kpk_probe_wdl(board_from_fen(STARTPOS)) === nothing
+            # 3-man but no pawn (KNK) must not be probed.
+            b = board_from_fen("4k3/8/4K3/8/8/8/3N4/8 w - - 0 1")
+            @test kpk_probe_wdl(b) === nothing
+            # Two pawns is outside the KPK table.
+            b2 = board_from_fen("4k3/8/4K3/4P3/4P3/8/8/8 w - - 0 1")
+            @test kpk_probe_wdl(b2) === nothing
+        end
+
+        @testset "Search converts a won KPK endgame" begin
+            # White king e6 vs Black king e8 with a White pawn on e5, White to
+            # move: White holds the opposition with the pawn on the 5th rank,
+            # a textbook win (the king reaches d7/e7/f7 and escorts the pawn).
+            b  = board_from_fen("4k3/8/4K3/4P3/8/8/8/8 w - - 0 1")
+            si = SearchInfo()
+            r  = search_move(b, 1000; si)
+            @test r.score > 300
+            @test si.tb_hits > 0
+        end
+
+        @testset "Search holds a drawn KPK endgame" begin
+            # Classic rook-pawn fortress: Black king on a8 corner can't be
+            # dislodged, so the engine (to move as Black) must score it as a draw.
+            b  = board_from_fen("k7/8/1K6/P7/8/8/8/8 b - - 0 1")
+            si = SearchInfo()
+            r  = search_move(b, 1000; si)
+            @test abs(r.score) < 50
+            @test si.tb_hits > 0
+        end
+
+        @testset "Feature flag disables KPK short-circuit (no tb_hits)" begin
+            b   = board_from_fen("4k3/8/4K3/4P3/8/8/8/8 w - - 0 1")
+            cfg = EngineConfig(kpk_bitbase = false, syzygy = false)
+            si  = SearchInfo(cfg)
+            _   = search_move(b, 600; si)
+            @test si.tb_hits == 0
+        end
+    end
+
     include("syzygy_test.jl")
 
 end
