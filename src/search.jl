@@ -352,6 +352,14 @@ mutable struct SearchInfo
     tt_hits            ::Int64
     tt_cutoffs         ::Int64
     tb_hits            ::Int64
+    # Rep-draw taint flag: set by _negamax when it returns 0 via the reps>=2 branch,
+    # and propagated upward by each node that uses a rep-tainted score as its best.
+    # Callers reset this to false before each recursive call and read it after to
+    # determine whether the child's returned score came from a path-dependent
+    # repetition draw.  Tainted scores must not be written to the TT because a
+    # different path to the same position would not have the same repetition context,
+    # turning a legitimate draw-by-rep score into a false 0 for a winning/losing node.
+    rep_draw_flag::Bool
 end
 
 function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
@@ -372,6 +380,7 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
         cfg,
         0,
         Int64(0), Int64(0), Int64(0), Int64(0), Int64(0), Int64(0),
+        false,
     )
 end
 
@@ -627,6 +636,7 @@ function _negamax_excl(b::Board, depth::Int, alpha::Int, beta::Int,
         m == excl_move && continue
         _path_push!(si, b.hash)
         undo  = make_move!(b, m)
+        si.rep_draw_flag = false
         score = -_negamax(b, depth - 1, -beta, -alpha, ply + 1, si, false, m)
         unmake_move!(b, m, undo)
         _path_pop!(si)
@@ -634,6 +644,7 @@ function _negamax_excl(b::Board, depth::Int, alpha::Int, beta::Int,
         score >= beta && return score
         best = max(best, score)
     end
+    si.rep_draw_flag = false   # don't leak rep state out of the exclusion search
     best
 end
 
@@ -671,7 +682,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             si.path[i] == b.hash && (reps += 1)
             reps >= 2 && break
         end
-        reps >= 2 && return 0
+        reps >= 2 && (si.rep_draw_flag = true; return 0)
     end
 
     # TT probe: if we have previously searched this position at sufficient depth,
@@ -800,6 +811,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             b.hash     ⊻= zob_ep(ep_save)
             b.ep_square = -1
         end
+        si.rep_draw_flag = false
         null_score = -_negamax(b, depth - R - 1, -beta, -beta + 1, ply + 1, si, true, NULL_MOVE)
         b.side = other(b.side)
         b.hash ⊻= ZOBRIST_SIDE[]
@@ -826,6 +838,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             mc  = ml_pc.moves[k]
             _path_push!(si, b.hash)
             undo_pc = make_move!(b, mc)
+            si.rep_draw_flag = false
             pc_score = -_negamax(b, pc_depth, -pc_beta, -pc_beta + 1, ply + 1, si, false, mc)
             unmake_move!(b, mc, undo_pc)
             _path_pop!(si)
@@ -876,9 +889,14 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         return in_check ? -(MATE_SCORE - ply) : 0
     end
 
-    orig_alpha = alpha
-    best_score = -(MATE_SCORE + 1)
-    best_move  = NULL_MOVE
+    orig_alpha  = alpha
+    best_score  = -(MATE_SCORE + 1)
+    best_move   = NULL_MOVE
+    # Track whether best_score came from a child whose score was rep-draw-tainted.
+    # A rep-draw return is path-dependent; storing that score in the TT is invalid
+    # because a transposition to the same position via a different path would not
+    # have the same repetition context.
+    best_is_rep = false
 
     # PVS state: true once one move has been searched with the full window.
     # All later moves get a null-window scout search first (see loop below).
@@ -918,7 +936,9 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                     extension = (cfg.check_extensions && gives_check && ply < MAX_PLY) ? 1 : sing_ext
 
                     # Hash move is never reduced (i=1)
+                    si.rep_draw_flag = false
                     score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false, m)
+                    child_rep = si.rep_draw_flag
                     pv_searched = true
 
                     unmake_move!(b, m, undo)
@@ -927,8 +947,9 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                     if si.stop; return 0; end
 
                     if score > best_score
-                        best_score = score
-                        best_move  = m
+                        best_score  = score
+                        best_move   = m
+                        best_is_rep = child_rep && score == 0
                         if score > alpha
                             alpha = score
                             if alpha >= beta
@@ -936,13 +957,19 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                                 si.first_move_cutoffs += 1  # hash move is always first tried
                                 # Write to TT before returning so _extract_pv can
                                 # follow the PV through this cut node.
-                                store_score = best_score
-                                if best_score > MATE_SCORE - MOVE_STACK_SIZE
-                                    store_score = best_score + ply
-                                elseif best_score < -(MATE_SCORE - MOVE_STACK_SIZE)
-                                    store_score = best_score - ply
+                                # Skip the write when the score is rep-tainted: the
+                                # 0 is only valid for the current search path and
+                                # would mislead future transpositions.
+                                if !best_is_rep
+                                    store_score = best_score
+                                    if best_score > MATE_SCORE - MOVE_STACK_SIZE
+                                        store_score = best_score + ply
+                                    elseif best_score < -(MATE_SCORE - MOVE_STACK_SIZE)
+                                        store_score = best_score - ply
+                                    end
+                                    _tt_put!(si.tt, b.hash, depth, store_score, TT_LOWER, best_move)
                                 end
-                                _tt_put!(si.tt, b.hash, depth, store_score, TT_LOWER, best_move)
+                                si.rep_draw_flag = best_is_rep
                                 return best_score
                             end
                         end
@@ -1022,22 +1049,29 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         #   3. if it still beats α inside an open window (α+1 < β), re-search
         #      with the full window to obtain the exact score.  When β = α+1
         #      already (we are inside someone else's scout), step 3 is a no-op.
+        # Reset rep flag before each search leg; take the OR so a rep in any
+        # re-search leg is noticed.
+        si.rep_draw_flag = false
         if !cfg.pvs || !pv_searched
             score = -_negamax(b, depth - 1 + extension - reduction, -beta, -alpha, ply + 1, si, false, m)
             # Re-search at full depth if the reduced search beat alpha.
             if reduction > 0 && score > alpha && !si.stop
+                si.rep_draw_flag = false
                 score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false, m)
             end
             pv_searched = true
         else
             score = -_negamax(b, depth - 1 + extension - reduction, -(alpha + 1), -alpha, ply + 1, si, false, m)
             if reduction > 0 && score > alpha && !si.stop
+                si.rep_draw_flag = false
                 score = -_negamax(b, depth - 1 + extension, -(alpha + 1), -alpha, ply + 1, si, false, m)
             end
             if score > alpha && score < beta && !si.stop
+                si.rep_draw_flag = false
                 score = -_negamax(b, depth - 1 + extension, -beta, -alpha, ply + 1, si, false, m)
             end
         end
+        child_rep = si.rep_draw_flag
 
         unmake_move!(b, m, undo)
         _path_pop!(si)
@@ -1045,8 +1079,9 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         si.stop && break
 
         if score > best_score
-            best_score = score
-            best_move  = m
+            best_score  = score
+            best_move   = m
+            best_is_rep = child_rep && score == 0
             if score > alpha
                 alpha = score
                 if alpha >= beta
@@ -1067,7 +1102,18 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                             end
                         end
                     end
-                    break
+                    # Skip TT write when score is rep-tainted (path-dependent).
+                    if !best_is_rep
+                        store_score = best_score
+                        if best_score > MATE_SCORE - MOVE_STACK_SIZE
+                            store_score = best_score + ply
+                        elseif best_score < -(MATE_SCORE - MOVE_STACK_SIZE)
+                            store_score = best_score - ply
+                        end
+                        _tt_put!(si.tt, b.hash, depth, store_score, TT_LOWER, best_move)
+                    end
+                    si.rep_draw_flag = best_is_rep
+                    return best_score
                 end
             end
         end
@@ -1077,7 +1123,9 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     #   best_score >= beta  → lower bound (we stopped early; true score could be higher)
     #   best_score > orig_alpha → exact (alpha was raised; this IS the minimax value)
     #   otherwise           → upper bound (no move improved alpha; true score ≤ best_score)
-    if !si.stop
+    # Skip when best_score is rep-tainted: the 0 only holds for this specific
+    # search path and storing it would mislead transpositions via a different path.
+    if !si.stop && !best_is_rep
         flag = best_score >= beta      ? TT_LOWER :
                best_score > orig_alpha ? TT_EXACT : TT_UPPER
         # Ply-normalize mate scores before storing so the value is node-relative
@@ -1091,6 +1139,10 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         end
         _tt_put!(si.tt, b.hash, depth, store_score, flag, best_move)
     end
+
+    # Propagate rep-draw taint to our caller so it can decide whether to cache
+    # its own score in the TT.
+    si.rep_draw_flag = best_is_rep
 
     best_score
 end
@@ -1161,9 +1213,10 @@ end
 # ── Root search (tracks best move + all root scores) ──────────────────────────
 function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
                       si::SearchInfo)::Tuple{Int,Move}
-    best_score = -MATE_SCORE
-    best_move  = NULL_MOVE
-    orig_alpha = alpha   # needed to distinguish exact from upper-bound results
+    best_score  = -MATE_SCORE
+    best_move   = NULL_MOVE
+    best_is_rep = false
+    orig_alpha  = alpha   # needed to distinguish exact from upper-bound results
 
     tte       = _tt_get(si.tt, b.hash)
     hash_move = tte.key == b.hash ? tte.move : NULL_MOVE
@@ -1182,22 +1235,29 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
         undo  = make_move!(b, m)
         # PVS at the root: first move full window, later moves scouted with a
         # null window and re-searched only when the scout beats alpha.
+        si.rep_draw_flag = false
         if i == 1 || !si.config.pvs
             score = -_negamax(b, depth - 1, -beta, -alpha, 2, si, false)
         else
             score = -_negamax(b, depth - 1, -(alpha + 1), -alpha, 2, si, false)
             if score > alpha && score < beta && !si.stop
+                si.rep_draw_flag = false
                 score = -_negamax(b, depth - 1, -beta, -alpha, 2, si, false)
             end
         end
+        child_rep = si.rep_draw_flag
         unmake_move!(b, m, undo)
         _path_pop!(si)
 
         si.stop && break
 
-        if score > best_score
-            best_score = score
-            best_move  = m
+        this_is_rep = child_rep && score == 0
+        # Prefer a non-rep-tainted result even at equal score, so a genuine draw
+        # is chosen over a move whose 0 score comes from a repetition in the subtree.
+        if score > best_score || (score == best_score && best_is_rep && !this_is_rep)
+            best_score  = score
+            best_move   = m
+            best_is_rep = this_is_rep
             alpha = max(alpha, score)
             push!(si.root_moves, (score, m))
         end
@@ -1208,9 +1268,11 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
     #   fail-high (best_score >= beta):  TT_LOWER  — true score ≥ best_score
     #   inside window (> orig_alpha):    TT_EXACT  — this IS the minimax value
     #   fail-low (never beat orig_alpha): TT_UPPER — true score ≤ best_score
-    flag = best_score >= beta      ? TT_LOWER :
-           best_score > orig_alpha ? TT_EXACT : TT_UPPER
-    _tt_put!(si.tt, b.hash, depth, best_score, flag, best_move)
+    if !best_is_rep
+        flag = best_score >= beta      ? TT_LOWER :
+               best_score > orig_alpha ? TT_EXACT : TT_UPPER
+        _tt_put!(si.tt, b.hash, depth, best_score, flag, best_move)
+    end
     (best_score, best_move)
 end
 
