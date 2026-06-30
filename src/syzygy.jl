@@ -450,7 +450,7 @@ function _collect_squares(b::Board, pieces::Vector{Int},
         for sq in BitIter(sq_bb)
             i += 1
             i > n && return nothing   # more pieces on board than table expects
-            pos[i] = sq ⊻ mirror
+            pos[i] = sq
         end
     end
     pos
@@ -682,7 +682,9 @@ function _probe_wdl_table(t::WdlTable, b::Board)::Union{Int,Nothing}
         bside = b.side == White ? 0 : 1
     end
 
-    pos = _collect_squares(b, t.pieces[bside+1], cmirror, mirror)
+    # Non-pawn tables: squares are NOT mirrored (only cmirror flips piece color).
+    # Pawn tables would need `mirror` here, but WDL tables are always non-pawn.
+    pos = _collect_squares(b, t.pieces[bside+1], cmirror, 0)
     pos === nothing && return nothing
     idx = _encode_piece(t, bside, pos)
     idx < 0 && return nothing

@@ -174,10 +174,49 @@ const SYZYGY_PATH = get(ENV, "SYZYGY_PATH", "")
         @test r_w == WDL_WIN
         @test r_b == WDL_LOSS
 
+        # ── Asymmetric table: probe from the weaker-side perspective ─────────────
+        # This exercises the key != t.key path (cmirror=8, mirror=56, bside flipped).
+        # The bug: _collect_squares was incorrectly XORing squares with mirror=56,
+        # producing wrong indices and therefore wrong WDL values for this code path.
+        #
+        # KRvK asymmetric: both table key ("KRvK") and board key match, so White
+        # (rook side, winning) goes through key==t.key path.  To hit key!=t.key we
+        # need a position where Black holds the stronger material.
+        #
+        # KvKR: board key = "KvKR", table key = "KRvK", mirrored key = "KvKR".
+        # Black has the rook and wins; White (no rook) loses.
+        b_asym_w = board_from_fen("8/8/8/8/8/8/8/k6R w - - 0 1")   # WK a1, BR h1 — White to move, white loses
+        b_asym_b = board_from_fen("8/8/8/8/8/8/8/k6R b - - 0 1")   # same, Black to move, black wins
+        @test syzygy_probe_wdl(b_asym_w) == WDL_LOSS   # white has no rook → loses
+        @test syzygy_probe_wdl(b_asym_b) == WDL_WIN    # black has rook → wins
+
+        # Probe the same asymmetric position from multiple square layouts to ensure
+        # the index computation is not sensitive to the rank at which pieces sit
+        # (regression for the sq ⊻ mirror bug).
+        for fen in [
+            "8/8/8/8/8/8/8/k6R w - - 0 1",   # pieces on rank 1
+            "8/k6R/8/8/8/8/8/8 w - - 0 1",   # pieces on rank 7
+            "4k3/8/8/8/8/8/8/7R w - - 0 1",   # kings separated vertically
+        ]
+            b_l = board_from_fen(fen)
+            @test syzygy_probe_wdl(b_l) == WDL_LOSS
+        end
+
         if TB_LARGEST[] >= 5
             # K+Q vs K+R: queen wins
             b = board_from_fen("8/8/8/8/3k4/8/8/KQ6 w - - 0 1")
             @test syzygy_probe_wdl(b) == WDL_WIN
+
+            # K+R vs K+R: theoretical draw (symmetric position)
+            b = board_from_fen("8/8/8/8/3k1r2/8/8/3K1R2 w - - 0 1")
+            @test syzygy_probe_wdl(b) == WDL_DRAW
+
+            # KRR vs KR: the two-rook side wins (asymmetric, exercises key!=t.key for rook side)
+            # Black has two rooks, White has one — probe from White's (losing) perspective.
+            b_krr_w = board_from_fen("8/8/8/8/3k1rr1/8/8/3K1R2 w - - 0 1")
+            b_krr_b = board_from_fen("8/8/8/8/3k1rr1/8/8/3K1R2 b - - 0 1")
+            @test syzygy_probe_wdl(b_krr_w) == WDL_LOSS   # White (KR) loses to KRR
+            @test syzygy_probe_wdl(b_krr_b) == WDL_WIN    # Black (KRR) wins
         end
     end
 end
