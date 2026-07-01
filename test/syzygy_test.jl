@@ -306,9 +306,8 @@ end
             end
 
             # Drawn KBBvK: Black to move, same-color bishops — python → 0.
-            # TODO: bside=1 KBBvK probe has a known BoundsError; skip for now.
             let b = board_from_fen("7k/8/8/4K3/3B4/4B3/8/8 b - - 12 7")
-                @test_skip syzygy_probe_wdl(b) == WDL_DRAW
+                @test syzygy_probe_wdl(b) == WDL_DRAW
             end
 
             # Winning KBBvK (opposite-color bishops): White to move, White wins.
