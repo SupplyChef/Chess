@@ -199,6 +199,40 @@ const SYZYGY_PATH = get(ENV, "SYZYGY_PATH", "")
             @test syzygy_probe_wdl(b_l) == WDL_LOSS
         end
 
+        # ── KBvKR endgame: turn-awareness regression ─────────────────────────────
+        # KBvKR is theoretically DRAWN with best play (bishop side can hold a
+        # fortress), so WDL_DRAW is the expected result for most positions.
+        # However, when the bishop is en prise (capturable without recapture),
+        # the position is WDL_WIN for the rook side regardless of whose turn it is
+        # to move: if it is the rook side's turn they take immediately; if it is the
+        # bishop side's turn the bishop is about to be lost.
+        #
+        # This is the pattern that caused the move-58 blunder in the bug report:
+        # engine played Bc1 (bishop to hanging square), probe returned WDL_DRAW
+        # instead of WDL_LOSS (from White's perspective), so the blunder scored 0.
+        #
+        # Position: WK c4, WB c1, BK e5, BR h1.
+        # Black (rook side) to move: Rh1xc1+ wins the bishop outright → KvKR.
+        # White (bishop side) to move: bishop is hanging, only way to avoid loss
+        # is to move it; a correctly-placed bishop draws, but from THIS square (c1)
+        # with the rook controlling the first rank, the bishop side is already lost.
+        #
+        # The probe must return WDL_WIN for the rook side and WDL_LOSS for the
+        # bishop side, correctly reflecting whose turn it is.
+        let b_hang_b = board_from_fen("8/8/8/4k3/2K5/8/8/2B4r b - - 0 1"),
+            b_hang_w = board_from_fen("8/8/8/4k3/2K5/8/8/2B4r w - - 0 1")
+            @test syzygy_probe_wdl(b_hang_b) == WDL_WIN    # Black (rook side) to move: bishop is free
+            @test syzygy_probe_wdl(b_hang_w) == WDL_LOSS   # White (bishop side) to move: can't save it
+        end
+
+        # Non-hanging KBvKR: bishop safely placed → draw from both sides.
+        # WK b1, WB f4, BK e6, BR a8: rook cannot immediately take the bishop.
+        let b_safe_w = board_from_fen("r7/8/4k3/8/5B2/8/8/1K6 w - - 0 1"),
+            b_safe_b = board_from_fen("r7/8/4k3/8/5B2/8/8/1K6 b - - 0 1")
+            @test syzygy_probe_wdl(b_safe_w) == WDL_DRAW
+            @test syzygy_probe_wdl(b_safe_b) == WDL_DRAW
+        end
+
         if TB_LARGEST[] >= 5
             # K+Q vs K+R: queen wins
             b = board_from_fen("8/8/8/8/3k4/8/8/KQ6 w - - 0 1")
