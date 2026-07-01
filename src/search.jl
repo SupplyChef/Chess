@@ -514,6 +514,24 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     # A capture might reduce material to a theoretically drawn endgame.
     _is_insufficient_material(b) && return 0
 
+    # TB probe in quiescence: a capture may enter a TB-range position.
+    # We probe before the TT so that a stale TT draw-score can't hide a
+    # tablebase win or loss at the leaf level.
+    if si.config.syzygy && _INITIALIZED[] && b.castling == 0x0
+        n_pc = count_bits(all_occ(b))
+        if n_pc <= TB_LARGEST[]
+            wdl = syzygy_probe_wdl(b)
+            if wdl !== nothing
+                si.tb_hits += 1
+                tb_score = wdl == WDL_WIN          ?  (MATE_SCORE - ply) :
+                           wdl == WDL_LOSS         ? -(MATE_SCORE - ply) :
+                           wdl == WDL_CURSED_WIN   ?  1 :
+                           wdl == WDL_BLESSED_LOSS ? -1 : 0
+                return tb_score
+            end
+        end
+    end
+
     # TT Probe
     tte = _tt_get(si.tt, b.hash)
     si.tt_probes += 1
@@ -685,11 +703,50 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         reps >= 2 && (si.rep_draw_flag = true; return 0)
     end
 
+    # ── Tablebase probe ────────────────────────────────────────────────────────
+    # Probe TB before TT: TB results are provably exact (retrogade analysis),
+    # while TT entries may have been stored under different search conditions
+    # (e.g. a draw score computed before the TB was loaded, or a transposition
+    # from a path where WDL_WIN wasn't detected yet).  Probing TB first ensures
+    # a stale TT draw-score can never hide a tablebase win or loss.
+    #
+    # WDL_WIN: raise alpha above 0 and fall through to full search with
+    # in_tb_win=true, so the move loop filters children to only those that keep
+    # the opponent in WDL_LOSS — preventing blunders into drawn TB positions.
+    # WDL_LOSS / draws: exact result, return immediately and cache in TT.
+    in_tb_win = false
+    if si.config.syzygy && _INITIALIZED[] && b.castling == 0x0
+        n_pc = count_bits(all_occ(b))
+        if n_pc <= TB_LARGEST[]
+            wdl = syzygy_probe_wdl(b)
+            if wdl !== nothing
+                si.tb_hits += 1
+                if wdl == WDL_WIN
+                    alpha = max(alpha, 1)
+                    alpha >= beta && return alpha
+                    in_tb_win = true   # probe children to stay in winning zone
+                    # fall through to TT probe and normal search
+                else
+                    tb_score = wdl == WDL_LOSS         ? -(MATE_SCORE - ply) :
+                               wdl == WDL_CURSED_WIN   ?  1 :
+                               wdl == WDL_BLESSED_LOSS ? -1 : 0
+                    flag = tb_score >= beta  ? TT_LOWER :
+                           tb_score <= alpha ? TT_UPPER : TT_EXACT
+                    _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
+                    return tb_score
+                end
+            end
+        end
+    end
+
     # TT probe: if we have previously searched this position at sufficient depth,
     # we can reuse the stored result.  "Sufficient depth" means tte.depth >= depth:
     # a stored result from a depth-3 search is not reliable when we need depth-5.
     # The flag tells us whether the stored score is exact, a lower bound, or an
     # upper bound, and we narrow (or cut) the window accordingly.
+    # Note: for in_tb_win positions (WDL_WIN), we skip TT cutoffs below 1 since
+    # the TB has already guaranteed at least a win — a stale TT draw score must
+    # not override that.
     tte       = _tt_get(si.tt, b.hash)
     hash_move = NULL_MOVE
     si.tt_probes += 1
@@ -713,51 +770,20 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             elseif sc < -(MATE_SCORE - MOVE_STACK_SIZE)
                 sc += ply
             end
-            if tte.flag == TT_EXACT
-                si.tt_cutoffs += 1
-                return sc
-            elseif tte.flag == TT_LOWER
-                alpha = max(alpha, sc)
-            else
-                beta = min(beta, sc)
-            end
-            if alpha >= beta
-                si.tt_cutoffs += 1
-                return sc
-            end
-        end
-    end
-
-    # ── Tablebase probe ────────────────────────────────────────────────────────
-    # If Syzygy tables are loaded and this is a ≤N-piece position with no
-    # castling rights, the WDL result is exact — no need to search further.
-    # Probe after the TT (cheaper) but before generating moves (expensive).
-    #
-    # WDL_WIN: raise alpha above 0, then fall through to normal search.
-    # Crucially, set in_tb_win=true so the move loop probes each child and
-    # skips any move that doesn't keep the opponent in WDL_LOSS — preventing
-    # blunders into drawn or lost TB positions.
-    # WDL_LOSS / draws: cut off immediately — result is exact.
-    in_tb_win = false
-    if si.config.syzygy && _INITIALIZED[] && b.castling == 0x0
-        n_pc = count_bits(all_occ(b))
-        if n_pc <= TB_LARGEST[]
-            wdl = syzygy_probe_wdl(b)
-            if wdl !== nothing
-                si.tb_hits += 1
-                if wdl == WDL_WIN
-                    alpha = max(alpha, 1)
-                    alpha >= beta && return alpha
-                    in_tb_win = true   # probe children to stay in winning zone
-                    # fall through — full eval + normal search runs
+            # When TB already established a win (in_tb_win), reject any TT cutoff
+            # that would return a score below 1 — the TB result is authoritative.
+            if !in_tb_win || sc >= 1
+                if tte.flag == TT_EXACT
+                    si.tt_cutoffs += 1
+                    return sc
+                elseif tte.flag == TT_LOWER
+                    alpha = max(alpha, sc)
                 else
-                    tb_score = wdl == WDL_LOSS         ? -(MATE_SCORE - ply) :
-                               wdl == WDL_CURSED_WIN   ?  1 :
-                               wdl == WDL_BLESSED_LOSS ? -1 : 0
-                    flag = tb_score >= beta  ? TT_LOWER :
-                           tb_score <= alpha ? TT_UPPER : TT_EXACT
-                    _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
-                    return tb_score
+                    beta = min(beta, sc)
+                end
+                if alpha >= beta
+                    si.tt_cutoffs += 1
+                    return sc
                 end
             end
         end
