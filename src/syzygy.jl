@@ -538,9 +538,13 @@ function _decompress_pairs(t::WdlTable, pd::PairsData, idx::Int64)::Int
     mainidx = Int(idx >> pd.idxbits)
     litidx  = Int(idx & ((Int64(1) << pd.idxbits) - 1)) - (1 << (pd.idxbits - 1))
 
+    @info "decompress_pairs" idx=idx mainidx=mainidx litidx_pre=litidx pd_idxbits=pd.idxbits pd_indextable=pd.indextable pd_sizetable=pd.sizetable data_len=length(data)
+
     block      = _r32le(data, pd.indextable + 6*mainidx)
     idx_offset = _r16le(data, pd.indextable + 6*mainidx + 4)
     litidx    += idx_offset
+
+    @info "decompress_pairs2" block=block idx_offset=idx_offset litidx_post=litidx
 
     if litidx < 0
         while litidx < 0
