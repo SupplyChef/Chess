@@ -716,7 +716,7 @@ function syzygy_probe_wdl(b::Board)::Union{Int,Nothing}
     try
         _probe_wdl_table(t, b)
     catch e
-        @warn "Syzygy: probe failed for $(t.name)" exception=(e, catch_backtrace())
+        @warn "Syzygy: probe failed for $(t.key)" exception=(e, catch_backtrace())
         nothing
     end
 end
