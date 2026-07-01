@@ -151,8 +151,8 @@ const SYZYGY_PATH = get(ENV, "SYZYGY_PATH", "")
         b = board_from_fen("8/8/8/8/8/8/8/KR5k w - - 0 1")
         @test syzygy_probe_wdl(b) == WDL_WIN
 
-        # From losing side's perspective
-        b = board_from_fen("8/8/8/8/8/8/8/kr5K b - - 0 1")
+        # From losing side's perspective (White has rook, Black to move → Black loses)
+        b = board_from_fen("8/8/8/8/8/8/8/KR5k b - - 0 1")
         @test syzygy_probe_wdl(b) == WDL_LOSS
 
         # K+N+N vs K: theoretical draw (knights cannot force mate)
@@ -175,18 +175,15 @@ const SYZYGY_PATH = get(ENV, "SYZYGY_PATH", "")
         @test r_b == WDL_LOSS
 
         # ── Asymmetric table: probe from the weaker-side perspective ─────────────
-        # This exercises the key != t.key path (cmirror=8, mirror=56, bside flipped).
-        # The bug: _collect_squares was incorrectly XORing squares with mirror=56,
-        # producing wrong indices and therefore wrong WDL values for this code path.
-        #
-        # KRvK asymmetric: both table key ("KRvK") and board key match, so White
-        # (rook side, winning) goes through key==t.key path.  To hit key!=t.key we
-        # need a position where Black holds the stronger material.
+        # This exercises the key != t.key path (cmirror=8, bside flipped).
+        # KRvK: board key matches table key when White has rook; to hit key!=t.key
+        # we need Black to hold the stronger material (Black has KR, White has K).
         #
         # KvKR: board key = "KvKR", table key = "KRvK", mirrored key = "KvKR".
         # Black has the rook and wins; White (no rook) loses.
-        b_asym_w = board_from_fen("8/8/8/8/8/8/8/k6R w - - 0 1")   # WK a1, BR h1 — White to move, white loses
-        b_asym_b = board_from_fen("8/8/8/8/8/8/8/k6R b - - 0 1")   # same, Black to move, black wins
+        # Position: WK h1, BK h8, BR a8.
+        b_asym_w = board_from_fen("r6k/8/8/8/8/8/8/7K w - - 0 1")   # White to move, white loses
+        b_asym_b = board_from_fen("r6k/8/8/8/8/8/8/7K b - - 0 1")   # Black to move, black wins
         @test syzygy_probe_wdl(b_asym_w) == WDL_LOSS   # white has no rook → loses
         @test syzygy_probe_wdl(b_asym_b) == WDL_WIN    # black has rook → wins
 
@@ -194,9 +191,9 @@ const SYZYGY_PATH = get(ENV, "SYZYGY_PATH", "")
         # the index computation is not sensitive to the rank at which pieces sit
         # (regression for the sq ⊻ mirror bug).
         for fen in [
-            "8/8/8/8/8/8/8/k6R w - - 0 1",   # pieces on rank 1
-            "8/k6R/8/8/8/8/8/8 w - - 0 1",   # pieces on rank 7
-            "4k3/8/8/8/8/8/8/7R w - - 0 1",   # kings separated vertically
+            "r6k/8/8/8/8/8/8/7K w - - 0 1",   # BK h8, BR a8, WK h1
+            "8/r4k1K/8/8/8/8/8/8 w - - 0 1",   # BK f7, BR a7, WK h7 (all rank 7)
+            "r3k3/8/8/8/8/8/8/7K w - - 0 1",   # BK e8, BR a8, WK h1
         ]
             b_l = board_from_fen(fen)
             @test syzygy_probe_wdl(b_l) == WDL_LOSS
