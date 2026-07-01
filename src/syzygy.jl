@@ -682,9 +682,7 @@ function _probe_wdl_table(t::WdlTable, b::Board)::Union{Int,Nothing}
         bside = b.side == White ? 0 : 1
     end
 
-    # Non-pawn tables: squares are NOT mirrored (only cmirror flips piece color).
-    # Pawn tables would need `mirror` here, but WDL tables are always non-pawn.
-    pos = _collect_squares(b, t.pieces[bside+1], cmirror, 0)
+    pos = _collect_squares(b, t.pieces[bside+1], cmirror, mirror)
     pos === nothing && return nothing
     idx = _encode_piece(t, bside, pos)
     idx < 0 && return nothing

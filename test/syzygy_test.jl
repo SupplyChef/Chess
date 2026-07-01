@@ -146,8 +146,8 @@ end
         @test syzygy_init!(SYZYGY_PATH) == true
         @test TB_LARGEST[] >= 3
 
-        # KvK is always a draw
-        b = board_from_fen("8/8/8/8/8/8/8/K6k w - - 0 1")
+        # K+N vs K: knight alone cannot force mate → draw
+        b = board_from_fen("8/8/8/8/8/8/8/KN5k w - - 0 1")
         @test syzygy_probe_wdl(b) == WDL_DRAW
 
         # K+R vs K: side with rook wins
