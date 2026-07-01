@@ -467,13 +467,19 @@ function _encode_piece(t::WdlTable, bside::Int, pos::Vector{Int})::Int64
         if (pos[1] & 32) != 0
             for i in 1:n; pos[i] = pos[i] ⊻ 56; end
         end
-        threshold = enc_type == 0 ? 3 : 2
-        found = threshold
-        for i in 1:threshold
-            if _offdiag(pos[i]) != 0; found = i; break; end
-        end
-        if found <= threshold && _offdiag(pos[found]) > 0
-            for i in 1:n; pos[i] = _flipdiag(pos[i]); end
+        if enc_type == 0
+            found = 4  # sentinel: "not found among first 3"
+            for i in 1:3
+                if _offdiag(pos[i]) != 0; found = i; break; end
+            end
+            if found < 4 && _offdiag(pos[found]) > 0
+                for i in 1:n; pos[i] = _flipdiag(pos[i]); end
+            end
+        else
+            # KK encoding: only check pos[1] (matches Fathom reference)
+            if _offdiag(pos[1]) > 0
+                for i in 1:n; pos[i] = _flipdiag(pos[i]); end
+            end
         end
     end
 
@@ -499,7 +505,13 @@ function _encode_piece(t::WdlTable, bside::Int, pos::Vector{Int})::Int64
     elseif enc_type == 2
         tri = TRIANGLE[pos[1]+1]
         kk  = KK_IDX[tri+1][pos[2]+1]
-        kk < 0 && return Int64(-1)
+        if kk < 0
+            # Swap kings and retry (matches python-chess fallback for non-canonical king pairs)
+            pos[1], pos[2] = pos[2], pos[1]
+            tri = TRIANGLE[pos[1]+1]
+            kk  = KK_IDX[tri+1][pos[2]+1]
+            kk < 0 && return Int64(-1)
+        end
         idx     = Int64(kk)
         i_start = 2
     else
