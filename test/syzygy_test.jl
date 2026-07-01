@@ -134,11 +134,14 @@ end
 end
 
 # ── Integration tests (require real tablebase files) ──────────────────────────
-const SYZYGY_PATH = get(ENV, "SYZYGY_PATH", "")
+const _DEFAULT_SYZYGY = joinpath(@__DIR__, "..", "syzygy")
+const SYZYGY_PATH = let p = get(ENV, "SYZYGY_PATH", "")
+    isempty(p) ? _DEFAULT_SYZYGY : p
+end
 
 @testset "Syzygy — WDL integration (requires SYZYGY_PATH)" begin
-    if isempty(SYZYGY_PATH) || !isdir(SYZYGY_PATH)
-        @test_skip "Set SYZYGY_PATH to a directory containing .rtbw files"
+    if !isdir(SYZYGY_PATH)
+        @test_skip "No tablebase files found (place .rtbw files in Chess/syzygy/ or set SYZYGY_PATH)"
     else
         @test syzygy_init!(SYZYGY_PATH) == true
         @test TB_LARGEST[] >= 3

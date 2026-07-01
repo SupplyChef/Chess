@@ -622,10 +622,9 @@ using Test
     # ── Principal variation search ────────────────────────────────────────────
 
     @testset "PVS - finds mate in 2" begin
-        # Rook ladder with the rooks out of the king's reach: 1.Rg7 (any) 2.Rh8#.
-        # The mated side runs out of moves at ply 4, so the score is
-        # MATE_SCORE − 4.  There is no mate in 1.
-        b = board_from_fen("3k4/8/6R1/7R/8/8/8/6K1 w - - 0 1")
+        # Rook ladder: both rooks on rank 5, neither can immediately reach rank 8.
+        # 1.Rg8+ Kd7 2.Rh7# (or symmetric). Score = MATE_SCORE - 4. No mate in 1.
+        b = board_from_fen("3k4/8/8/6RR/8/8/8/6K1 w - - 0 1")
         r = search_move(b, 1000)
         @test r.score == MATE_SCORE - 4
     end
@@ -673,7 +672,7 @@ using Test
         # depth, which cannot store a TT entry for it — that is expected behaviour.
         # The key invariant is >= 2 (not 1): the cut-node TT write allows
         # _extract_pv to follow through the opponent's reply.
-        b = board_from_fen("3k4/8/6R1/7R/8/8/8/6K1 w - - 0 1")
+        b = board_from_fen("3k4/8/8/6RR/8/8/8/6K1 w - - 0 1")
         r = search_move(b, 1000)
         @test r.score == MATE_SCORE - 4
         @test length(r.pv) >= 2
