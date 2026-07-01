@@ -197,6 +197,11 @@ Base.@kwdef struct EngineConfig
     # Syzygy endgame tablebase probe: when tables are loaded via syzygy_init!(),
     # positions with ≤ TB_LARGEST pieces and no castling rights short-circuit
     # the search with an exact WDL result.  Disable for ablation testing.
+
+    kpk_bitbase      ::Bool = true
+    # King+Pawn vs King endgame bitbase: a perfect, built-in tablebase (no
+    # external files needed) that short-circuits search with an exact WDL
+    # result for 3-man KPK positions.  Disable for ablation testing.
 end
 
 """The default full-strength configuration (all features enabled)."""
