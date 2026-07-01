@@ -472,7 +472,7 @@ function _encode_piece(t::WdlTable, bside::Int, pos::Vector{Int})::Int64
         for i in 1:threshold
             if _offdiag(pos[i]) != 0; found = i; break; end
         end
-        if found < threshold && _offdiag(pos[found]) > 0
+        if found <= threshold && _offdiag(pos[found]) > 0
             for i in 1:n; pos[i] = _flipdiag(pos[i]); end
         end
     end

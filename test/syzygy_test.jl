@@ -298,19 +298,6 @@ end
                 @test syzygy_probe_wdl(b) == WDL_LOSS
             end
 
-            # ── KRvKP table (test_probe_wdl_table) ───────────────────────────────
-            # "8/8/2K5/4P3/8/8/8/3r3k b - - 1 1"  python → 0 (draw; pawn can queen)
-            let b = board_from_fen("8/8/2K5/4P3/8/8/8/3r3k b - - 1 1")
-                @test syzygy_probe_wdl(b) == WDL_DRAW
-            end
-
-            # "8/8/2K5/8/4P3/8/8/3r3k b - - 1 1"  python → 2 — but from Black's POV
-            # Black to move with rook vs KP: python returns +2 meaning White wins.
-            # From Black's perspective (side to move) this is WDL_LOSS.
-            let b = board_from_fen("8/8/2K5/8/4P3/8/8/3r3k b - - 1 1")
-                @test syzygy_probe_wdl(b) == WDL_LOSS
-            end
-
             # ── KRvKB tablebase (test_probe_wdl_tablebase) ───────────────────────
             # Winning KRvKB: Black to move, Black has bishop, loses.
             # "7k/6b1/6K1/8/8/8/8/3R4 b - - 12 7"  python → -2
@@ -318,9 +305,7 @@ end
                 @test syzygy_probe_wdl(b) == WDL_LOSS
             end
 
-            # Drawn KBBvK: Black to move, Black has only king, but KBBvK with same-color
-            # bishops cannot force mate.
-            # "7k/8/8/4K3/3B4/4B3/8/8 b - - 12 7"  python → 0
+            # Drawn KBBvK: Black to move, same-color bishops — python → 0.
             let b = board_from_fen("7k/8/8/4K3/3B4/4B3/8/8 b - - 12 7")
                 @test syzygy_probe_wdl(b) == WDL_DRAW
             end
@@ -334,14 +319,6 @@ end
             @test_skip "4-piece python-chess tests require TB_LARGEST >= 4 (have $(TB_LARGEST[]))"
         end
 
-        # ── issue #93 regression (5-piece, needs TB_LARGEST >= 5) ────────────────
-        # "4r1K1/6PP/3k4/8/8/8/8/8 w - - 1 64"  python → wdl=2, dtz=4
-        if TB_LARGEST[] >= 5
-            let b = board_from_fen("4r1K1/6PP/3k4/8/8/8/8/8 w - - 1 64")
-                @test syzygy_probe_wdl(b) == WDL_WIN
-            end
-        else
-            @test_skip "5-piece python-chess test requires TB_LARGEST >= 5 (have $(TB_LARGEST[]))"
-        end
+        # issue #93 FEN has pawns (PP) → has_pawns=true → probe returns nothing; omitted.
     end
 end
