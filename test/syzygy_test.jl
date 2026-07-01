@@ -267,67 +267,71 @@ end
     if !_INITIALIZED[]
         @warn "Syzygy tablebases not initialised — skipping python-chess ported tests"
     else
-        # ── KBNvK pawnless table (test_probe_pawnless_wdl_table) ─────────────────
-        # python: probe_wdl_table returns raw table value for the side stored in
-        # the file (always "White = strong side").  Our syzygy_probe_wdl returns
-        # from the perspective of the side to move, so we use that throughout.
+        if TB_LARGEST[] >= 4
+            # ── KBNvK pawnless table (test_probe_pawnless_wdl_table) ─────────────
+            # python: probe_wdl_table returns raw table value for the side stored in
+            # the file (always "White = strong side").  Our syzygy_probe_wdl returns
+            # from the perspective of the side to move, so we use that throughout.
 
-        # "8/8/8/5N2/5K2/2kB4/8/8 b - - 0 1"  python → -2 (Black to move, Black loses)
-        let b = board_from_fen("8/8/8/5N2/5K2/2kB4/8/8 b - - 0 1")
-            @test syzygy_probe_wdl(b) == WDL_LOSS
-        end
+            # "8/8/8/5N2/5K2/2kB4/8/8 b - - 0 1"  python → -2 (Black to move, Black loses)
+            let b = board_from_fen("8/8/8/5N2/5K2/2kB4/8/8 b - - 0 1")
+                @test syzygy_probe_wdl(b) == WDL_LOSS
+            end
 
-        # "7B/5kNK/8/8/8/8/8/8 w - - 0 1"  python → 2 (White to move, White wins)
-        let b = board_from_fen("7B/5kNK/8/8/8/8/8/8 w - - 0 1")
-            @test syzygy_probe_wdl(b) == WDL_WIN
-        end
+            # "7B/5kNK/8/8/8/8/8/8 w - - 0 1"  python → 2 (White to move, White wins)
+            let b = board_from_fen("7B/5kNK/8/8/8/8/8/8 w - - 0 1")
+                @test syzygy_probe_wdl(b) == WDL_WIN
+            end
 
-        # "N7/8/2k5/8/7K/8/8/B7 w - - 0 1"  python → 2 (White to move, White wins)
-        let b = board_from_fen("N7/8/2k5/8/7K/8/8/B7 w - - 0 1")
-            @test syzygy_probe_wdl(b) == WDL_WIN
-        end
+            # "N7/8/2k5/8/7K/8/8/B7 w - - 0 1"  python → 2 (White to move, White wins)
+            let b = board_from_fen("N7/8/2k5/8/7K/8/8/B7 w - - 0 1")
+                @test syzygy_probe_wdl(b) == WDL_WIN
+            end
 
-        # "8/8/1NkB4/8/7K/8/8/8 w - 1 1"  python → 0 (draw)
-        let b = board_from_fen("8/8/1NkB4/8/7K/8/8/8 w - - 1 1")
-            @test syzygy_probe_wdl(b) == WDL_DRAW
-        end
+            # "8/8/1NkB4/8/7K/8/8/8 w - - 1 1"  python → 0 (draw)
+            let b = board_from_fen("8/8/1NkB4/8/7K/8/8/8 w - - 1 1")
+                @test syzygy_probe_wdl(b) == WDL_DRAW
+            end
 
-        # "8/8/8/2n5/2b1K3/2k5/8/8 w - - 0 1"  python → -2 (White to move, White loses — KvKBN)
-        let b = board_from_fen("8/8/8/2n5/2b1K3/2k5/8/8 w - - 0 1")
-            @test syzygy_probe_wdl(b) == WDL_LOSS
-        end
+            # "8/8/8/2n5/2b1K3/2k5/8/8 w - - 0 1"  python → -2 (White to move, White loses — KvKBN)
+            let b = board_from_fen("8/8/8/2n5/2b1K3/2k5/8/8 w - - 0 1")
+                @test syzygy_probe_wdl(b) == WDL_LOSS
+            end
 
-        # ── KRvKP table (test_probe_wdl_table) ───────────────────────────────────
-        # "8/8/2K5/4P3/8/8/8/3r3k b - - 1 1"  python → 0 (draw; pawn can queen)
-        let b = board_from_fen("8/8/2K5/4P3/8/8/8/3r3k b - - 1 1")
-            @test syzygy_probe_wdl(b) == WDL_DRAW
-        end
+            # ── KRvKP table (test_probe_wdl_table) ───────────────────────────────
+            # "8/8/2K5/4P3/8/8/8/3r3k b - - 1 1"  python → 0 (draw; pawn can queen)
+            let b = board_from_fen("8/8/2K5/4P3/8/8/8/3r3k b - - 1 1")
+                @test syzygy_probe_wdl(b) == WDL_DRAW
+            end
 
-        # "8/8/2K5/8/4P3/8/8/3r3k b - - 1 1"  python → 2 — but from Black's POV
-        # Black to move with rook vs KP: python returns +2 meaning White wins.
-        # From Black's perspective (side to move) this is WDL_LOSS.
-        let b = board_from_fen("8/8/2K5/8/4P3/8/8/3r3k b - - 1 1")
-            @test syzygy_probe_wdl(b) == WDL_LOSS
-        end
+            # "8/8/2K5/8/4P3/8/8/3r3k b - - 1 1"  python → 2 — but from Black's POV
+            # Black to move with rook vs KP: python returns +2 meaning White wins.
+            # From Black's perspective (side to move) this is WDL_LOSS.
+            let b = board_from_fen("8/8/2K5/8/4P3/8/8/3r3k b - - 1 1")
+                @test syzygy_probe_wdl(b) == WDL_LOSS
+            end
 
-        # ── KRvKB tablebase (test_probe_wdl_tablebase) ───────────────────────────
-        # Winning KRvKB: Black to move, Black has bishop, loses.
-        # "7k/6b1/6K1/8/8/8/8/3R4 b - - 12 7"  python → -2
-        let b = board_from_fen("7k/6b1/6K1/8/8/8/8/3R4 b - - 12 7")
-            @test syzygy_probe_wdl(b) == WDL_LOSS
-        end
+            # ── KRvKB tablebase (test_probe_wdl_tablebase) ───────────────────────
+            # Winning KRvKB: Black to move, Black has bishop, loses.
+            # "7k/6b1/6K1/8/8/8/8/3R4 b - - 12 7"  python → -2
+            let b = board_from_fen("7k/6b1/6K1/8/8/8/8/3R4 b - - 12 7")
+                @test syzygy_probe_wdl(b) == WDL_LOSS
+            end
 
-        # Drawn KBBvK: Black to move, Black has only king, but KBBvK with same-color
-        # bishops cannot force mate.
-        # "7k/8/8/4K3/3B4/4B3/8/8 b - - 12 7"  python → 0
-        let b = board_from_fen("7k/8/8/4K3/3B4/4B3/8/8 b - - 12 7")
-            @test syzygy_probe_wdl(b) == WDL_DRAW
-        end
+            # Drawn KBBvK: Black to move, Black has only king, but KBBvK with same-color
+            # bishops cannot force mate.
+            # "7k/8/8/4K3/3B4/4B3/8/8 b - - 12 7"  python → 0
+            let b = board_from_fen("7k/8/8/4K3/3B4/4B3/8/8 b - - 12 7")
+                @test syzygy_probe_wdl(b) == WDL_DRAW
+            end
 
-        # Winning KBBvK (opposite-color bishops): White to move, White wins.
-        # "7k/8/8/4K2B/8/4B3/8/8 w - - 12 7"  python → 2
-        let b = board_from_fen("7k/8/8/4K2B/8/4B3/8/8 w - - 12 7")
-            @test syzygy_probe_wdl(b) == WDL_WIN
+            # Winning KBBvK (opposite-color bishops): White to move, White wins.
+            # "7k/8/8/4K2B/8/4B3/8/8 w - - 12 7"  python → 2
+            let b = board_from_fen("7k/8/8/4K2B/8/4B3/8/8 w - - 12 7")
+                @test syzygy_probe_wdl(b) == WDL_WIN
+            end
+        else
+            @test_skip "4-piece python-chess tests require TB_LARGEST >= 4 (have $(TB_LARGEST[]))"
         end
 
         # ── issue #93 regression (5-piece, needs TB_LARGEST >= 5) ────────────────
@@ -336,6 +340,8 @@ end
             let b = board_from_fen("4r1K1/6PP/3k4/8/8/8/8/8 w - - 1 64")
                 @test syzygy_probe_wdl(b) == WDL_WIN
             end
+        else
+            @test_skip "5-piece python-chess test requires TB_LARGEST >= 5 (have $(TB_LARGEST[]))"
         end
     end
 end
