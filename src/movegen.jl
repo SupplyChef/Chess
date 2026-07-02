@@ -504,19 +504,12 @@ function get_pin_and_checker_masks(b::Board, us::Color)
     rooks   = bb(b, them, Rook)   | bb(b, them, Queen)
     bishops = bb(b, them, Bishop) | bb(b, them, Queen)
 
-    # Scan only rays that actually contain a slider
-    # Rook rays
-    if (FILE_MASK[file_of(ks)+1] & rooks) != 0
+    # Scan only rays that actually contain a slider (one attack lookup covers
+    # both rays of a slider type, so a single combined-mask test suffices).
+    if ((FILE_MASK[file_of(ks)+1] | RANK_MASK[rank_of(ks)+1]) & rooks) != 0
         check_mask |= rook_attacks(ks, occ) & rooks
     end
-    if (RANK_MASK[rank_of(ks)+1] & rooks) != 0
-        check_mask |= rook_attacks(ks, occ) & rooks
-    end
-    # Bishop rays
-    if (DIAG_MASK[ks+1] & bishops) != 0
-        check_mask |= bishop_attacks(ks, occ) & bishops
-    end
-    if (ADIAG_MASK[ks+1] & bishops) != 0
+    if ((DIAG_MASK[ks+1] | ADIAG_MASK[ks+1]) & bishops) != 0
         check_mask |= bishop_attacks(ks, occ) & bishops
     end
 
@@ -528,16 +521,6 @@ function get_pin_and_checker_masks(b::Board, us::Color)
     pinners = (rook_attacks(ks, BB(0)) & rooks) | (bishop_attacks(ks, BB(0)) & bishops)
 
     for ps in BitIter(pinners)
-        # Ray between king and pinner (exclusive of both)
-        f, r = file_of(ks), rank_of(ks)
-        pf, pr = file_of(ps), rank_of(ps)
-
-        mask = if f == pf; FILE_MASK[f+1]
-               elseif r == pr; RANK_MASK[r+1]
-               elseif f - r == pf - pr; DIAG_MASK[ks+1]
-               else ADIAG_MASK[ks+1]
-               end
-
         # Squares strictly between ks and ps
         between = _squares_between(ks, ps)
         blockers = between & occ

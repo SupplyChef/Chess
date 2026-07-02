@@ -6,15 +6,16 @@ function benchmark_pos(name, fen, depth)
     b = board_from_fen(fen)
     println("Benchmarking: $name at depth $depth")
 
-    # Warmup
-    search_move(b, 200; verbose=false)
+    # Warmup with the same SearchInfo used for the measured run: the default
+    # `si = SearchInfo()` argument would allocate a second ~200 MB TT here.
+    si = SearchInfo()
+    search_move(b, 200; si=si, verbose=false)
 
     start_time = now()
     # We use a fixed depth search for benchmarking NPS and efficiency
     # But search_move is time-based. We will simulate a deep search by giving it plenty of time
     # but we will look at the nodes reported for the last completed depth.
 
-    si = SearchInfo()
     r = search_move(b, 5000; si=si, verbose=true) # This will print info lines
 
     elapsed = (now() - start_time).value / 1000.0

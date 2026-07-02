@@ -104,8 +104,8 @@ function _feat_piece_activity!(φ, b, ph::Int)
             if challenger == 0
                 φ[pawn_sup ? FEAT_OUTPOST_FULL_SUP : FEAT_OUTPOST_FULL_FREE] += s
             else
-                blocked = c == White ? (challenger & (occ >> 8)) : (challenger & (occ << 8))
-                blocked == challenger && (φ[pawn_sup ? FEAT_OUTPOST_SEMI_SUP : FEAT_OUTPOST_SEMI_FREE] += s)
+                _challengers_blocked(challenger, occ, c) &&
+                    (φ[pawn_sup ? FEAT_OUTPOST_SEMI_SUP : FEAT_OUTPOST_SEMI_FREE] += s)
             end
         end
 

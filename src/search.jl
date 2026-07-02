@@ -678,6 +678,12 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     end
     si.stop && return 0
 
+    # Hard ply guard: si.path and si.move_stack hold MOVE_STACK_SIZE entries and
+    # are written with @inbounds.  Extensions are only gated by ply < MAX_PLY, so
+    # a fully extended line can in principle reach ply ≈ 2×MAX_PLY; stop just
+    # short of the stack capacity rather than risk an out-of-bounds write.
+    ply >= MOVE_STACK_SIZE - 2 && return evaluate_lazy(b, si.config, alpha, beta)
+
     # ── Draw detection ────────────────────────────────────────────────────────
     # Check these before the TT so a stale non-zero TT entry can't override a draw.
 
@@ -696,7 +702,9 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # (moves that scored +300 and would prune siblings now score 0 and don't).
     # prior_counts is reset after every irreversible move so only genuinely
     # repeatable positions are counted.
-    let reps = get(si.prior_counts, b.hash, 0)
+    # isempty fast-path: prior_counts is empty (or nearly so) in analysis/EPD/
+    # bench runs, and the Dict lookup is measurable at every node.
+    let reps = isempty(si.prior_counts) ? 0 : get(si.prior_counts, b.hash, 0)
         @inbounds for i in 1:si.path_ptr
             si.path[i] == b.hash && (reps += 1)
             reps >= 2 && break
@@ -716,6 +724,10 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # the opponent in WDL_LOSS — preventing blunders into drawn TB positions.
     # WDL_LOSS / draws: exact result, return immediately and cache in TT.
     in_tb_win = false
+    # Alpha as received from the caller, saved BEFORE the WDL_WIN branch raises
+    # it: if the TB-win verification below finds no move that keeps the win,
+    # the raise was unjustified and must be undone with this value.
+    caller_alpha = alpha
     if si.config.syzygy && _INITIALIZED[] && b.castling == 0x0
         n_pc = count_bits(all_occ(b))
         if n_pc <= TB_LARGEST[]
@@ -758,7 +770,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         # A TT entry stored before this position entered a repetition cycle would mask
         # the draw: the search would short-circuit before traversing the 3-4 move loop
         # that returns to a position with reps >= 2.  We still use tte.move for ordering.
-        if tte.depth >= depth && get(si.prior_counts, b.hash, 0) == 0
+        if tte.depth >= depth &&
+           (isempty(si.prior_counts) || get(si.prior_counts, b.hash, 0) == 0)
             sc = Int(tte.score)
             # Ply-normalize mate scores: stored value is relative to the node that
             # stored it; convert to relative to the current node by undoing the
@@ -892,8 +905,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # floor to at least this value, preventing the -(MATE_SCORE+1) sentinel
     # from being stored in TT (which causes scores > MATE_SCORE after ply
     # normalization if the sentinel is later retrieved and negated by a parent).
-    futility_ok = static_eval > -(MATE_SCORE + 1) && !in_check && depth <= 2 &&
-        static_eval + FUTILITY_MARGIN[depth + 1] < alpha
+    futility_ok = cfg.futility && static_eval > -(MATE_SCORE + 1) && !in_check &&
+        depth <= 2 && static_eval + FUTILITY_MARGIN[depth + 1] < alpha
 
     # ── Singular extension (pre-computed before generate_moves!) ─────────────
     # Must run BEFORE generate_moves! fills si.move_stack[ply], because
@@ -936,7 +949,15 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         end
         if !any_tb_win
             in_tb_win = false
-            alpha = orig_alpha # Restore original alpha
+            # Restore the alpha the caller passed in.  orig_alpha was captured
+            # AFTER the WDL_WIN branch raised alpha to ≥1, so using it here
+            # would keep the unjustified raise (and misclassify the TT flag).
+            # futility_ok was derived from the raised alpha too — refresh it.
+            alpha      = caller_alpha
+            orig_alpha = caller_alpha
+            futility_ok = cfg.futility && static_eval > -(MATE_SCORE + 1) &&
+                !in_check && depth <= 2 &&
+                static_eval + FUTILITY_MARGIN[depth + 1] < alpha
         end
     end
     best_score  = -(MATE_SCORE + 1)
@@ -1505,6 +1526,21 @@ function search_move(b::Board, time_ms::Int;
         if abs(score) >= MATE_SCORE - MAX_PLY
             mate_dist = MATE_SCORE - abs(score)
             mate_dist < depth && break
+        end
+    end
+
+    # Never return NULL_MOVE while legal moves exist: if the clock expired
+    # during the depth-1 iteration, no iteration completed and best_move was
+    # never assigned.  Fall back to the best move of the partial iteration
+    # (si.root_moves holds the successive alpha-raising moves), or failing
+    # that the first legal move, so the caller always has something to play.
+    if best_move == NULL_MOVE
+        if !isempty(si.root_moves)
+            best_score, best_move = si.root_moves[end]
+        else
+            ml_fb = si.move_stack[1]
+            generate_moves!(ml_fb, b)
+            best_move = ml_fb[1]
         end
     end
 

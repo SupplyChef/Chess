@@ -278,7 +278,9 @@ function _bishop_mask(s::Square)
 end
 
 function _init_sliding_attacks!()
-    Random.seed!(42)
+    # Local RNG: seeding the GLOBAL RNG here would silently make every
+    # `rand()` call in the user's program deterministic after `using Chess`.
+    rng = Random.Xoshiro(42)
     for s in 0:63
         # Rook
         mask = _rook_mask(s)
@@ -291,7 +293,7 @@ function _init_sliding_attacks!()
         end
         found = false
         for _ in 1:100000
-            magic = rand(UInt64) & rand(UInt64) & rand(UInt64)
+            magic = rand(rng, UInt64) & rand(rng, UInt64) & rand(rng, UInt64)
             fill!(view(ROOK_TABLE, :, s+1), 0)
             fail = false
             for i in 1:length(subsets)
@@ -320,7 +322,7 @@ function _init_sliding_attacks!()
         end
         found = false
         for _ in 1:100000
-            magic = rand(UInt64) & rand(UInt64) & rand(UInt64)
+            magic = rand(rng, UInt64) & rand(rng, UInt64) & rand(rng, UInt64)
             fill!(view(BISHOP_TABLE, :, s+1), 0)
             fail = false
             for i in 1:length(subsets)
