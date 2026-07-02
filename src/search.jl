@@ -2,8 +2,9 @@
 # transposition table, and killer-move ordering.
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-const MATE_SCORE = 30_000   # a forced mate scores MATE_SCORE - ply
-const MAX_PLY    = 64
+const MATE_SCORE    = 30_000   # a forced mate scores MATE_SCORE - ply
+const TB_WIN_SCORE  = 29_000   # syzygy win scores TB_WIN_SCORE - ply
+const MAX_PLY       = 64
 const TT_BITS    = 23
 const TT_SIZE    = 1 << TT_BITS   # ~8M entries
 
@@ -523,8 +524,8 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
             wdl = syzygy_probe_wdl(b)
             if wdl !== nothing
                 si.tb_hits += 1
-                tb_score = wdl == WDL_WIN          ?  (MATE_SCORE - ply) :
-                           wdl == WDL_LOSS         ? -(MATE_SCORE - ply) :
+                tb_score = wdl == WDL_WIN          ?  (TB_WIN_SCORE - ply) :
+                           wdl == WDL_LOSS         ? -(TB_WIN_SCORE - ply) :
                            wdl == WDL_CURSED_WIN   ?  1 :
                            wdl == WDL_BLESSED_LOSS ? -1 : 0
                 return tb_score
@@ -538,9 +539,9 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     if tte.key == b.hash
         si.tt_hits += 1
         sc = Int(tte.score)
-        if sc > MATE_SCORE - MOVE_STACK_SIZE
+        if sc > MATE_SCORE - 2000
             sc -= ply
-        elseif sc < -(MATE_SCORE - MOVE_STACK_SIZE)
+        elseif sc < -(MATE_SCORE - 2000)
             sc += ply
         end
         if tte.flag == TT_EXACT
@@ -617,9 +618,9 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     # swing calculation overcounts, falsely claiming a piece was won.
     if !si.stop && best_move != NULL_MOVE
         store_score = best
-        if best >= MATE_SCORE - MOVE_STACK_SIZE
+        if best >= MATE_SCORE - 2000
             store_score = best + ply
-        elseif best <= -(MATE_SCORE - MOVE_STACK_SIZE)
+        elseif best <= -(MATE_SCORE - 2000)
             store_score = best - ply
         end
         flag = best >= beta      ? TT_LOWER :
@@ -727,7 +728,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                     in_tb_win = true   # probe children to stay in winning zone
                     # fall through to TT probe and normal search
                 else
-                    tb_score = wdl == WDL_LOSS         ? -(MATE_SCORE - ply) :
+                    tb_score = wdl == WDL_LOSS         ? -(TB_WIN_SCORE - ply) :
                                wdl == WDL_CURSED_WIN   ?  1 :
                                wdl == WDL_BLESSED_LOSS ? -1 : 0
                     flag = tb_score >= beta  ? TT_LOWER :
@@ -763,11 +764,10 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             # stored it; convert to relative to the current node by undoing the
             # storage adjustment (subtract ply when storing, add back when retrieving
             # — and vice-versa for the losing side).
-            # Threshold: MATE_SCORE - MOVE_STACK_SIZE covers the deepest reachable ply
-            # (including quiescence), ensuring all mate-distance values are caught.
-            if sc > MATE_SCORE - MOVE_STACK_SIZE
+            # Threshold: MATE_SCORE - 2000 covers both mates and TB wins.
+            if sc > MATE_SCORE - 2000
                 sc -= ply
-            elseif sc < -(MATE_SCORE - MOVE_STACK_SIZE)
+            elseif sc < -(MATE_SCORE - 2000)
                 sc += ply
             end
             # When TB already established a win (in_tb_win), reject any TT cutoff
@@ -915,6 +915,29 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         return in_check ? -(MATE_SCORE - ply) : 0
     end
 
+    # Guard: if we are in TB win mode, ensure we have at least one move that
+    # stays in the winning zone. If not (all moves lead to non-loss for opponent),
+    # then this node is not a TB win from our perspective.
+    # This is rare as the parent should have filtered, but can happen at the root
+    # or due to TT interactions.
+    if in_tb_win && b.castling == 0x0 && count_bits(all_occ(b)) <= TB_LARGEST[]
+        any_tb_win = false
+        for i in 1:length(ml)
+            m = ml[i]
+            undo = make_move!(b, m)
+            child_wdl = syzygy_probe_wdl(b)
+            unmake_move!(b, m, undo)
+            if child_wdl !== nothing && child_wdl == WDL_LOSS
+                any_tb_win = true
+                break
+            end
+        end
+        if !any_tb_win
+            in_tb_win = false
+            alpha = orig_alpha # Restore original alpha
+        end
+    end
+
     orig_alpha  = alpha
     best_score  = -(MATE_SCORE + 1)
     best_move   = NULL_MOVE
@@ -955,7 +978,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                         if child_wdl !== nothing && child_wdl != WDL_LOSS
                             unmake_move!(b, m, undo)
                             _path_pop!(si)
-                            break
+                            continue
                         end
                     end
                     gives_check = king_in_check(b, b.side)
@@ -972,10 +995,11 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
 
                     if si.stop; return 0; end
 
-                    if score > best_score
+                    this_is_rep = child_rep && score == 0
+                    if score > best_score || (score == best_score && best_is_rep && !this_is_rep)
                         best_score  = score
                         best_move   = m
-                        best_is_rep = child_rep && score == 0
+                        best_is_rep = this_is_rep
                         if score > alpha
                             alpha = score
                             if alpha >= beta
@@ -988,9 +1012,9 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                                 # would mislead future transpositions.
                                 if !best_is_rep
                                     store_score = best_score
-                                    if best_score > MATE_SCORE - MOVE_STACK_SIZE
+                                    if best_score > MATE_SCORE - 2000
                                         store_score = best_score + ply
-                                    elseif best_score < -(MATE_SCORE - MOVE_STACK_SIZE)
+                                    elseif best_score < -(MATE_SCORE - 2000)
                                         store_score = best_score - ply
                                     end
                                     _tt_put!(si.tt, b.hash, depth, store_score, TT_LOWER, best_move)
@@ -1104,10 +1128,11 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
 
         si.stop && break
 
-        if score > best_score
+        this_is_rep = child_rep && score == 0
+        if score > best_score || (score == best_score && best_is_rep && !this_is_rep)
             best_score  = score
             best_move   = m
-            best_is_rep = child_rep && score == 0
+            best_is_rep = this_is_rep
             if score > alpha
                 alpha = score
                 if alpha >= beta
@@ -1131,9 +1156,9 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                     # Skip TT write when score is rep-tainted (path-dependent).
                     if !best_is_rep
                         store_score = best_score
-                        if best_score > MATE_SCORE - MOVE_STACK_SIZE
+                        if best_score > MATE_SCORE - 2000
                             store_score = best_score + ply
-                        elseif best_score < -(MATE_SCORE - MOVE_STACK_SIZE)
+                        elseif best_score < -(MATE_SCORE - 2000)
                             store_score = best_score - ply
                         end
                         _tt_put!(si.tt, b.hash, depth, store_score, TT_LOWER, best_move)
@@ -1158,9 +1183,9 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         # rather than root-relative.  Retrieving at any ply then gives the correct
         # mate distance by applying the inverse adjustment.
         store_score = best_score
-        if best_score > MATE_SCORE - MOVE_STACK_SIZE
+        if best_score > MATE_SCORE - 2000
             store_score = best_score + ply
-        elseif best_score < -(MATE_SCORE - MOVE_STACK_SIZE)
+        elseif best_score < -(MATE_SCORE - 2000)
             store_score = best_score - ply
         end
         _tt_put!(si.tt, b.hash, depth, store_score, flag, best_move)
@@ -1239,7 +1264,7 @@ end
 # ── Root search (tracks best move + all root scores) ──────────────────────────
 function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
                       si::SearchInfo)::Tuple{Int,Move}
-    best_score  = -MATE_SCORE
+    best_score  = -(MATE_SCORE + 1)
     best_move   = NULL_MOVE
     best_is_rep = false
     orig_alpha  = alpha   # needed to distinguish exact from upper-bound results
@@ -1294,7 +1319,8 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
     #   fail-high (best_score >= beta):  TT_LOWER  — true score ≥ best_score
     #   inside window (> orig_alpha):    TT_EXACT  — this IS the minimax value
     #   fail-low (never beat orig_alpha): TT_UPPER — true score ≤ best_score
-    if !best_is_rep
+    if !best_is_rep && best_score > -(MATE_SCORE + 1)
+        # Root score normalization: root is ply 0, so best_score is already node-relative.
         flag = best_score >= beta      ? TT_LOWER :
                best_score > orig_alpha ? TT_EXACT : TT_UPPER
         _tt_put!(si.tt, b.hash, depth, best_score, flag, best_move)
@@ -1344,6 +1370,25 @@ function search_move(b::Board, time_ms::Int;
     # useful ordering signal built up during the engine's own search).
     si.history .÷= 2
     fill!(si.countermoves, NULL_MOVE)
+
+    # Root TB probe: if the current position is in the tablebases, we should
+    # know it immediately to set the base score and winning/drawing goals.
+    root_wdl = nothing
+    if si.config.syzygy && _INITIALIZED[] && b.castling == 0x0
+        if count_bits(all_occ(b)) <= TB_LARGEST[]
+            root_wdl = syzygy_probe_wdl(b)
+            if root_wdl !== nothing
+                # Pre-populate TT with the root TB score so the search can use it.
+                tb_score = root_wdl == WDL_WIN          ?  TB_WIN_SCORE :
+                           root_wdl == WDL_LOSS         ? -TB_WIN_SCORE :
+                           root_wdl == WDL_CURSED_WIN   ?  1 :
+                           root_wdl == WDL_BLESSED_LOSS ? -1 : 0
+                # Use depth 0 so it's easily overridden by actual search, but
+                # provides a floor/ceiling immediately.
+                _tt_put!(si.tt, b.hash, 0, tb_score, TT_EXACT, NULL_MOVE)
+            end
+        end
+    end
 
     best_move       = NULL_MOVE
     best_score      = 0
