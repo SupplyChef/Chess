@@ -101,22 +101,13 @@ function _pinned_mask(b::Board, pinned_side::Color)::BB
         for s in BitIter(bb(b, them, Rook) | bb(b, them, Queen))
             sf, sr = file_of(s), rank_of(s)
             kf, kr = file_of(target_sq), rank_of(target_sq)
-            ray_mask = sf == kf ? FILE_MASK[sf+1] : sr == kr ? RANK_MASK[sr+1] : BB(0)
-            ray_mask == 0 && continue
-            between = _slider_attacks(s, sq_bb(target_sq), ray_mask) &
-                      _slider_attacks(target_sq, sq_bb(s), ray_mask)
-            pieces_between = between & occ
+            pieces_between = _squares_between(s, target_sq) & occ
             if count_bits(pieces_between) == 1 && (pieces_between & b.occ[Int(pinned_side)+1]) != 0
                 pinned |= pieces_between
             end
         end
         for s in BitIter(bb(b, them, Bishop) | bb(b, them, Queen))
-            ray_mask = (DIAG_MASK[s+1] & sq_bb(target_sq)) != 0 ? DIAG_MASK[s+1] :
-                       (ADIAG_MASK[s+1] & sq_bb(target_sq)) != 0 ? ADIAG_MASK[s+1] : BB(0)
-            ray_mask == 0 && continue
-            between = _slider_attacks(s, sq_bb(target_sq), ray_mask) &
-                      _slider_attacks(target_sq, sq_bb(s), ray_mask)
-            pieces_between = between & occ
+            pieces_between = _squares_between(s, target_sq) & occ
             if count_bits(pieces_between) == 1 && (pieces_between & b.occ[Int(pinned_side)+1]) != 0
                 pinned |= pieces_between
             end
@@ -204,8 +195,7 @@ function _is_discovery(b::Board, m::Move)::Bool
         ray == 0 && continue
 
         # If fr was the CLOSEST piece to s on that ray
-        between = _slider_attacks(s, sq_bb(fr), ray) & _slider_attacks(fr, sq_bb(s), ray)
-        (between & occ) == 0 || continue
+        (_squares_between(s, fr) & occ) == 0 || continue
 
         # Now check if moving the piece at fr reveals an attack on something valuable
         # We check if the slider `s` now attacks anything it didn't before.

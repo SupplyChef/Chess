@@ -489,9 +489,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             else
                 continue
             end
-            between = _slider_attacks(s, sq_bb(their_k), ray_mask) &
-                      _slider_attacks(their_k, sq_bb(s), ray_mask)
-            pieces_between = between & occ
+            pieces_between = _squares_between(s, their_k) & occ
             if count_bits(pieces_between) == 1 && (pieces_between & their_occ) != 0
                 pinned_sq   = lsb(pieces_between)
                 pinned_kind = b.piece_on[pinned_sq+1].kind
@@ -507,9 +505,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             else
                 continue
             end
-            between = _slider_attacks(s, sq_bb(their_k), ray_mask) &
-                      _slider_attacks(their_k, sq_bb(s), ray_mask)
-            pieces_between = between & occ
+            pieces_between = _squares_between(s, their_k) & occ
             if count_bits(pieces_between) == 1 && (pieces_between & their_occ) != 0
                 pinned_sq   = lsb(pieces_between)
                 pinned_kind = b.piece_on[pinned_sq+1].kind

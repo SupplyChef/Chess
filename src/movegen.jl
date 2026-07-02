@@ -500,7 +500,7 @@ function get_pin_and_checker_masks(b::Board, us::Color)
     check_mask |= pawn_attacks(ks, us) & bb(b, them, Pawn)
 
     # Sliders
-    # We use a combined mask for speed; _slider_attacks is cheap.
+    # We use a combined mask for speed; sliding attacks are now O(1) via magic bitboards.
     rooks   = bb(b, them, Rook)   | bb(b, them, Queen)
     bishops = bb(b, them, Bishop) | bb(b, them, Queen)
 
