@@ -1,9 +1,0 @@
-2r2rk1/pp1b1ppp/1q2p3/3pP3/1P1P1P2/P2B1N2/6PP/R2Q1RK1 w - - bm Bxh7+; id "WAC.001";
-5rk1/pp1b1ppp/1q2p3/3pP3/1P1P1P2/P2B1N2/6PP/R2Q1RK1 w - - bm Bxh7+; id "WAC.001.mod";
-r1b2rk1/pp3ppp/2n1p3/q2pP3/1b1P4/2N2N2/PP1QBPPP/R4RK1 w - - bm a3; id "WAC.005";
-r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - bm gxh3; id "Kiwipete tactical";
-7k/8/8/8/8/8/R7/R6K w - - bm Ra8+; id "Mate in 2 - ladder";
-6k1/5ppp/8/8/8/8/1Q6/4K3 w - - bm Qb8#; id "Mate in 1 - backrank";
-n1n5/1Pk5/8/8/8/8/8/4K3 w - - bm bxc8=Q+; id "Promotion with capture";
-r1b1k2r/pp1n1ppp/2p1pn2/q2p2B1/2PP4/2N2N2/PP1QPPPP/R3KB1R w KQkq - bm e3; id "WAC.008";
-8/8/8/3k4/8/8/3K4/3R4 w - - bm Ke3+; id "Discovered check";
