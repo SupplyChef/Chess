@@ -274,14 +274,7 @@ function _filter_legal_precalculated!(ml::MoveList, b::Board, pin_mask::BB, chec
             target_mask = sq_bb(pinner_sq)
             pk = b.piece_on[pinner_sq+1].kind
             if pk == Rook || pk == Bishop || pk == Queen
-                f, r = file_of(ks), rank_of(ks)
-                pf, pr = file_of(pinner_sq), rank_of(pinner_sq)
-                mask = if f == pf; FILE_MASK[f+1]
-                       elseif r == pr; RANK_MASK[r+1]
-                       elseif f - r == pf - pr; DIAG_MASK[ks+1]
-                       else ADIAG_MASK[ks+1]
-                       end
-                target_mask |= _slider_attacks(ks, sq_bb(pinner_sq), mask) & _slider_attacks(pinner_sq, sq_bb(ks), mask)
+                target_mask |= _squares_between(ks, pinner_sq)
             end
             if (sq_bb(to) & target_mask) == 0; continue; end
         end
@@ -291,8 +284,10 @@ function _filter_legal_precalculated!(ml::MoveList, b::Board, pin_mask::BB, chec
             ff, rr = file_of(fr), rank_of(fr)
             pin_ray = if f == ff; FILE_MASK[f+1]
                       elseif r == rr; RANK_MASK[r+1]
-                      elseif f - r == ff - rr; DIAG_MASK[ks+1]
-                      else ADIAG_MASK[ks+1]
+                      elseif abs(f - ff) == abs(r - rr)
+                          (f - r == ff - rr) ? DIAG_MASK[ks+1] : ADIAG_MASK[ks+1]
+                      else
+                          BB(0) # Should not happen
                       end
             if (sq_bb(to) & pin_ray) == 0; continue; end
         end
@@ -505,7 +500,7 @@ function get_pin_and_checker_masks(b::Board, us::Color)
     check_mask |= pawn_attacks(ks, us) & bb(b, them, Pawn)
 
     # Sliders
-    # We use a combined mask for speed; _slider_attacks is cheap.
+    # We use a combined mask for speed; sliding attacks are now O(1) via magic bitboards.
     rooks   = bb(b, them, Rook)   | bb(b, them, Queen)
     bishops = bb(b, them, Bishop) | bb(b, them, Queen)
 
@@ -544,7 +539,7 @@ function get_pin_and_checker_masks(b::Board, us::Color)
                end
 
         # Squares strictly between ks and ps
-        between = _slider_attacks(ks, sq_bb(ps), mask) & _slider_attacks(ps, sq_bb(ks), mask)
+        between = _squares_between(ks, ps)
         blockers = between & occ
 
         if count_bits(blockers) == 1 && (blockers & b.occ[Int(us)+1]) != 0

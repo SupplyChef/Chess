@@ -125,16 +125,18 @@ end
 #   lower ray to the upper half of the integer so the subtraction propagates in
 #   the right direction.
 #
-# XOR of forward and reverse gives the full attack set on that line.
-# The mask clamp ensures bits that leaked into adjacent files/ranks are removed.
-@inline function _slider_attacks(s::Square, occ::BB, mask::BB)::BB
-    o = occ & mask
-    r = sq_bb(s)
-    fwd = (o - (r << 1)) & mask
-    rev_o = bitreverse(o)
-    rev_r = bitreverse(r)
-    rev = bitreverse((rev_o - (rev_r << 1)) & bitreverse(mask))
-    fwd ⊻ rev
+# Returns squares strictly between two squares on the same line (file, rank, or diagonal).
+# If the squares are not on the same line, the result is undefined.
+@inline function _squares_between(s1::Square, s2::Square)::BB
+    f1, r1 = file_of(s1), rank_of(s1)
+    f2, r2 = file_of(s2), rank_of(s2)
+
+    if f1 == f2 || r1 == r2
+        return rook_attacks(s1, sq_bb(s2)) & rook_attacks(s2, sq_bb(s1))
+    elseif abs(f1 - f2) == abs(r1 - r2)
+        return bishop_attacks(s1, sq_bb(s2)) & bishop_attacks(s2, sq_bb(s1))
+    end
+    BB(0)
 end
 
 # Magic Bitboards

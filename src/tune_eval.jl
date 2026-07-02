@@ -192,26 +192,14 @@ function _feat_piece_activity!(φ, b, ph::Int)
         for sq in BitIter(bb(b, c, Rook) | bb(b, c, Queen))
             sf = file_of(sq); sr = rank_of(sq)
             kf = file_of(their_k); kr = rank_of(their_k)
-            ray = if sf == kf; FILE_MASK[sf+1]
-                  elseif sr == kr; RANK_MASK[sr+1]
-                  else; continue
-                  end
-            between = _slider_attacks(sq, sq_bb(their_k), ray) &
-                      _slider_attacks(their_k, sq_bb(sq), ray)
-            pieces  = between & occ
+            pieces  = _squares_between(sq, their_k) & occ
             if count_bits(pieces) == 1 && (pieces & their_occ) != 0
                 kind = b.piece_on[lsb(pieces)+1].kind
                 φ[FEAT_PIN_SCALE] += s * PIECE_VALUE[Int(kind)+1] / 8.0
             end
         end
         for sq in BitIter(bb(b, c, Bishop) | bb(b, c, Queen))
-            ray = if (DIAG_MASK[sq+1] & sq_bb(their_k)) != 0;  DIAG_MASK[sq+1]
-                  elseif (ADIAG_MASK[sq+1] & sq_bb(their_k)) != 0; ADIAG_MASK[sq+1]
-                  else; continue
-                  end
-            between = _slider_attacks(sq, sq_bb(their_k), ray) &
-                      _slider_attacks(their_k, sq_bb(sq), ray)
-            pieces  = between & occ
+            pieces  = _squares_between(sq, their_k) & occ
             if count_bits(pieces) == 1 && (pieces & their_occ) != 0
                 kind = b.piece_on[lsb(pieces)+1].kind
                 φ[FEAT_PIN_SCALE] += s * PIECE_VALUE[Int(kind)+1] / 8.0

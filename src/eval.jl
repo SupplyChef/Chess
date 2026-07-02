@@ -489,9 +489,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             else
                 continue
             end
-            between = _slider_attacks(s, sq_bb(their_k), ray_mask) &
-                      _slider_attacks(their_k, sq_bb(s), ray_mask)
-            pieces_between = between & occ
+            pieces_between = _squares_between(s, their_k) & occ
             if count_bits(pieces_between) == 1 && (pieces_between & their_occ) != 0
                 pinned_sq   = lsb(pieces_between)
                 pinned_kind = b.piece_on[pinned_sq+1].kind
@@ -507,9 +505,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             else
                 continue
             end
-            between = _slider_attacks(s, sq_bb(their_k), ray_mask) &
-                      _slider_attacks(their_k, sq_bb(s), ray_mask)
-            pieces_between = between & occ
+            pieces_between = _squares_between(s, their_k) & occ
             if count_bits(pieces_between) == 1 && (pieces_between & their_occ) != 0
                 pinned_sq   = lsb(pieces_between)
                 pinned_kind = b.piece_on[pinned_sq+1].kind
@@ -786,7 +782,7 @@ function _eval_pawn_structure_impl(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)
             # because it cannot protect the one ahead of it.  −12 cp reflects
             # that doubled pawns also create weaknesses on the adjacent files
             # that the opponent can target with a rook or majority.
-            n > 1 && (score += sign * (n - 1) * (-20))
+            n > 1 && (score += sign * (n - 1) * (-12))
             # Isolated pawns: no friendly pawn on either adjacent file means
             # this pawn can never be defended by another pawn.  −20 cp is larger
             # than the doubled penalty because an isolated pawn is a permanent
