@@ -377,13 +377,14 @@ function _setup_pieces_piece!(t::WdlTable, data::Vector{UInt8}, p_data::Int)
 end
 
 # Determine enc_type from the bside=0 piece-code array read from the file.
-# Two identical adjacent codes (e.g. two knights) means 3-leader encoding (enc_type=0);
-# otherwise we use KK king-pair encoding (enc_type=2).
+# Determine enc_type from piece codes: count piece types that appear exactly
+# once in the piece list. 3 or more single pieces → 3-leader (0); else KK (2).
 function _detect_enc_type(pcs0::Vector{Int})::Int
-    for s in 2:length(pcs0)
-        pcs0[s] == pcs0[s-1] && return 0
+    j = 0
+    for p in unique(pcs0)
+        count(==(p), pcs0) == 1 && (j += 1)
     end
-    return 2
+    return j >= 3 ? 0 : 2
 end
 
 function _init_wdl_table!(t::WdlTable)
