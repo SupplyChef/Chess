@@ -739,9 +739,20 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                     alpha >= beta && return alpha
                     in_tb_win = true   # probe children to stay in winning zone
                     # fall through to TT probe and normal search
+                elseif wdl == WDL_LOSS
+                    # Mirror the WDL_WIN branch: a TB loss only guarantees the score
+                    # is at most a loss (-1), not the flat -(TB_WIN_SCORE - ply)
+                    # value.  Returning that flat value immediately here (without
+                    # searching moves) previously masked exact forced-mate scores —
+                    # every reply in a TB-won position like KRRvK is a WDL_LOSS for
+                    # the side to move, so short-circuiting here meant the search
+                    # never descended far enough to find the real mate and never
+                    # stored a hash move, truncating the PV to a single move.
+                    beta = min(beta, -1)
+                    alpha >= beta && return beta
+                    # fall through to TT probe and normal search
                 else
-                    tb_score = wdl == WDL_LOSS         ? -(TB_WIN_SCORE - ply) :
-                               wdl == WDL_CURSED_WIN   ?  1 :
+                    tb_score = wdl == WDL_CURSED_WIN   ?  1 :
                                wdl == WDL_BLESSED_LOSS ? -1 : 0
                     flag = tb_score >= beta  ? TT_LOWER :
                            tb_score <= alpha ? TT_UPPER : TT_EXACT
