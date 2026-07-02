@@ -205,27 +205,20 @@ end
         # ── KBvKR endgame: turn-awareness regression ─────────────────────────────
         # KBvKR is theoretically DRAWN with best play (bishop side can hold a
         # fortress), so WDL_DRAW is the expected result for most positions.
-        # However, when the bishop is en prise (capturable without recapture),
-        # the position is WDL_WIN for the rook side regardless of whose turn it is
-        # to move: if it is the rook side's turn they take immediately; if it is the
-        # bishop side's turn the bishop is about to be lost.
-        #
-        # This is the pattern that caused the move-58 blunder in the bug report:
-        # engine played Bc1 (bishop to hanging square), probe returned WDL_DRAW
-        # instead of WDL_LOSS (from White's perspective), so the blunder scored 0.
+        # When the bishop is en prise on the side to move's turn, the result
+        # depends on whether it has a safe square to retreat to.
         #
         # Position: WK c4, WB c1, BK e5, BR h1.
-        # Black (rook side) to move: Rh1xc1+ wins the bishop outright → KvKR.
-        # White (bishop side) to move: bishop is hanging, only way to avoid loss
-        # is to move it; a correctly-placed bishop draws, but from THIS square (c1)
-        # with the rook controlling the first rank, the bishop side is already lost.
-        #
-        # The probe must return WDL_WIN for the rook side and WDL_LOSS for the
-        # bishop side, correctly reflecting whose turn it is.
+        # Black (rook side) to move: Rh1xc1+ wins the bishop outright → KvKR (WIN).
+        # White (bishop side) to move: the rook attacks c1 along rank 1, but the
+        # dark-squared bishop has several escape squares off that rank (b2, a3,
+        # d2, e3, f4, g5, h6), so it simply retreats and the draw holds — verified
+        # against the tablebase (this position is NOT the move-58 blunder position,
+        # just a same-shaped sanity check on turn-awareness for a hanging piece).
         let b_hang_b = board_from_fen("8/8/8/4k3/2K5/8/8/2B4r b - - 0 1"),
             b_hang_w = board_from_fen("8/8/8/4k3/2K5/8/8/2B4r w - - 0 1")
-            @test syzygy_probe_wdl(b_hang_b) == WDL_WIN    # Black (rook side) to move: bishop is free
-            @test syzygy_probe_wdl(b_hang_w) == WDL_LOSS   # White (bishop side) to move: can't save it
+            @test syzygy_probe_wdl(b_hang_b) == WDL_WIN     # Black (rook side) to move: bishop is free
+            @test syzygy_probe_wdl(b_hang_w) == WDL_DRAW    # White (bishop side) to move: bishop escapes
         end
 
         # Non-hanging KBvKR: bishop safely placed → draw from both sides.
