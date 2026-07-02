@@ -813,6 +813,17 @@ using Test
         @test r.score == 0
     end
 
+    @testset "EPD Correctness Suite" begin
+        # Use a short time limit per position for the CI.
+        # Use joinpath(@__DIR__, ...) for robustness against CWD changes.
+        results = run_epd_suite(joinpath(@__DIR__, "correctness.epd"); time_ms=500, verbose=false)
+        failures = epd_failures(results)
+        for f in failures
+            println("EPD Failure in $(f.id): expected $(join(f.best_moves, " or ")), got $(f.engine_move)")
+        end
+        @test isempty(failures)
+    end
+
     include("syzygy_test.jl")
 
 end
