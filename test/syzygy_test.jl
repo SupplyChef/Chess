@@ -66,25 +66,25 @@ end
 @testset "Syzygy — enc_type detection from piece codes (Bug 2 regression)" begin
     # Piece codes: bits 0-2 = piece kind (King=6, Queen=5, Rook=4, Bishop=3, Knight=2, Pawn=1)
     #              bit  3   = color (0=white, 1=black → 8 added)
-    # KRvK: [wK=6, wR=4, bK=14]  — no consecutive equal → KK encoding (enc_type=2)
-    @test _detect_enc_type([6, 4, 14]) == 2
-    # KQvK: [wK=6, wQ=5, bK=14]  — no consecutive equal → KK encoding
-    @test _detect_enc_type([6, 5, 14]) == 2
+    # KRvK: [wK=6, wR=4, bK=14]  — 3 unique pieces → 3-leader (enc_type=0)
+    @test _detect_enc_type([6, 4, 14]) == 0
+    # KQvK: [wK=6, wQ=5, bK=14]  — 3 unique pieces → 3-leader (enc_type=0)
+    @test _detect_enc_type([6, 5, 14]) == 0
     # KBvK / KNvK — same shape
-    @test _detect_enc_type([6, 3, 14]) == 2   # KBvK
-    @test _detect_enc_type([6, 2, 14]) == 2   # KNvK
+    @test _detect_enc_type([6, 3, 14]) == 0   # KBvK
+    @test _detect_enc_type([6, 2, 14]) == 0   # KNvK
 
-    # KNNvK: [wK=6, wN=2, wN=2, bK=14] — positions 2 & 3 are equal → 3-leader (enc_type=0)
-    @test _detect_enc_type([6, 2, 2, 14]) == 0
-    # KRRvK, KBBvK, KQQvK — same pattern: two identical pieces in a row
-    @test _detect_enc_type([6, 4, 4, 14]) == 0   # KRRvK
-    @test _detect_enc_type([6, 3, 3, 14]) == 0   # KBBvK
-    @test _detect_enc_type([6, 5, 5, 14]) == 0   # KQQvK
+    # KNNvK: [wK=6, wN=2, wN=2, bK=14] — wN appears twice; only wK and bK are unique → KK (enc_type=2)
+    @test _detect_enc_type([6, 2, 2, 14]) == 2
+    # KRRvK, KBBvK, KQQvK — same pattern: two identical pieces → KK
+    @test _detect_enc_type([6, 4, 4, 14]) == 2   # KRRvK
+    @test _detect_enc_type([6, 3, 3, 14]) == 2   # KBBvK
+    @test _detect_enc_type([6, 5, 5, 14]) == 2   # KQQvK
 
-    # KRBvK: [wK=6, wR=4, wB=3, bK=14] — all distinct → KK encoding
-    @test _detect_enc_type([6, 4, 3, 14]) == 2
+    # KRBvK: [wK=6, wR=4, wB=3, bK=14] — 4 unique pieces → 3-leader (enc_type=0)
+    @test _detect_enc_type([6, 4, 3, 14]) == 0
 
-    # Edge: two-piece array (KvK) — no consecutive-equal check runs → KK
+    # Edge: two-piece array (KvK) — 2 unique pieces → KK (enc_type=2)
     @test _detect_enc_type([6, 14]) == 2
 end
 
