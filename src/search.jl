@@ -915,6 +915,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         return in_check ? -(MATE_SCORE - ply) : 0
     end
 
+    orig_alpha  = alpha
+
     # Guard: if we are in TB win mode, ensure we have at least one move that
     # stays in the winning zone. If not (all moves lead to non-loss for opponent),
     # then this node is not a TB win from our perspective.
@@ -937,8 +939,6 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             alpha = orig_alpha # Restore original alpha
         end
     end
-
-    orig_alpha  = alpha
     best_score  = -(MATE_SCORE + 1)
     best_move   = NULL_MOVE
     # Track whether best_score came from a child whose score was rep-draw-tainted.
