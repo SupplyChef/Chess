@@ -94,12 +94,12 @@ end
 # The Board uses a hybrid bitboard + mailbox representation.  Each structure
 # serves a different access pattern; keeping both avoids O(n) scans.
 #
-# Bitboards (bb matrix, 2×7 UInt64s):
-#   bb[color+1, kind] has one set bit per square that holds that piece.
+# Bitboards (bb, flat vector of 14 UInt64s indexed Int(c) + 2*Int(k) + 1):
+#   one set bit per square that holds that piece.
 #   Bulk operations — "all white pawns that can push", "any piece attacks e4" —
 #   are single shift/mask/OR instructions rather than loops over piece lists.
-#   The 2×7 layout wastes column 1 (NoPiece kind) but keeps indexing uniform:
-#   Int(c)+1 and Int(k) map directly to the matrix without subtraction.
+#   The layout wastes the two NoPiece slots but keeps indexing uniform:
+#   color and kind map directly to the index without subtraction.
 #
 # Mailbox (piece_on, 64-element array):
 #   piece_on[sq+1] returns the piece on that square in O(1).
@@ -126,8 +126,8 @@ mutable struct Board
     pawn_hash ::UInt64          # Zobrist hash of pawn positions only (for pawn eval cache)
 
     # Incremental evaluation state
-    mg_score  ::Int32           # total MG PST + material (ex King), from White's perspective
-    eg_score  ::Int32           # total EG PST + material (ex King), from White's perspective
+    mg_score  ::Int32           # total MG PST (all pieces incl. King), from White's perspective
+    eg_score  ::Int32           # total EG PST (all pieces incl. King), from White's perspective
     material  ::Int32           # material balance (ex King), from White's perspective
     phase     ::Int16           # game phase [0, 24]
 

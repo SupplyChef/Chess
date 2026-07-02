@@ -277,6 +277,13 @@ const PASSED_BONUS_B = (0, 130,  90, 60, 35, 15,   0, 0)
 @inline _passed_bonus(s::Square, c::Color)::Int =
     c == White ? PASSED_BONUS_W[rank_of(s)+1] : PASSED_BONUS_B[rank_of(s)+1]
 
+# Are ALL challenger pawns unable to advance one square?  `challenger` holds
+# pawns of color other(c): a White piece's challengers are BLACK pawns, which
+# advance downward — a challenger on square s is blocked when s-8 is occupied,
+# i.e. bit s is set in (occ << 8).  Mirrored for Black (advance +8, occ >> 8).
+@inline _challengers_blocked(challenger::BB, occ::BB, c::Color)::Bool =
+    (c == White ? (challenger & (occ << 8)) : (challenger & (occ >> 8))) == challenger
+
 # ── Insufficient-material draw detection ──────────────────────────────────────
 # FIDE rules: the game is drawn when neither side has enough material to force
 # checkmate by any sequence of legal moves.  The recognised cases are:
@@ -390,11 +397,8 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 score += sign * (pawn_supported ? 32 : 20)
             else
                 # Semi-outpost: all challenger pawns are immediately blocked.
-                # A White challenger at sq ep is blocked when sq ep+8 is occupied
-                # (occ >> 8 shifts occupancy down so bit ep is set iff ep+8 occupied).
-                # Symmetric shift for Black (advance = -8).
-                blocked = c == White ? (challenger & (occ >> 8)) : (challenger & (occ << 8))
-                blocked == challenger && (score += sign * (pawn_supported ? 14 : 8))
+                _challengers_blocked(challenger, occ, c) &&
+                    (score += sign * (pawn_supported ? 14 : 8))
             end
         end
 
@@ -480,15 +484,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         their_occ = b.occ[Int(other(c))+1]
 
         for s in BitIter(bb(b, c, Rook) | bb(b, c, Queen))
-            sf = file_of(s); sr = rank_of(s)
-            kf = file_of(their_k); kr = rank_of(their_k)
-            if sf == kf
-                ray_mask = @inbounds FILE_MASK[sf+1]
-            elseif sr == kr
-                ray_mask = @inbounds RANK_MASK[sr+1]
-            else
-                continue
-            end
+            (file_of(s) == file_of(their_k) || rank_of(s) == rank_of(their_k)) || continue
             pieces_between = _squares_between(s, their_k) & occ
             if count_bits(pieces_between) == 1 && (pieces_between & their_occ) != 0
                 pinned_sq   = lsb(pieces_between)
@@ -498,13 +494,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         end
 
         for s in BitIter(bb(b, c, Bishop) | bb(b, c, Queen))
-            if (@inbounds DIAG_MASK[s+1]) & sq_bb(their_k) != 0
-                ray_mask = @inbounds DIAG_MASK[s+1]
-            elseif (@inbounds ADIAG_MASK[s+1]) & sq_bb(their_k) != 0
-                ray_mask = @inbounds ADIAG_MASK[s+1]
-            else
-                continue
-            end
+            ((@inbounds(DIAG_MASK[s+1]) | @inbounds(ADIAG_MASK[s+1])) & sq_bb(their_k)) != 0 || continue
             pieces_between = _squares_between(s, their_k) & occ
             if count_bits(pieces_between) == 1 && (pieces_between & their_occ) != 0
                 pinned_sq   = lsb(pieces_between)
@@ -750,23 +740,13 @@ function _init_pawn_tt!()
     fill!(_PAWN_TT, _PawnEntry(UInt64(0), Int32(0)))
 end
 
+# Pawn-ONLY structure terms.  Everything scored here must depend exclusively on
+# the pawn configuration (plus the cfg pawn flags folded into the cache key):
+# the result is cached under b.pawn_hash, which does not change when pieces
+# move.  Terms that read piece bitboards or the full occupancy (OCB discount,
+# free-passer path check) live in _eval_pawn_structure below, OUTSIDE the cache.
 function _eval_pawn_structure_impl(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     score = 0
-
-    # Opposite-colored bishops with no other pieces: passed pawn bonuses halved.
-    ocb_only = false
-    if cfg.eval_ocb_discount
-        no_heavy = (bb(b, White, Rook)   | bb(b, Black, Rook)   |
-                    bb(b, White, Queen)  | bb(b, Black, Queen)  |
-                    bb(b, White, Knight) | bb(b, Black, Knight)) == BB(0)
-        if no_heavy &&
-           count_bits(bb(b, White, Bishop)) == 1 &&
-           count_bits(bb(b, Black, Bishop)) == 1
-            ws = lsb(bb(b, White, Bishop))
-            bs = lsb(bb(b, Black, Bishop))
-            ocb_only = ((file_of(ws) + rank_of(ws)) & 1) != ((file_of(bs) + rank_of(bs)) & 1)
-        end
-    end
 
     for c in (White, Black)
         sign = c == White ? 1 : -1
@@ -795,29 +775,10 @@ function _eval_pawn_structure_impl(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)
         passed_bb = BB(0)
         for s in BitIter(pawns)
             if _is_passed(s, c, enemy_pawns)
-                bonus = _passed_bonus(s, c)
-                ocb_only && (bonus = bonus ÷ 2)
-                score += sign * bonus
+                # Full bonus here; the OCB halving (piece-dependent) is applied
+                # as an adjustment outside the cache in _eval_pawn_structure.
+                score += sign * _passed_bonus(s, c)
                 passed_bb |= sq_bb(s)
-                # Free passer: path to promotion is clear of all pieces, AND no
-                # friendly pawn sits behind on the same file (doubled pawns are
-                # not truly free).  Use bitboard masks instead of rank loops:
-                #
-                #   _PASSED_W[s+1] covers files f-1..f+1 with ranks > r.
-                #   Masked to the pawn's file and excluding the promo rank (rank 7
-                #   for White = RANK_MASK[8]) gives exactly the path squares.
-                #   _PASSED_B[s+1] similarly covers ranks < r; masked to file f
-                #   gives the squares behind the pawn.
-                pawn_file = file_of(s)
-                if c == White
-                    fwd_mask    = _PASSED_W[s+1] & FILE_MASK[pawn_file+1] & ~RANK_MASK[8]
-                    behind_mask = _PASSED_B[s+1] & FILE_MASK[pawn_file+1]
-                else
-                    fwd_mask    = _PASSED_B[s+1] & FILE_MASK[pawn_file+1] & ~RANK_MASK[1]
-                    behind_mask = _PASSED_W[s+1] & FILE_MASK[pawn_file+1]
-                end
-                path_clear = (all_occ(b) & fwd_mask) == 0 && (bb(b, c, Pawn) & behind_mask) == 0
-                path_clear && (score += sign * 15)
             else
                 # Backward pawn detection: no friendly pawns in the support zone,
                 # and the square in front is attacked by an enemy pawn.
@@ -894,13 +855,83 @@ function _eval_pawn_structure_impl(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)
     score
 end
 
-@inline function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
-    idx = (b.pawn_hash % _PAWN_TT_SIZE) + 1
+# The cache key mixes in the cfg pawn-term flags so two configs that score the
+# same pawn skeleton differently (ablation runs, selfplay A/B) don't poison each
+# other's entries in the shared global table.
+@inline function _pawn_cache_key(b::Board, cfg::EngineConfig)::UInt64
+    k = b.pawn_hash
+    cfg.eval_connected_passers && (k ⊻= 0x9E3779B97F4A7C15)
+    cfg.eval_pawn_majority     && (k ⊻= 0xC2B2AE3D27D4EB4F)
+    k
+end
+
+@inline function _eval_pawn_structure_cached(b::Board, cfg::EngineConfig)::Int
+    key = _pawn_cache_key(b, cfg)
+    idx = (key % _PAWN_TT_SIZE) + 1
     pe  = @inbounds _PAWN_TT[idx]
-    pe.key == b.pawn_hash && return Int(pe.score)
+    pe.key == key && return Int(pe.score)
     s = _eval_pawn_structure_impl(b, cfg)
-    @inbounds _PAWN_TT[idx] = _PawnEntry(b.pawn_hash, Int32(s))
+    @inbounds _PAWN_TT[idx] = _PawnEntry(key, Int32(s))
     s
+end
+
+function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
+    score = _eval_pawn_structure_cached(b, cfg)
+
+    # ── Piece-dependent passer terms (NOT cacheable under the pawn hash) ──────
+    # These read piece bitboards / full occupancy, which change while the pawn
+    # hash stays fixed, so they are recomputed on every call.
+
+    # Opposite-colored bishops with no other pieces: passed pawn bonuses halved.
+    ocb_only = false
+    if cfg.eval_ocb_discount
+        no_heavy = (bb(b, White, Rook)   | bb(b, Black, Rook)   |
+                    bb(b, White, Queen)  | bb(b, Black, Queen)  |
+                    bb(b, White, Knight) | bb(b, Black, Knight)) == BB(0)
+        if no_heavy &&
+           count_bits(bb(b, White, Bishop)) == 1 &&
+           count_bits(bb(b, Black, Bishop)) == 1
+            ws = lsb(bb(b, White, Bishop))
+            bs = lsb(bb(b, Black, Bishop))
+            ocb_only = ((file_of(ws) + rank_of(ws)) & 1) != ((file_of(bs) + rank_of(bs)) & 1)
+        end
+    end
+
+    occ = all_occ(b)
+    for c in (White, Black)
+        sign        = c == White ? 1 : -1
+        pawns       = bb(b, c, Pawn)
+        enemy_pawns = bb(b, other(c), Pawn)
+        for s in BitIter(pawns)
+            _is_passed(s, c, enemy_pawns) || continue
+            # OCB halving: the cached score holds the full bonus; subtract the
+            # per-pawn difference so the result matches bonus ÷ 2 exactly.
+            if ocb_only
+                bonus = _passed_bonus(s, c)
+                score -= sign * (bonus - bonus ÷ 2)
+            end
+            # Free passer: path to promotion is clear of all pieces, AND no
+            # friendly pawn sits behind on the same file (doubled pawns are
+            # not truly free).
+            #
+            #   _PASSED_W[s+1] covers files f-1..f+1 with ranks > r.
+            #   Masked to the pawn's file and excluding the promo rank (rank 7
+            #   for White = RANK_MASK[8]) gives exactly the path squares.
+            #   _PASSED_B[s+1] similarly covers ranks < r; masked to file f
+            #   gives the squares behind the pawn.
+            pawn_file = file_of(s)
+            if c == White
+                fwd_mask    = _PASSED_W[s+1] & FILE_MASK[pawn_file+1] & ~RANK_MASK[8]
+                behind_mask = _PASSED_B[s+1] & FILE_MASK[pawn_file+1]
+            else
+                fwd_mask    = _PASSED_B[s+1] & FILE_MASK[pawn_file+1] & ~RANK_MASK[1]
+                behind_mask = _PASSED_W[s+1] & FILE_MASK[pawn_file+1]
+            end
+            path_clear = (occ & fwd_mask) == 0 && (pawns & behind_mask) == 0
+            path_clear && (score += sign * 15)
+        end
+    end
+    score
 end
 
 # ── King-safety pawn shield ────────────────────────────────────────────────────
@@ -921,13 +952,8 @@ end
 # the shield geometry doesn't apply.
 function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     # Game phase: 24 = full material, 0 = king+pawns only.
-    ph = 0
-    for c in (White, Black)
-        ph += count_bits(bb(b, c, Knight)) + count_bits(bb(b, c, Bishop))
-        ph += 2 * count_bits(bb(b, c, Rook))
-        ph += 4 * count_bits(bb(b, c, Queen))
-    end
-    ph = min(ph, 24)
+    # b.phase is maintained incrementally by _add_piece!/_remove_piece!.
+    ph = Int(clamp(b.phase, 0, 24))
 
     score = 0
     occ   = all_occ(b)

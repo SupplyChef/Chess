@@ -289,6 +289,35 @@ using Test
         @test evaluate(b_out).piece_activity > evaluate(b_no_out).piece_activity
     end
 
+    @testset "Knight outpost - challenger blocked direction" begin
+        # Regression: the blocked test used to shift occupancy the wrong way,
+        # checking the square BEHIND the challenger instead of its advance square.
+        e6 = sq_bb(sq(4, 5)); e5 = sq_bb(sq(4, 4)); e7 = sq_bb(sq(4, 6))
+        # White's challengers are black pawns: e6 pawn advances to e5.
+        @test Chess._challengers_blocked(e6, e5, White) == true    # blocker on advance square
+        @test Chess._challengers_blocked(e6, e7, White) == false   # piece behind ≠ blocked
+        # Black's challengers are white pawns: e3 pawn advances to e4.
+        e3 = sq_bb(sq(4, 2)); e4 = sq_bb(sq(4, 3)); e2 = sq_bb(sq(4, 1))
+        @test Chess._challengers_blocked(e3, e4, Black) == true
+        @test Chess._challengers_blocked(e3, e2, Black) == false
+    end
+
+    @testset "Pawn cache - occupancy-dependent terms not cached" begin
+        # Regression: the free-passer bonus reads the full occupancy, but the
+        # pawn cache is keyed by the pawn hash only.  Two positions with the
+        # same pawn skeleton but different piece placement must still be scored
+        # differently when a piece blocks the passer's path.
+        cfg = EngineConfig()
+        b_clear   = board_from_fen("4k3/8/8/4P3/8/8/8/4K3 w - - 0 1")
+        b_blocked = board_from_fen("4k3/4N3/8/4P3/8/8/8/4K3 w - - 0 1")
+        @test b_clear.pawn_hash == b_blocked.pawn_hash
+        s_clear   = Chess._eval_pawn_structure(b_clear, cfg)    # populates the cache
+        s_blocked = Chess._eval_pawn_structure(b_blocked, cfg)  # must not reuse it verbatim
+        @test s_clear - s_blocked == 15   # free-passer bonus present only when path is clear
+        # And a repeat lookup (cache hit path) must agree with the first.
+        @test Chess._eval_pawn_structure(b_clear, cfg) == s_clear
+    end
+
     # ── Search ────────────────────────────────────────────────────────────────
 
     @testset "Search - finds free capture" begin
@@ -318,6 +347,22 @@ using Test
         r = search_move(b, 200)
         @test r.score == 0
         @test r.move == NULL_MOVE
+    end
+
+    @testset "Search - expired clock still returns a legal move" begin
+        # Regression: when the clock expired during the depth-1 iteration the
+        # partial result was discarded and NULL_MOVE returned even though legal
+        # moves exist (the Lichess driver then treated the game as over).
+        b  = board_from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1")
+        si = SearchInfo()
+        ml = MoveList()
+        generate_moves!(ml, b)
+        legal = Set(ml[i] for i in 1:length(ml))
+        for _ in 1:3
+            r = search_move(b, 0; si, verbose = false)   # budget already expired
+            @test r.move != NULL_MOVE
+            @test r.move in legal
+        end
     end
 
     @testset "Search - SearchInfo reuse keeps TT" begin

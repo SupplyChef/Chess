@@ -35,6 +35,17 @@ const ACTIVE_GAMES    = Set{String}()
 const PV_HISTORY      = Dict{String, Vector{Tuple{Int, Vector{Move}, Int}}}()
 const OPENING_POSTED  = Dict{String, Bool}()   # true once opening name has been posted
 
+# Single long-lived SearchInfo for coaching searches.  A SearchInfo owns a
+# ~200 MB transposition table; constructing one per opponent move (the old
+# behaviour) allocated and zero-filled that table on every coaching call.
+# Safe to share across games: @async tasks are cooperatively scheduled and
+# search_move never yields mid-search, so coaching searches cannot interleave.
+const COACH_SI = Ref{Union{Nothing, SearchInfo}}(nothing)
+function _coach_si()::SearchInfo
+    COACH_SI[] === nothing && (COACH_SI[] = SearchInfo())
+    COACH_SI[]
+end
+
 # ── Lichess API helpers ────────────────────────────────────────────────────────
 
 # Percent-encode a string for use in application/x-www-form-urlencoded bodies.
@@ -190,7 +201,7 @@ function _coaching_async(game_id::String, moves_played::Vector{Move}, remaining_
             # Julia @async tasks are cooperative — a long coaching search holds
             # the CPU and delays our next main search if the opponent plays fast.
             coaching_ms = clamp(remaining_ms ÷ 10, 50, 500)
-            r_coach  = search_move(b_coach, coaching_ms; si = SearchInfo(), verbose = false)
+            r_coach  = search_move(b_coach, coaching_ms; si = _coach_si(), verbose = false)
             msg = explain_opponent_move(b_coach, opp_move, r_coach)
             # Critical moment detection: flag when opponent's move shifted the
             # position significantly in their favour.
@@ -310,8 +321,12 @@ function play_game(game_id::String)
     while !done
         try
             HTTP.open("GET", url, NDJSON_HDR; stream = true) do io
+                # NDJSON is one JSON document per line.  readavailable returns
+                # arbitrary byte chunks (several events, or half of one), which
+                # made JSON3 throw and tore the stream down; readline respects
+                # the framing.
                 while !eof(io)
-                    line = String(readavailable(io))
+                    line = readline(io)
                     isempty(strip(line)) && continue
 
                     event = JSON3.read(line)
@@ -423,8 +438,9 @@ function listen_to_events()
         try
             HTTP.open("GET", url, NDJSON_HDR; stream = true) do io
                 println("Event stream connected.")
+                # One JSON event per line (NDJSON) — see note in play_game.
                 while !eof(io)
-                    line = String(readavailable(io))
+                    line = readline(io)
                     isempty(strip(line)) && continue
                     event = JSON3.read(line)
                     println("EVENT: $(event.type)")
