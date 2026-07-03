@@ -196,7 +196,9 @@ end
 
 # ── Check test ────────────────────────────────────────────────────────────────
 @inline function king_in_check(b::Board, c::Color)::Bool
-    ks = lsb(bb(b, c, King))
+    kb = bb(b, c, King)
+    kb == 0 && return false
+    ks = lsb(kb)
     sq_attacked_by(b, ks, other(c), all_occ(b))
 end
 
@@ -239,7 +241,9 @@ end
 function _filter_legal_precalculated!(ml::MoveList, b::Board, pin_mask::BB, check_mask::BB)
     us = b.side
     num_checkers = count_bits(check_mask)
-    ks = lsb(bb(b, us, King))
+    kb = bb(b, us, King)
+    kb == 0 && return
+    ks = lsb(kb)
 
     write_idx = 0
     @inbounds for i in 1:ml.count[]
@@ -422,7 +426,9 @@ end
 
 function _gen_king_moves!(ml, b, us, our_occ, their_occ, occ)
     them = other(us)
-    ks   = lsb(bb(b, us, King))
+    kb = bb(b, us, King)
+    kb == 0 && return
+    ks   = lsb(kb)
     atk  = king_attacks(ks) & ~our_occ
     for to in BitIter(atk & their_occ);  push!(ml, Move(ks, to, MF_CAPTURE)); end
     for to in BitIter(atk & ~their_occ); push!(ml, Move(ks, to, MF_QUIET));   end
@@ -475,7 +481,9 @@ end
 # If 0 bits: not in check. 1 bit: single check. 2+ bits: double check.
 function get_pin_and_checker_masks(b::Board, us::Color)
     them = other(us)
-    ks   = lsb(bb(b, us, King))
+    kb = bb(b, us, King)
+    kb == 0 && return BB(0), BB(0)
+    ks   = lsb(kb)
     occ  = all_occ(b)
 
     pin_mask   = BB(0)

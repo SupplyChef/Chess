@@ -506,7 +506,9 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     if cfg.eval_pins
     for c in (White, Black)
         sign     = c == White ? 1 : -1
-        their_k  = lsb(bb(b, other(c), King))
+        tkb      = bb(b, other(c), King)
+        tkb == 0 && continue
+        their_k  = lsb(tkb)
         their_occ = b.occ[Int(other(c))+1]
 
         # Use _line_through to quickly filter sliders that share a line with the enemy king
@@ -989,10 +991,14 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     occ   = all_occ(b)
     for c in (White, Black)
         sign     = c == White ? 1 : -1
-        ks       = lsb(bb(b, c, King))
+        kb       = bb(b, c, King)
+        kb == 0 && continue
+        ks       = lsb(kb)
         kf       = file_of(ks); kr = rank_of(ks)
-        their_ks = lsb(bb(b, other(c), King))
-        their_kf = file_of(their_ks)
+
+        their_kb = bb(b, other(c), King)
+        their_kf = their_kb != 0 ? file_of(lsb(their_kb)) : 4 # default to e-file
+
         pawns    = bb(b, c, Pawn)
         them     = other(c)
         fwd      = c == White ? 1 : -1

@@ -868,7 +868,9 @@ end
 # Number of fully open files in the 3-file zone centred on `c`'s king
 # (the files the opponent can use as invasion routes).
 function _open_files_near_king(b::Board, c::Color)::Int
-    kf        = file_of(lsb(bb(b, c, King)))
+    kb = bb(b, c, King)
+    kb == 0 && return 0
+    kf        = file_of(lsb(kb))
     all_pawns = bb(b, White, Pawn) | bb(b, Black, Pawn)
     n         = 0
     for df in -1:1
