@@ -83,8 +83,8 @@ const RANK_MASK  = Vector{BB}(undef, 8)
 const DIAG_MASK  = Vector{BB}(undef, 64)
 const ADIAG_MASK = Vector{BB}(undef, 64)
 
-const SQUARES_BETWEEN = Matrix{BB}(undef, 64, 64)
-const LINE_THROUGH    = Matrix{BB}(undef, 64, 64)
+const SQUARES_BETWEEN = zeros(BB, 64, 64)
+const LINE_THROUGH    = zeros(BB, 64, 64)
 
 function _init_masks!()
     for f in 0:7
@@ -226,14 +226,14 @@ end
 @inline function sq_attacked_by(b::Board, sq::Square, attacker::Color, occ::BB)::Bool
     a = attacker
     # Check Pawns (most frequent attackers)
-    (PAWN_ATTACKS[sq+1, Int(other(a))+1] & bb(b, a, Pawn)) != 0 && return true
+    ((PAWN_ATTACKS[sq+1, Int(other(a))+1] & bb(b, a, Pawn)) != 0) && return true
     # Check Knights
-    (knight_attacks(sq) & bb(b, a, Knight)) != 0 && return true
+    ((knight_attacks(sq) & bb(b, a, Knight)) != 0) && return true
     # Check King (often near the king in check detection)
-    (king_attacks(sq) & bb(b, a, King)) != 0 && return true
+    ((king_attacks(sq) & bb(b, a, King)) != 0) && return true
     # Check Sliders last (more expensive)
-    (rook_attacks(sq, occ) & (bb(b, a, Rook) | bb(b, a, Queen))) != 0 && return true
-    (bishop_attacks(sq, occ) & (bb(b, a, Bishop) | bb(b, a, Queen))) != 0 && return true
+    ((rook_attacks(sq, occ) & (bb(b, a, Rook) | bb(b, a, Queen))) != 0) && return true
+    ((bishop_attacks(sq, occ) & (bb(b, a, Bishop) | bb(b, a, Queen))) != 0) && return true
 
     false
 end

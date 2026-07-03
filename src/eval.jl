@@ -345,8 +345,8 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     # Pawn attack bitboards for mobility safety checks
     wp = bb(b, White, Pawn)
     bp = bb(b, Black, Pawn)
-    w_pawn_atk = ((wp << 7) & ~FILE_MASK[8]) | ((wp << 9) & ~FILE_MASK[1])
-    b_pawn_atk = ((bp >> 9) & ~FILE_MASK[8]) | ((bp >> 7) & ~FILE_MASK[1])
+    all_wp_atk = ((wp << 7) & ~FILE_MASK[8]) | ((wp << 9) & ~FILE_MASK[1])
+    all_bp_atk = ((bp >> 9) & ~FILE_MASK[8]) | ((bp >> 7) & ~FILE_MASK[1])
 
     for c in (White, Black)
         sign        = c == White ? 1 : -1
@@ -424,7 +424,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         for c in (White, Black)
             sign      = c == White ? 1 : -1
             our_occ   = b.occ[Int(c)+1]
-            their_atk = c == White ? b_pawn_atk : w_pawn_atk
+            their_atk = c == White ? all_bp_atk : all_wp_atk
 
             for s in BitIter(bb(b, c, Knight))
                 atk  = knight_attacks(s) & ~our_occ
@@ -469,32 +469,35 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             sign = c == White ? 1 : -1
             ctrl = 0
             # Use pre-calculated pawn attacks from earlier in this function
-            ctrl += count_bits((c == White ? w_pawn_atk : b_pawn_atk) & CENTER_BB)
+            ctrl += count_bits((c == White ? all_wp_atk : all_bp_atk) & CENTER_BB)
 
             # For other pieces, use attack unions to avoid square-by-square loops
             atk_union = BB(0)
             for s in BitIter(bb(b, c, Knight))
                 atk_union |= knight_attacks(s)
-                (atk_union & CENTER_BB) == CENTER_BB && break
+                ((atk_union & CENTER_BB) == CENTER_BB) && break
             end
             ctrl += count_bits(atk_union & CENTER_BB)
 
             atk_union = BB(0)
             for s in BitIter(bb(b, c, Bishop) | bb(b, c, Queen))
                 atk_union |= bishop_attacks(s, occ)
-                (atk_union & CENTER_BB) == CENTER_BB && break
+                ((atk_union & CENTER_BB) == CENTER_BB) && break
             end
             ctrl += count_bits(atk_union & CENTER_BB)
 
             atk_union = BB(0)
             for s in BitIter(bb(b, c, Rook) | bb(b, c, Queen))
                 atk_union |= rook_attacks(s, occ)
-                (atk_union & CENTER_BB) == CENTER_BB && break
+                ((atk_union & CENTER_BB) == CENTER_BB) && break
             end
             ctrl += count_bits(atk_union & CENTER_BB)
 
-            atk_union = king_attacks(lsb(bb(b, c, King)))
-            ctrl += count_bits(atk_union & CENTER_BB)
+            kb = bb(b, c, King)
+            if kb != 0
+                atk_union = king_attacks(lsb(kb))
+                ctrl += count_bits(atk_union & CENTER_BB)
+            end
 
             score += sign * ctrl
         end
@@ -517,9 +520,9 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             is_diag = (f_s != f_k && r_s != r_k)
 
             if is_diag
-                (bb(b, c, Bishop) | bb(b, c, Queen)) & sq_bb(s) == 0 && continue
+                ((bb(b, c, Bishop) | bb(b, c, Queen)) & sq_bb(s)) == 0 && continue
             else
-                (bb(b, c, Rook) | bb(b, c, Queen)) & sq_bb(s) == 0 && continue
+                ((bb(b, c, Rook) | bb(b, c, Queen)) & sq_bb(s)) == 0 && continue
             end
 
             pieces_between = _squares_between(s, their_k) & occ
@@ -1007,24 +1010,25 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
 
             # Check for attackers using symmetry: if our king zone attacks an enemy piece,
             # then that enemy piece attacks our king zone.
+            # Use a 'seen' bitboard to avoid double-counting multi-attacking pieces (like the Queen).
+            seen_attackers = BB(0)
 
             # Knight attackers
             knights = bb(b, them, Knight)
             for s in BitIter(king_zone)
-                atks = knight_attacks(s) & knights
+                atks = knight_attacks(s) & knights & ~seen_attackers
                 if atks != 0
                     cnt = count_bits(atks)
                     enemy_atk_count += cnt
                     enemy_atk_weight += cnt * 5
-                    # Remove the attackers we've counted to avoid double-counting if they attack multiple squares
-                    knights &= ~atks
+                    seen_attackers |= atks
                 end
             end
 
             # Bishop/Queen diagonal attackers
             diag_sliders = bb(b, them, Bishop) | bb(b, them, Queen)
             for s in BitIter(king_zone)
-                atks = bishop_attacks(s, occ) & diag_sliders
+                atks = bishop_attacks(s, occ) & diag_sliders & ~seen_attackers
                 if atks != 0
                     for as in BitIter(atks)
                         enemy_atk_count += 1
@@ -1032,14 +1036,14 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                         enemy_atk_weight += is_queen ? 20 : 5
                         queen_attacking |= is_queen
                     end
-                    diag_sliders &= ~atks
+                    seen_attackers |= atks
                 end
             end
 
             # Rook/Queen orthogonal attackers
             orth_sliders = bb(b, them, Rook) | bb(b, them, Queen)
             for s in BitIter(king_zone)
-                atks = rook_attacks(s, occ) & orth_sliders
+                atks = rook_attacks(s, occ) & orth_sliders & ~seen_attackers
                 if atks != 0
                     for as in BitIter(atks)
                         enemy_atk_count += 1
@@ -1047,7 +1051,7 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                         enemy_atk_weight += is_queen ? 20 : 8
                         queen_attacking |= is_queen
                     end
-                    orth_sliders &= ~atks
+                    seen_attackers |= atks
                 end
             end
 
