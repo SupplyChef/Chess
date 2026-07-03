@@ -280,15 +280,7 @@ function _filter_legal_precalculated!(ml::MoveList, b::Board, pin_mask::BB, chec
         end
 
         if (sq_bb(fr) & pin_mask) != 0
-            f, r = file_of(ks), rank_of(ks)
-            ff, rr = file_of(fr), rank_of(fr)
-            pin_ray = if f == ff; FILE_MASK[f+1]
-                      elseif r == rr; RANK_MASK[r+1]
-                      elseif abs(f - ff) == abs(r - rr)
-                          (f - r == ff - rr) ? DIAG_MASK[ks+1] : ADIAG_MASK[ks+1]
-                      else
-                          BB(0) # Should not happen
-                      end
+            pin_ray = _line_through(ks, fr)
             if (sq_bb(to) & pin_ray) == 0; continue; end
         end
 
