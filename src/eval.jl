@@ -46,8 +46,7 @@ end
 
 # Chebyshev (chessboard) distance: the number of king moves between two squares.
 # Equal to max(|Δfile|, |Δrank|) because the king can move diagonally.
-@inline _chebyshev(s1::Square, s2::Square)::Int =
-    max(abs(file_of(s1) - file_of(s2)), abs(rank_of(s1) - rank_of(s2)))
+@inline _chebyshev(s1::Square, s2::Square)::Int = @inbounds CHEBYSHEV[s1+1, s2+1]
 
 # All piece types now have separate MG and EG tables, blended by the same
 # phase taper used for the king: value = (ph×MG + (24−ph)×EG) ÷ 24.
@@ -1009,85 +1008,95 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         # We count how many enemy pieces (excluding pawns/king) attack any
         # square in the 3x3 zone around our king.
         if ph >= 8
-            king_zone = king_attacks(ks) | sq_bb(ks)
-            enemy_atk_count  = 0
-            enemy_atk_weight = 0
-            queen_attacking  = false
-
-            # Check for attackers using symmetry: if our king zone attacks an enemy piece,
-            # then that enemy piece attacks our king zone.
-            # Use a 'seen' bitboard to avoid double-counting multi-attacking pieces (like the Queen).
-            seen_attackers = BB(0)
-
-            # Knight attackers
+            # Quick check: are there any enemy sliders/knights that could even reach the zone?
+            # Use precomputed "rays to zone" for an initial fast filter.
             knights = bb(b, them, Knight)
-            for s in BitIter(king_zone)
-                atks = knight_attacks(s) & knights & ~seen_attackers
-                if atks != 0
-                    cnt = count_bits(atks)
-                    enemy_atk_count += cnt
-                    enemy_atk_weight += cnt * 5
-                    seen_attackers |= atks
-                end
-            end
-
-            # Bishop/Queen diagonal attackers
             diag_sliders = bb(b, them, Bishop) | bb(b, them, Queen)
-            for s in BitIter(king_zone)
-                atks = bishop_attacks(s, occ) & diag_sliders & ~seen_attackers
-                if atks != 0
-                    for as in BitIter(atks)
-                        enemy_atk_count += 1
-                        is_queen = (bb(b, them, Queen) & sq_bb(as)) != 0
-                        enemy_atk_weight += is_queen ? 20 : 5
-                        queen_attacking |= is_queen
-                    end
-                    seen_attackers |= atks
-                end
-            end
+            orth_sliders = bb(b, them, Rook)   | bb(b, them, Queen)
 
-            # Rook/Queen orthogonal attackers
-            orth_sliders = bb(b, them, Rook) | bb(b, them, Queen)
-            for s in BitIter(king_zone)
-                atks = rook_attacks(s, occ) & orth_sliders & ~seen_attackers
-                if atks != 0
-                    for as in BitIter(atks)
-                        enemy_atk_count += 1
-                        is_queen = (bb(b, them, Queen) & sq_bb(as)) != 0
-                        enemy_atk_weight += is_queen ? 20 : 8
-                        queen_attacking |= is_queen
-                    end
-                    seen_attackers |= atks
-                end
-            end
+            if (knights & KNIGHT_RAYS_TO_ZONE[ks+1]) != 0 ||
+               (diag_sliders & BISHOP_RAYS_TO_ZONE[ks+1]) != 0 ||
+               (orth_sliders & ROOK_RAYS_TO_ZONE[ks+1]) != 0
 
-            if enemy_atk_count >= 2
-                # Scale by phase: full strength at ph=24, vanishes at ph=0.
-                # Require at least 2 attackers (single piece probes aren't an attack).
-                # Use weight only — multiplying by count created quadratic scaling
-                # that let 4 attackers hit ~160cp, making piece sacrifices look free.
-                #
-                # Sustained-attack factor: reduce penalty when the attacker lacks
-                # follow-through capability.
-                #   - No queen in the attack zone → ÷2 (minor-piece attacks stall
-                #     without the queen's long-range coverage).
-                #   - Attacker has ≤2 non-pawn pieces total → ×2/5 (the attackers
-                #     are their entire army; no reinforcements can join).
-                # Represented as integer fraction sus_num/sus_den (no floats).
-                them_piece_count = count_bits(
-                    bb(b, them, Knight) | bb(b, them, Bishop) |
-                    bb(b, them, Rook)   | bb(b, them, Queen))
-                sus_num = 4
-                sus_den = 4
-                if !queen_attacking
-                    sus_den *= 2
+                king_zone = king_attacks(ks) | sq_bb(ks)
+                enemy_atk_count  = 0
+                enemy_atk_weight = 0
+                queen_attacking  = false
+
+                # Check for attackers using symmetry: if our king zone attacks an enemy piece,
+                # then that enemy piece attacks our king zone.
+                # Use a 'seen' bitboard to avoid double-counting multi-attacking pieces (like the Queen).
+                seen_attackers = BB(0)
+
+                # Knight attackers
+                potential_knights = knights & KNIGHT_RAYS_TO_ZONE[ks+1]
+                if potential_knights != 0
+                    for as in BitIter(potential_knights)
+                        if (knight_attacks(as) & king_zone) != 0
+                            enemy_atk_count += 1
+                            enemy_atk_weight += 5
+                            seen_attackers |= sq_bb(as)
+                        end
+                    end
                 end
-                if them_piece_count <= 2
-                    sus_num *= 2
-                    sus_den *= 5
+
+                # Diagonal sliders (Bishop/Queen)
+                potential_diag = diag_sliders & BISHOP_RAYS_TO_ZONE[ks+1]
+                if potential_diag != 0
+                    for as in BitIter(potential_diag)
+                        if (bishop_attacks(as, occ) & king_zone) != 0
+                            enemy_atk_count += 1
+                            is_queen = (bb(b, them, Queen) & sq_bb(as)) != 0
+                            enemy_atk_weight += is_queen ? 20 : 5
+                            queen_attacking |= is_queen
+                            seen_attackers |= sq_bb(as)
+                        end
+                    end
                 end
-                penalty = (enemy_atk_weight * ph * sus_num) ÷ (24 * sus_den)
-                score -= sign * penalty
+
+                # Orthogonal sliders (Rook/Queen)
+                potential_orth = orth_sliders & ROOK_RAYS_TO_ZONE[ks+1]
+                if potential_orth != 0
+                    for as in BitIter(potential_orth)
+                        (sq_bb(as) & seen_attackers) != 0 && continue
+                        if (rook_attacks(as, occ) & king_zone) != 0
+                            enemy_atk_count += 1
+                            is_queen = (bb(b, them, Queen) & sq_bb(as)) != 0
+                            enemy_atk_weight += is_queen ? 20 : 8
+                            queen_attacking |= is_queen
+                            seen_attackers |= sq_bb(as)
+                        end
+                    end
+                end
+
+                if enemy_atk_count >= 2
+                    # Scale by phase: full strength at ph=24, vanishes at ph=0.
+                    # Require at least 2 attackers (single piece probes aren't an attack).
+                    # Use weight only — multiplying by count created quadratic scaling
+                    # that let 4 attackers hit ~160cp, making piece sacrifices look free.
+                    #
+                    # Sustained-attack factor: reduce penalty when the attacker lacks
+                    # follow-through capability.
+                    #   - No queen in the attack zone → ÷2 (minor-piece attacks stall
+                    #     without the queen's long-range coverage).
+                    #   - Attacker has ≤2 non-pawn pieces total → ×2/5 (the attackers
+                    #     are their entire army; no reinforcements can join).
+                    # Represented as integer fraction sus_num/sus_den (no floats).
+                    them_piece_count = count_bits(
+                        bb(b, them, Knight) | bb(b, them, Bishop) |
+                        bb(b, them, Rook)   | bb(b, them, Queen))
+                    sus_num = 4
+                    sus_den = 4
+                    if !queen_attacking
+                        sus_den *= 2
+                    end
+                    if them_piece_count <= 2
+                        sus_num *= 2
+                        sus_den *= 5
+                    end
+                    penalty = (enemy_atk_weight * ph * sus_num) ÷ (24 * sus_den)
+                    score -= sign * penalty
+                end
             end
         end
 

@@ -85,6 +85,11 @@ const ADIAG_MASK = Vector{BB}(undef, 64)
 
 const SQUARES_BETWEEN = zeros(BB, 64, 64)
 const LINE_THROUGH    = zeros(BB, 64, 64)
+const CHEBYSHEV       = zeros(Int, 64, 64)
+
+const KNIGHT_RAYS_TO_ZONE = zeros(BB, 64)
+const BISHOP_RAYS_TO_ZONE = zeros(BB, 64)
+const ROOK_RAYS_TO_ZONE   = zeros(BB, 64)
 
 function _init_masks!()
     for f in 0:7
@@ -133,6 +138,30 @@ function _init_masks!()
         end
         SQUARES_BETWEEN[s1+1, s2+1] = m
         LINE_THROUGH[s1+1, s2+1] = line
+        CHEBYSHEV[s1+1, s2+1] = max(abs(f1 - f2), abs(r1 - r2))
+    end
+end
+
+function _init_rays_to_zone!()
+    for s in 0:63
+        zone = king_attacks(s) | sq_bb(s)
+        k_atks = BB(0)
+        for zs in BitIter(zone)
+            k_atks |= knight_attacks(zs)
+        end
+        KNIGHT_RAYS_TO_ZONE[s+1] = k_atks
+
+        b_atks = BB(0)
+        for zs in BitIter(zone)
+            b_atks |= bishop_attacks(zs, BB(0))
+        end
+        BISHOP_RAYS_TO_ZONE[s+1] = b_atks
+
+        r_atks = BB(0)
+        for zs in BitIter(zone)
+            r_atks |= rook_attacks(zs, BB(0))
+        end
+        ROOK_RAYS_TO_ZONE[s+1] = r_atks
     end
 end
 
@@ -373,4 +402,5 @@ function _init_attacks!()
     _init_masks!()
     _init_nonsliding_attacks!()
     _init_sliding_attacks!()
+    _init_rays_to_zone!()
 end
