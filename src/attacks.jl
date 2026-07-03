@@ -83,6 +83,9 @@ const RANK_MASK  = Vector{BB}(undef, 8)
 const DIAG_MASK  = Vector{BB}(undef, 64)
 const ADIAG_MASK = Vector{BB}(undef, 64)
 
+const SQUARES_BETWEEN = zeros(BB, 64, 64)
+const LINE_THROUGH    = zeros(BB, 64, 64)
+
 function _init_masks!()
     for f in 0:7
         m = BB(0)
@@ -106,6 +109,31 @@ function _init_masks!()
         DIAG_MASK[s+1]  = dm
         ADIAG_MASK[s+1] = adm
     end
+
+    for s1 in 0:63, s2 in 0:63
+        f1, r1 = file_of(s1), rank_of(s1)
+        f2, r2 = file_of(s2), rank_of(s2)
+        m = BB(0)
+        line = BB(0)
+        if f1 == f2
+            for r in min(r1, r2)+1:max(r1, r2)-1; m |= sq_bb(sq(f1, r)); end
+            line = FILE_MASK[f1+1]
+        elseif r1 == r2
+            for f in min(f1, f2)+1:max(f1, f2)-1; m |= sq_bb(sq(f, r1)); end
+            line = RANK_MASK[r1+1]
+        elseif abs(f1 - f2) == abs(r1 - r2)
+            df = f1 < f2 ? 1 : -1
+            dr = r1 < r2 ? 1 : -1
+            ff, rr = f1 + df, r1 + dr
+            while ff != f2
+                m |= sq_bb(sq(ff, rr))
+                ff += df; rr += dr
+            end
+            line = (f1 - r1 == f2 - r2) ? DIAG_MASK[s1+1] : ADIAG_MASK[s1+1]
+        end
+        SQUARES_BETWEEN[s1+1, s2+1] = m
+        LINE_THROUGH[s1+1, s2+1] = line
+    end
 end
 
 # ── Hyperbola quintessence for sliding attacks ─────────────────────────────────
@@ -126,17 +154,15 @@ end
 #   the right direction.
 #
 # Returns squares strictly between two squares on the same line (file, rank, or diagonal).
-# If the squares are not on the same line, the result is undefined.
+# If the squares are not on the same line, returns BB(0).
 @inline function _squares_between(s1::Square, s2::Square)::BB
-    f1, r1 = file_of(s1), rank_of(s1)
-    f2, r2 = file_of(s2), rank_of(s2)
+    @inbounds SQUARES_BETWEEN[s1+1, s2+1]
+end
 
-    if f1 == f2 || r1 == r2
-        return rook_attacks(s1, sq_bb(s2)) & rook_attacks(s2, sq_bb(s1))
-    elseif abs(f1 - f2) == abs(r1 - r2)
-        return bishop_attacks(s1, sq_bb(s2)) & bishop_attacks(s2, sq_bb(s1))
-    end
-    BB(0)
+# Returns a bitboard of the entire line (file, rank, or diagonal) passing through s1 and s2.
+# If they are not on a line, returns BB(0).
+@inline function _line_through(s1::Square, s2::Square)::BB
+    @inbounds LINE_THROUGH[s1+1, s2+1]
 end
 
 # Magic Bitboards
@@ -199,16 +225,17 @@ end
 
 @inline function sq_attacked_by(b::Board, sq::Square, attacker::Color, occ::BB)::Bool
     a = attacker
-    (
-        knight_attacks(sq) & bb(b, a, Knight) |
-        king_attacks(sq)   & bb(b, a, King)   |
-        rook_attacks(sq, occ)   & (bb(b, a, Rook)   | bb(b, a, Queen)) |
-        bishop_attacks(sq, occ) & (bb(b, a, Bishop) | bb(b, a, Queen)) |
-        # Use the OTHER color's pawn-attack index so we look in the attacker's
-        # forward direction: e.g. to find white pawns attacking sq, use the black
-        # pawn table (which looks downward, the direction white pawns come FROM).
-        PAWN_ATTACKS[sq+1, Int(other(a))+1] & bb(b, a, Pawn)
-    ) != 0
+    # Check Pawns (most frequent attackers)
+    ((PAWN_ATTACKS[sq+1, Int(other(a))+1] & bb(b, a, Pawn)) != 0) && return true
+    # Check Knights
+    ((knight_attacks(sq) & bb(b, a, Knight)) != 0) && return true
+    # Check King (often near the king in check detection)
+    ((king_attacks(sq) & bb(b, a, King)) != 0) && return true
+    # Check Sliders last (more expensive)
+    ((rook_attacks(sq, occ) & (bb(b, a, Rook) | bb(b, a, Queen))) != 0) && return true
+    ((bishop_attacks(sq, occ) & (bb(b, a, Bishop) | bb(b, a, Queen))) != 0) && return true
+
+    false
 end
 
 function _rook_attacks_slow(s::Square, occ::BB)

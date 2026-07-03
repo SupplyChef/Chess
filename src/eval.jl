@@ -211,6 +211,8 @@ const PST_KING_EG = Int16[
     -50,-30,-30,-30,-30,-30,-30,-50,
 ]
 
+const CENTER_BB = BB(0x0000001818000000)
+
 # ── Passed-pawn corridor masks ─────────────────────────────────────────────────
 # A pawn is "passed" when no enemy pawn can ever block or capture it — i.e.,
 # there is no enemy pawn in the three-file corridor (own file + adjacent files)
@@ -343,8 +345,8 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     # Pawn attack bitboards for mobility safety checks
     wp = bb(b, White, Pawn)
     bp = bb(b, Black, Pawn)
-    w_pawn_atk = ((wp << 7) & ~FILE_MASK[8]) | ((wp << 9) & ~FILE_MASK[1])
-    b_pawn_atk = ((bp >> 9) & ~FILE_MASK[8]) | ((bp >> 7) & ~FILE_MASK[1])
+    all_wp_atk = ((wp << 7) & ~FILE_MASK[8]) | ((wp << 9) & ~FILE_MASK[1])
+    all_bp_atk = ((bp >> 9) & ~FILE_MASK[8]) | ((bp >> 7) & ~FILE_MASK[1])
 
     for c in (White, Black)
         sign        = c == White ? 1 : -1
@@ -422,7 +424,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         for c in (White, Black)
             sign      = c == White ? 1 : -1
             our_occ   = b.occ[Int(c)+1]
-            their_atk = c == White ? b_pawn_atk : w_pawn_atk
+            their_atk = c == White ? all_bp_atk : all_wp_atk
 
             for s in BitIter(bb(b, c, Knight))
                 atk  = knight_attacks(s) & ~our_occ
@@ -466,13 +468,37 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         for c in (White, Black)
             sign = c == White ? 1 : -1
             ctrl = 0
-            for cs in (sq(3,3), sq(4,3), sq(3,4), sq(4,4))
-                (pawn_attacks(cs, other(c)) & bb(b, c, Pawn))                              != 0 && (ctrl += 1)
-                (knight_attacks(cs)          & bb(b, c, Knight))                            != 0 && (ctrl += 1)
-                (bishop_attacks(cs, occ)     & (bb(b, c, Bishop) | bb(b, c, Queen)))       != 0 && (ctrl += 1)
-                (rook_attacks(cs, occ)       & (bb(b, c, Rook)   | bb(b, c, Queen)))       != 0 && (ctrl += 1)
-                (king_attacks(cs)            & bb(b, c, King))                              != 0 && (ctrl += 1)
+            # Use pre-calculated pawn attacks from earlier in this function
+            ctrl += count_bits((c == White ? all_wp_atk : all_bp_atk) & CENTER_BB)
+
+            # For other pieces, use attack unions to avoid square-by-square loops
+            atk_union = BB(0)
+            for s in BitIter(bb(b, c, Knight))
+                atk_union |= knight_attacks(s)
+                ((atk_union & CENTER_BB) == CENTER_BB) && break
             end
+            ctrl += count_bits(atk_union & CENTER_BB)
+
+            atk_union = BB(0)
+            for s in BitIter(bb(b, c, Bishop) | bb(b, c, Queen))
+                atk_union |= bishop_attacks(s, occ)
+                ((atk_union & CENTER_BB) == CENTER_BB) && break
+            end
+            ctrl += count_bits(atk_union & CENTER_BB)
+
+            atk_union = BB(0)
+            for s in BitIter(bb(b, c, Rook) | bb(b, c, Queen))
+                atk_union |= rook_attacks(s, occ)
+                ((atk_union & CENTER_BB) == CENTER_BB) && break
+            end
+            ctrl += count_bits(atk_union & CENTER_BB)
+
+            kb = bb(b, c, King)
+            if kb != 0
+                atk_union = king_attacks(lsb(kb))
+                ctrl += count_bits(atk_union & CENTER_BB)
+            end
+
             score += sign * ctrl
         end
     end
@@ -480,21 +506,27 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     if cfg.eval_pins
     for c in (White, Black)
         sign     = c == White ? 1 : -1
-        their_k  = lsb(bb(b, other(c), King))
+        tkb      = bb(b, other(c), King)
+        tkb == 0 && continue
+        their_k  = lsb(tkb)
         their_occ = b.occ[Int(other(c))+1]
 
-        for s in BitIter(bb(b, c, Rook) | bb(b, c, Queen))
-            (file_of(s) == file_of(their_k) || rank_of(s) == rank_of(their_k)) || continue
-            pieces_between = _squares_between(s, their_k) & occ
-            if count_bits(pieces_between) == 1 && (pieces_between & their_occ) != 0
-                pinned_sq   = lsb(pieces_between)
-                pinned_kind = b.piece_on[pinned_sq+1].kind
-                score += sign * PIECE_VALUE[Int(pinned_kind)+1] ÷ 8
-            end
-        end
+        # Use _line_through to quickly filter sliders that share a line with the enemy king
+        for s in BitIter(bb(b, c, Rook) | bb(b, c, Bishop) | bb(b, c, Queen))
+            line = _line_through(s, their_k)
+            line == 0 && continue
 
-        for s in BitIter(bb(b, c, Bishop) | bb(b, c, Queen))
-            ((@inbounds(DIAG_MASK[s+1]) | @inbounds(ADIAG_MASK[s+1])) & sq_bb(their_k)) != 0 || continue
+            # Check if slider is the right type for the line
+            f_s, r_s = file_of(s), rank_of(s)
+            f_k, r_k = file_of(their_k), rank_of(their_k)
+            is_diag = (f_s != f_k && r_s != r_k)
+
+            if is_diag
+                ((bb(b, c, Bishop) | bb(b, c, Queen)) & sq_bb(s)) == 0 && continue
+            else
+                ((bb(b, c, Rook) | bb(b, c, Queen)) & sq_bb(s)) == 0 && continue
+            end
+
             pieces_between = _squares_between(s, their_k) & occ
             if count_bits(pieces_between) == 1 && (pieces_between & their_occ) != 0
                 pinned_sq   = lsb(pieces_between)
@@ -959,10 +991,14 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     occ   = all_occ(b)
     for c in (White, Black)
         sign     = c == White ? 1 : -1
-        ks       = lsb(bb(b, c, King))
+        kb       = bb(b, c, King)
+        kb == 0 && continue
+        ks       = lsb(kb)
         kf       = file_of(ks); kr = rank_of(ks)
-        their_ks = lsb(bb(b, other(c), King))
-        their_kf = file_of(their_ks)
+
+        their_kb = bb(b, other(c), King)
+        their_kf = their_kb != 0 ? file_of(lsb(their_kb)) : 4 # default to e-file
+
         pawns    = bb(b, c, Pawn)
         them     = other(c)
         fwd      = c == White ? 1 : -1
@@ -978,25 +1014,50 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             enemy_atk_weight = 0
             queen_attacking  = false
 
-            for s in BitIter(bb(b, them, Knight))
-                if (knight_attacks(s) & king_zone) != 0
-                    enemy_atk_count += 1; enemy_atk_weight += 5
+            # Check for attackers using symmetry: if our king zone attacks an enemy piece,
+            # then that enemy piece attacks our king zone.
+            # Use a 'seen' bitboard to avoid double-counting multi-attacking pieces (like the Queen).
+            seen_attackers = BB(0)
+
+            # Knight attackers
+            knights = bb(b, them, Knight)
+            for s in BitIter(king_zone)
+                atks = knight_attacks(s) & knights & ~seen_attackers
+                if atks != 0
+                    cnt = count_bits(atks)
+                    enemy_atk_count += cnt
+                    enemy_atk_weight += cnt * 5
+                    seen_attackers |= atks
                 end
             end
-            for s in BitIter(bb(b, them, Bishop))
-                if (bishop_attacks(s, occ) & king_zone) != 0
-                    enemy_atk_count += 1; enemy_atk_weight += 5
+
+            # Bishop/Queen diagonal attackers
+            diag_sliders = bb(b, them, Bishop) | bb(b, them, Queen)
+            for s in BitIter(king_zone)
+                atks = bishop_attacks(s, occ) & diag_sliders & ~seen_attackers
+                if atks != 0
+                    for as in BitIter(atks)
+                        enemy_atk_count += 1
+                        is_queen = (bb(b, them, Queen) & sq_bb(as)) != 0
+                        enemy_atk_weight += is_queen ? 20 : 5
+                        queen_attacking |= is_queen
+                    end
+                    seen_attackers |= atks
                 end
             end
-            for s in BitIter(bb(b, them, Rook))
-                if (rook_attacks(s, occ) & king_zone) != 0
-                    enemy_atk_count += 1; enemy_atk_weight += 8
-                end
-            end
-            for s in BitIter(bb(b, them, Queen))
-                if (queen_attacks(s, occ) & king_zone) != 0
-                    enemy_atk_count += 1; enemy_atk_weight += 20
-                    queen_attacking = true
+
+            # Rook/Queen orthogonal attackers
+            orth_sliders = bb(b, them, Rook) | bb(b, them, Queen)
+            for s in BitIter(king_zone)
+                atks = rook_attacks(s, occ) & orth_sliders & ~seen_attackers
+                if atks != 0
+                    for as in BitIter(atks)
+                        enemy_atk_count += 1
+                        is_queen = (bb(b, them, Queen) & sq_bb(as)) != 0
+                        enemy_atk_weight += is_queen ? 20 : 8
+                        queen_attacking |= is_queen
+                    end
+                    seen_attackers |= atks
                 end
             end
 

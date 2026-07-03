@@ -196,7 +196,9 @@ end
 
 # ── Check test ────────────────────────────────────────────────────────────────
 @inline function king_in_check(b::Board, c::Color)::Bool
-    ks = lsb(bb(b, c, King))
+    kb = bb(b, c, King)
+    kb == 0 && return false
+    ks = lsb(kb)
     sq_attacked_by(b, ks, other(c), all_occ(b))
 end
 
@@ -239,7 +241,9 @@ end
 function _filter_legal_precalculated!(ml::MoveList, b::Board, pin_mask::BB, check_mask::BB)
     us = b.side
     num_checkers = count_bits(check_mask)
-    ks = lsb(bb(b, us, King))
+    kb = bb(b, us, King)
+    kb == 0 && return
+    ks = lsb(kb)
 
     write_idx = 0
     @inbounds for i in 1:ml.count[]
@@ -280,15 +284,7 @@ function _filter_legal_precalculated!(ml::MoveList, b::Board, pin_mask::BB, chec
         end
 
         if (sq_bb(fr) & pin_mask) != 0
-            f, r = file_of(ks), rank_of(ks)
-            ff, rr = file_of(fr), rank_of(fr)
-            pin_ray = if f == ff; FILE_MASK[f+1]
-                      elseif r == rr; RANK_MASK[r+1]
-                      elseif abs(f - ff) == abs(r - rr)
-                          (f - r == ff - rr) ? DIAG_MASK[ks+1] : ADIAG_MASK[ks+1]
-                      else
-                          BB(0) # Should not happen
-                      end
+            pin_ray = _line_through(ks, fr)
             if (sq_bb(to) & pin_ray) == 0; continue; end
         end
 
@@ -430,7 +426,9 @@ end
 
 function _gen_king_moves!(ml, b, us, our_occ, their_occ, occ)
     them = other(us)
-    ks   = lsb(bb(b, us, King))
+    kb = bb(b, us, King)
+    kb == 0 && return
+    ks   = lsb(kb)
     atk  = king_attacks(ks) & ~our_occ
     for to in BitIter(atk & their_occ);  push!(ml, Move(ks, to, MF_CAPTURE)); end
     for to in BitIter(atk & ~their_occ); push!(ml, Move(ks, to, MF_QUIET));   end
@@ -483,7 +481,9 @@ end
 # If 0 bits: not in check. 1 bit: single check. 2+ bits: double check.
 function get_pin_and_checker_masks(b::Board, us::Color)
     them = other(us)
-    ks   = lsb(bb(b, us, King))
+    kb = bb(b, us, King)
+    kb == 0 && return BB(0), BB(0)
+    ks   = lsb(kb)
     occ  = all_occ(b)
 
     pin_mask   = BB(0)
