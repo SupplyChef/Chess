@@ -16,6 +16,10 @@ struct UndoInfo
     captured_sq::Int    # differs from to_sq for en-passant
     hash::UInt64
     pawn_hash::UInt64
+    mg_score::Int32
+    eg_score::Int32
+    material::Int32
+    phase::Int16
 end
 
 function make_move!(b::Board, m::Move)::UndoInfo
@@ -30,6 +34,10 @@ function make_move!(b::Board, m::Move)::UndoInfo
     hm_save        = b.halfmove
     hash_save      = b.hash
     pawn_hash_save = b.pawn_hash
+    mg_save        = b.mg_score
+    eg_save        = b.eg_score
+    mat_save       = b.material
+    phase_save     = b.phase
 
     # XOR out the parts of the Zobrist hash that are about to change.
     # Castling rights and en-passant square each have their own Zobrist key
@@ -94,7 +102,8 @@ function make_move!(b::Board, m::Move)::UndoInfo
     if us == Black; b.fullmove += 1; end
     b.side = them
 
-    UndoInfo(captured_kind, ep_sq_save, cast_save, hm_save, captured_sq, hash_save, pawn_hash_save)
+    UndoInfo(captured_kind, ep_sq_save, cast_save, hm_save, captured_sq, hash_save, pawn_hash_save,
+             mg_save, eg_save, mat_save, phase_save)
 end
 
 function unmake_move!(b::Board, m::Move, undo::UndoInfo)
@@ -102,6 +111,11 @@ function unmake_move!(b::Board, m::Move, undo::UndoInfo)
     # risk of hash drift from floating-point or ordering differences.
     b.hash      = undo.hash
     b.pawn_hash = undo.pawn_hash
+    b.mg_score  = undo.mg_score
+    b.eg_score  = undo.eg_score
+    b.material  = undo.material
+    b.phase     = undo.phase
+
     b.side      = other(b.side)
     us = b.side; them = other(us)
     fr = from_sq(m); to = to_sq(m); fl = flags(m)
@@ -111,33 +125,37 @@ function unmake_move!(b::Board, m::Move, undo::UndoInfo)
     b.halfmove  = undo.halfmove
 
     moved_kind = @inbounds b.piece_on[to+1].kind
-    _remove_piece!(b, us, moved_kind, to)
+    _remove_piece_no_eval!(b, us, moved_kind, to)
 
     # On promotion the piece on `to` is the promoted piece, not the pawn —
     # restore a pawn, not the promoted piece.
     restore_kind = (fl & MF_PROMO) != 0 ? Pawn : moved_kind
-    _add_piece!(b, us, restore_kind, fr)
+    _add_piece_no_eval!(b, us, restore_kind, fr)
 
     if undo.captured_kind != NoPiece
-        _add_piece!(b, them, undo.captured_kind, undo.captured_sq)
+        _add_piece_no_eval!(b, them, undo.captured_kind, undo.captured_sq)
     end
 
     if fl == MF_KS_CAST
         rf, rt = us == White ? (H1, F1) : (H8, F8)
-        _remove_piece!(b, us, Rook, rt); _add_piece!(b, us, Rook, rf)
+        _remove_piece_no_eval!(b, us, Rook, rt); _add_piece_no_eval!(b, us, Rook, rf)
     elseif fl == MF_QS_CAST
         rf, rt = us == White ? (A1, D1) : (A8, D8)
-        _remove_piece!(b, us, Rook, rt); _add_piece!(b, us, Rook, rf)
+        _remove_piece_no_eval!(b, us, Rook, rt); _add_piece_no_eval!(b, us, Rook, rf)
     end
 
     if us == Black; b.fullmove -= 1; end
 end
 
-@inline function _remove_piece!(b::Board, c::Color, k::PieceKind, s::Square)
+@inline function _remove_piece_no_eval!(b::Board, c::Color, k::PieceKind, s::Square)
     mask = sq_bb(s)
     @inbounds b.bb[Int(c) + 2*Int(k) + 1] &= ~mask
     @inbounds b.occ[Int(c)+1]             &= ~mask
     @inbounds b.piece_on[s+1]           = NO_PIECE
+end
+
+@inline function _remove_piece!(b::Board, c::Color, k::PieceKind, s::Square)
+    _remove_piece_no_eval!(b, c, k, s)
 
     # Incremental eval
     @inbounds mg = MG_TABLE[Int(c)+1, Int(k)+1, s+1]
@@ -156,11 +174,15 @@ end
     @inbounds b.phase -= PHASE_TABLE[Int(k)+1]
 end
 
-@inline function _add_piece!(b::Board, c::Color, k::PieceKind, s::Square)
+@inline function _add_piece_no_eval!(b::Board, c::Color, k::PieceKind, s::Square)
     mask = sq_bb(s)
     @inbounds b.bb[Int(c) + 2*Int(k) + 1] |= mask
     @inbounds b.occ[Int(c)+1]             |= mask
     @inbounds b.piece_on[s+1]           = Piece(c, k)
+end
+
+@inline function _add_piece!(b::Board, c::Color, k::PieceKind, s::Square)
+    _add_piece_no_eval!(b, c, k, s)
 
     # Incremental eval
     @inbounds mg = MG_TABLE[Int(c)+1, Int(k)+1, s+1]
@@ -593,10 +615,13 @@ function generate_captures!(ml::MoveList, b::Board)
 
     pin_mask, check_mask = get_pin_and_checker_masks(b, us)
     num_checkers = count_bits(check_mask)
+    kb = bb(b, us, King)
 
     if num_checkers >= 2
-        ks = lsb(bb(b, us, King))
-        for to in BitIter(king_attacks(ks) & their_occ); push!(ml, Move(ks, to, MF_CAPTURE)); end
+        if kb != 0
+            ks = lsb(kb)
+            for to in BitIter(king_attacks(ks) & their_occ); push!(ml, Move(ks, to, MF_CAPTURE)); end
+        end
     else
         _gen_pawn_captures_promos!(ml, b, us, their_occ, ~occ)
 
@@ -612,8 +637,10 @@ function generate_captures!(ml::MoveList, b::Board)
         for fr in BitIter(bb(b, us, Queen))
             for to in BitIter(queen_attacks(fr, occ) & their_occ); push!(ml, Move(fr, to, MF_CAPTURE)); end
         end
-        ks = lsb(bb(b, us, King))
-        for to in BitIter(king_attacks(ks) & their_occ); push!(ml, Move(ks, to, MF_CAPTURE)); end
+        if kb != 0
+            ks = lsb(kb)
+            for to in BitIter(king_attacks(ks) & their_occ); push!(ml, Move(ks, to, MF_CAPTURE)); end
+        end
     end
 
     _filter_legal_precalculated!(ml, b, pin_mask, check_mask)
