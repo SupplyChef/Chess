@@ -615,10 +615,13 @@ function generate_captures!(ml::MoveList, b::Board)
 
     pin_mask, check_mask = get_pin_and_checker_masks(b, us)
     num_checkers = count_bits(check_mask)
+    kb = bb(b, us, King)
 
     if num_checkers >= 2
-        ks = lsb(bb(b, us, King))
-        for to in BitIter(king_attacks(ks) & their_occ); push!(ml, Move(ks, to, MF_CAPTURE)); end
+        if kb != 0
+            ks = lsb(kb)
+            for to in BitIter(king_attacks(ks) & their_occ); push!(ml, Move(ks, to, MF_CAPTURE)); end
+        end
     else
         _gen_pawn_captures_promos!(ml, b, us, their_occ, ~occ)
 
@@ -634,8 +637,10 @@ function generate_captures!(ml::MoveList, b::Board)
         for fr in BitIter(bb(b, us, Queen))
             for to in BitIter(queen_attacks(fr, occ) & their_occ); push!(ml, Move(fr, to, MF_CAPTURE)); end
         end
-        ks = lsb(bb(b, us, King))
-        for to in BitIter(king_attacks(ks) & their_occ); push!(ml, Move(ks, to, MF_CAPTURE)); end
+        if kb != 0
+            ks = lsb(kb)
+            for to in BitIter(king_attacks(ks) & their_occ); push!(ml, Move(ks, to, MF_CAPTURE)); end
+        end
     end
 
     _filter_legal_precalculated!(ml, b, pin_mask, check_mask)

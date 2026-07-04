@@ -187,7 +187,9 @@ function _feat_piece_activity!(φ, b, ph::Int)
     # Pins: feature = signed sum of pinned-piece-value÷8 (using default piece values)
     for c in (White, Black)
         s        = c == White ? 1.0 : -1.0
-        their_k  = lsb(bb(b, other(c), King))
+        tkb      = bb(b, other(c), King)
+        tkb == 0 && continue
+        their_k  = lsb(tkb)
         their_occ = b.occ[Int(other(c))+1]
         for sq in BitIter(bb(b, c, Rook) | bb(b, c, Queen))
             sf = file_of(sq); sr = rank_of(sq)
@@ -212,24 +214,31 @@ function _feat_piece_activity!(φ, b, ph::Int)
         eg_weight = Float64(24 - ph)
 
         # King proximity (asymmetric: bonus for the material-superior side)
-        let wk = lsb(bb(b, White, King)), bk = lsb(bb(b, Black, King))
-            dist      = _chebyshev(wk, bk)
-            prox_feat = (7 - dist) * eg_weight / 12.0
-            w_pieces  = count_bits(bb(b, White, Knight) | bb(b, White, Bishop) |
-                                   bb(b, White, Rook)   | bb(b, White, Queen))
-            b_pieces  = count_bits(bb(b, Black, Knight) | bb(b, Black, Bishop) |
-                                   bb(b, Black, Rook)   | bb(b, Black, Queen))
-            if w_pieces > b_pieces
-                φ[FEAT_TROPISM_KING_PROX] += prox_feat
-            elseif b_pieces > w_pieces
-                φ[FEAT_TROPISM_KING_PROX] -= prox_feat
+        let wkb = bb(b, White, King), bkb = bb(b, Black, King)
+            if wkb != 0 && bkb != 0
+                wk = lsb(wkb); bk = lsb(bkb)
+                dist      = _chebyshev(wk, bk)
+                prox_feat = (7 - dist) * eg_weight / 12.0
+                w_pieces  = count_bits(bb(b, White, Knight) | bb(b, White, Bishop) |
+                                       bb(b, White, Rook)   | bb(b, White, Queen))
+                b_pieces  = count_bits(bb(b, Black, Knight) | bb(b, Black, Bishop) |
+                                       bb(b, Black, Rook)   | bb(b, Black, Queen))
+                if w_pieces > b_pieces
+                    φ[FEAT_TROPISM_KING_PROX] += prox_feat
+                elseif b_pieces > w_pieces
+                    φ[FEAT_TROPISM_KING_PROX] -= prox_feat
+                end
             end
         end
 
         for c in (White, Black)
             s           = c == White ? 1.0 : -1.0
-            our_k       = lsb(bb(b, c, King))
-            their_k     = lsb(bb(b, other(c), King))
+            okb         = bb(b, c, King)
+            tkb         = bb(b, other(c), King)
+            (okb == 0 || tkb == 0) && continue
+
+            our_k       = lsb(okb)
+            their_k     = lsb(tkb)
             their_pawns = bb(b, other(c), Pawn)
             our_pawns   = bb(b, c, Pawn)
 
@@ -251,10 +260,13 @@ function _feat_piece_activity!(φ, b, ph::Int)
     # Rook-passer features
     for c in (White, Black)
         s           = c == White ? 1.0 : -1.0
+        tkb         = bb(b, other(c), King)
+        tkb == 0 && continue
+
         their_pawns = bb(b, other(c), Pawn)
         my_rooks    = bb(b, c, Rook)
         enemy_rooks = bb(b, other(c), Rook)
-        their_k     = lsb(bb(b, other(c), King))
+        their_k     = lsb(tkb)
 
         for psq in BitIter(bb(b, c, Pawn))
             _is_passed(psq, c, their_pawns) || continue
@@ -286,7 +298,10 @@ function _feat_piece_activity!(φ, b, ph::Int)
         psq = lsb(my_pawns); pf = file_of(psq)
         (pf == 0 || pf == 7) || continue
         promo_rank  = c == White ? 7 : 0
-        bish_sq     = lsb(bb(b, c, Bishop))
+
+        okb = bb(b, c, Bishop)
+        okb == 0 && continue
+        bish_sq     = lsb(okb)
         bish_color  = (file_of(bish_sq) + rank_of(bish_sq)) & 1
         promo_color = (pf + promo_rank) & 1
         bish_color != promo_color && (φ[FEAT_WRONG_BISHOP] -= s)
@@ -301,18 +316,25 @@ function _feat_piece_activity!(φ, b, ph::Int)
         count_bits(bb(b, c, Bishop)) == 1 || continue
         (bb(b,tc,Rook)|bb(b,tc,Queen)|bb(b,tc,Bishop)|bb(b,tc,Knight)|bb(b,tc,Pawn)) != BB(0) && continue
 
-        bish_sq    = lsb(bb(b, c, Bishop))
-        bish_color = (file_of(bish_sq) + rank_of(bish_sq)) & 1
-        their_k    = lsb(bb(b, tc, King))
-        kf = file_of(their_k); kr = rank_of(their_k)
+        okb = bb(b, c, Bishop)
+        tkb = bb(b, tc, King)
+        if okb != 0 && tkb != 0
+            bish_sq    = lsb(okb)
+            bish_color = (file_of(bish_sq) + rank_of(bish_sq)) & 1
+            their_k    = lsb(tkb)
+            kf = file_of(their_k); kr = rank_of(their_k)
         corner_dist = if bish_color == 0
             min(kf + kr, (7 - kf) + (7 - kr))
         else
             min(kf + (7 - kr), (7 - kf) + kr)
         end
-        φ[FEAT_KBNK_CORNER] += s * (14 - corner_dist)
-        our_k = lsb(bb(b, c, King))
-        φ[FEAT_KBNK_PROX]   += s * (7 - _chebyshev(our_k, their_k))
+            φ[FEAT_KBNK_CORNER] += s * (14 - corner_dist)
+            okkb = bb(b, c, King)
+            if okkb != 0
+                our_k = lsb(okkb)
+                φ[FEAT_KBNK_PROX]   += s * (7 - _chebyshev(our_k, their_k))
+            end
+        end
     end
 
     # Mopup (phase < 6, decisive material advantage)
@@ -322,12 +344,16 @@ function _feat_piece_activity!(φ, b, ph::Int)
             tc = other(c)
             (bb(b,tc,Rook)|bb(b,tc,Queen)|bb(b,tc,Bishop)|bb(b,tc,Knight)|bb(b,tc,Pawn)) != BB(0) && continue
             Int(b.material) * (c == White ? 1 : -1) < 400 && continue
-            their_k    = lsb(bb(b, tc, King))
-            tkf = file_of(their_k); tkr = rank_of(their_k)
-            corner_dist = min(tkf, 7-tkf, tkr, 7-tkr)
-            our_k = lsb(bb(b, c, King))
-            φ[FEAT_MOPUP_CORNER] += s * (7 - corner_dist)
-            φ[FEAT_MOPUP_PROX]   += s * (7 - _chebyshev(our_k, their_k))
+            tkb = bb(b, tc, King)
+            okb = bb(b, c, King)
+            if tkb != 0 && okb != 0
+                their_k    = lsb(tkb)
+                tkf = file_of(their_k); tkr = rank_of(their_k)
+                corner_dist = min(tkf, 7-tkf, tkr, 7-tkr)
+                our_k = lsb(okb)
+                φ[FEAT_MOPUP_CORNER] += s * (7 - corner_dist)
+                φ[FEAT_MOPUP_PROX]   += s * (7 - _chebyshev(our_k, their_k))
+            end
         end
     end
 end
@@ -339,8 +365,12 @@ function _feat_pawn_structure!(φ, b)
     no_heavy = (bb(b,White,Rook)|bb(b,Black,Rook)|bb(b,White,Queen)|bb(b,Black,Queen)|
                 bb(b,White,Knight)|bb(b,Black,Knight)) == BB(0)
     if no_heavy && count_bits(bb(b,White,Bishop)) == 1 && count_bits(bb(b,Black,Bishop)) == 1
-        ws = lsb(bb(b,White,Bishop)); bs = lsb(bb(b,Black,Bishop))
-        ocb_only = ((file_of(ws)+rank_of(ws)) & 1) != ((file_of(bs)+rank_of(bs)) & 1)
+        wbb = bb(b, White, Bishop)
+        bbb = bb(b, Black, Bishop)
+        if wbb != 0 && bbb != 0
+            ws = lsb(wbb); bs = lsb(bbb)
+            ocb_only = ((file_of(ws)+rank_of(ws)) & 1) != ((file_of(bs)+rank_of(bs)) & 1)
+        end
     end
     discount = ocb_only ? 0.5 : 1.0
 
@@ -435,7 +465,9 @@ function _feat_king_safety!(φ, b, ph::Int)
 
     for c in (White, Black)
         s     = c == White ? 1.0 : -1.0
-        ks    = lsb(bb(b, c, King))
+        okb   = bb(b, c, King)
+        okb == 0 && continue
+        ks    = lsb(okb)
         kf    = file_of(ks); kr = rank_of(ks)
         pawns = bb(b, c, Pawn)
         them  = other(c)
@@ -522,13 +554,16 @@ function _feat_king_safety!(φ, b, ph::Int)
         end
 
         # Pawn storm (opposite-flank castling)
-        their_ks  = lsb(bb(b, other(c), King))
-        their_kf  = file_of(their_ks)
-        if abs(kf - their_kf) >= 3
+        tkb = bb(b, other(c), King)
+        if tkb != 0
+            their_ks  = lsb(tkb)
+            their_kf  = file_of(their_ks)
+            if abs(kf - their_kf) >= 3
             for psq in BitIter(pawns)
                 abs(file_of(psq) - their_kf) <= 2 || continue
                 advance = c == White ? rank_of(psq) - 2 : 5 - rank_of(psq)
                 advance > 0 && (φ[FEAT_PAWN_STORM] += s * advance)
+            end
             end
         end
     end

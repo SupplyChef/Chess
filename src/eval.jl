@@ -313,9 +313,13 @@ function _is_insufficient_material(b::Board)::Bool
     # K+B vs K+B: draw only when both bishops travel on the same colour.
     # A bishop's square colour is (file+rank) mod 2.
     if wn == 0 && bn == 0 && wb == 1 && bb_ == 1
-        ws = lsb(bb(b, White, Bishop))
-        bs = lsb(bb(b, Black, Bishop))
-        return (file_of(ws) + rank_of(ws)) & 1 == (file_of(bs) + rank_of(bs)) & 1
+        wbb = bb(b, White, Bishop)
+        bbb = bb(b, Black, Bishop)
+        if wbb != 0 && bbb != 0
+            ws = lsb(wbb)
+            bs = lsb(bbb)
+            return (file_of(ws) + rank_of(ws)) & 1 == (file_of(bs) + rank_of(bs)) & 1
+        end
     end
     false
 end
@@ -568,25 +572,32 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         eg_weight = 24 - ph   # 4..24
 
         # (d) King proximity — asymmetric, computed once.
-        let wk = lsb(bb(b, White, King))
-            bk = lsb(bb(b, Black, King))
-            king_dist  = _chebyshev(wk, bk)
-            prox_bonus = (7 - king_dist) * eg_weight * 4 ÷ 12
-            w_pieces = count_bits(bb(b, White, Knight) | bb(b, White, Bishop) |
-                                  bb(b, White, Rook)   | bb(b, White, Queen))
-            b_pieces = count_bits(bb(b, Black, Knight) | bb(b, Black, Bishop) |
-                                  bb(b, Black, Rook)   | bb(b, Black, Queen))
-            if w_pieces > b_pieces
-                score += prox_bonus
-            elseif b_pieces > w_pieces
-                score -= prox_bonus
+        let wkb = bb(b, White, King), bkb = bb(b, Black, King)
+            if wkb != 0 && bkb != 0
+                wk = lsb(wkb)
+                bk = lsb(bkb)
+                king_dist  = _chebyshev(wk, bk)
+                prox_bonus = (7 - king_dist) * eg_weight * 4 ÷ 12
+                w_pieces = count_bits(bb(b, White, Knight) | bb(b, White, Bishop) |
+                                      bb(b, White, Rook)   | bb(b, White, Queen))
+                b_pieces = count_bits(bb(b, Black, Knight) | bb(b, Black, Bishop) |
+                                      bb(b, Black, Rook)   | bb(b, Black, Queen))
+                if w_pieces > b_pieces
+                    score += prox_bonus
+                elseif b_pieces > w_pieces
+                    score -= prox_bonus
+                end
             end
         end
 
         for c in (White, Black)
             sign        = c == White ? 1 : -1
-            our_k       = lsb(bb(b, c, King))
-            their_k     = lsb(bb(b, other(c), King))
+            wkb = bb(b, c, King)
+            tkb = bb(b, other(c), King)
+            (wkb == 0 || tkb == 0) && continue
+
+            our_k       = lsb(wkb)
+            their_k     = lsb(tkb)
             our_pawns   = bb(b, c, Pawn)
             their_pawns = bb(b, other(c), Pawn)
 
@@ -609,10 +620,13 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     if cfg.eval_rook_passer
         for c in (White, Black)
             sign        = c == White ? 1 : -1
+            tkb         = bb(b, other(c), King)
+            tkb == 0 && continue
+
             their_pawns = bb(b, other(c), Pawn)
             my_rooks    = bb(b, c, Rook)
             enemy_rooks = bb(b, other(c), Rook)
-            their_k     = lsb(bb(b, other(c), King))
+            their_k     = lsb(tkb)
             for s in BitIter(bb(b, c, Pawn))
                 _is_passed(s, c, their_pawns) || continue
                 f = file_of(s); r = rank_of(s)
@@ -659,7 +673,10 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             pf = file_of(ps)
             (pf == 0 || pf == 7) || continue   # must be a rook pawn
             promo_rank = c == White ? 7 : 0
-            bish_sq    = lsb(bb(b, c, Bishop))
+
+            okb = bb(b, c, Bishop)
+            okb == 0 && continue
+            bish_sq    = lsb(okb)
             # Bishop and promotion square on different square colors → draw.
             bish_color  = (file_of(bish_sq) + rank_of(bish_sq)) & 1
             promo_color = (pf + promo_rank) & 1
@@ -710,7 +727,9 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
 
             bish_sq    = lsb(bb(b, c, Bishop))
             bish_color = (file_of(bish_sq) + rank_of(bish_sq)) & 1
-            their_k    = lsb(bb(b, their_c, King))
+            tkb        = bb(b, their_c, King)
+            tkb == 0 && continue
+            their_k    = lsb(tkb)
             kf = file_of(their_k); kr = rank_of(their_k)
             # Correct corners: a1=(0,0) and h8=(7,7) are light (sum even),
             #                  a8=(0,7) and h1=(7,0) are dark (sum odd).
@@ -720,7 +739,9 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 min(kf + (7 - kr), (7 - kf) + kr)
             end
             score += sign * (14 - corner_dist) * 12   # up to +168 cp
-            our_k  = lsb(bb(b, c, King))
+            okb = bb(b, c, King)
+            okb == 0 && continue
+            our_k  = lsb(okb)
             score += sign * (7 - _chebyshev(our_k, their_k)) * 8   # up to +56 cp
         end
     end
@@ -742,11 +763,15 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             # Winning side must have a significant material edge.
             Int(b.material) * sign < 400           && continue
 
-            their_k    = lsb(bb(b, their_c, King))
+            tkb = bb(b, their_c, King)
+            okb = bb(b, c, King)
+            (tkb == 0 || okb == 0) && continue
+
+            their_k    = lsb(tkb)
             their_kf   = file_of(their_k)
             their_kr   = rank_of(their_k)
             corner_dist = min(their_kf, 7 - their_kf, their_kr, 7 - their_kr)
-            our_k       = lsb(bb(b, c, King))
+            our_k       = lsb(okb)
             score += sign * (7 - corner_dist) * 15           # up to +105 cp
             score += sign * (7 - _chebyshev(our_k, their_k)) * 12   # up to +84 cp
         end
@@ -922,9 +947,13 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         if no_heavy &&
            count_bits(bb(b, White, Bishop)) == 1 &&
            count_bits(bb(b, Black, Bishop)) == 1
-            ws = lsb(bb(b, White, Bishop))
-            bs = lsb(bb(b, Black, Bishop))
-            ocb_only = ((file_of(ws) + rank_of(ws)) & 1) != ((file_of(bs) + rank_of(bs)) & 1)
+            wbb = bb(b, White, Bishop)
+            bbb = bb(b, Black, Bishop)
+            if wbb != 0 && bbb != 0
+                ws = lsb(wbb)
+                bs = lsb(bbb)
+                ocb_only = ((file_of(ws) + rank_of(ws)) & 1) != ((file_of(bs) + rank_of(bs)) & 1)
+            end
         end
     end
 
