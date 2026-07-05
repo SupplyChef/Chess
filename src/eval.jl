@@ -271,12 +271,19 @@ const (_BACKWARD_W, _BACKWARD_B) = _build_backward_masks()
 # The curve is intentionally steep to create urgency: each rank gain must look
 # more attractive than the defensive alternative, otherwise the engine sits on
 # a "winning" eval without converting.  A rank-7 pawn is essentially a free queen.
-# The rank-2→3 jump (+25 cp) ensures even newly-passed pawns are pushed promptly.
-const PASSED_BONUS_W = (0, 0, 15, 35, 60,  90, 130, 0)
-const PASSED_BONUS_B = (0, 130,  90, 60, 35, 15,   0, 0)
+#
+# We use separate MG and EG tables, tapered by game phase.  Passed pawns are
+# significantly less valuable in the middlegame when the board is crowded
+# and they can be easily blocked or counter-attacked.
+const PASSED_BONUS_MG_W = (0, 0, 10, 20, 35,  60, 100, 0)
+const PASSED_BONUS_MG_B = (0, 100, 60, 35, 20, 10,   0, 0)
+const PASSED_BONUS_EG_W = (0, 0, 20, 50, 85, 120, 160, 0)
+const PASSED_BONUS_EG_B = (0, 160, 120, 85, 50, 20,   0, 0)
 
-@inline _passed_bonus(s::Square, c::Color)::Int =
-    c == White ? PASSED_BONUS_W[rank_of(s)+1] : PASSED_BONUS_B[rank_of(s)+1]
+@inline _passed_bonus_mg(s::Square, c::Color)::Int =
+    c == White ? PASSED_BONUS_MG_W[rank_of(s)+1] : PASSED_BONUS_MG_B[rank_of(s)+1]
+@inline _passed_bonus_eg(s::Square, c::Color)::Int =
+    c == White ? PASSED_BONUS_EG_W[rank_of(s)+1] : PASSED_BONUS_EG_B[rank_of(s)+1]
 
 # Are ALL challenger pawns unable to advance one square?  `challenger` holds
 # pawns of color other(c): a White piece's challengers are BLACK pawns, which
@@ -801,6 +808,10 @@ end
 # the result is cached under b.pawn_hash, which does not change when pieces
 # move.  Terms that read piece bitboards or the full occupancy (OCB discount,
 # free-passer path check) live in _eval_pawn_structure below, OUTSIDE the cache.
+#
+# Note: passed pawn and connected passer bonuses are now phase-tapered and
+# therefore calculated in the caller to avoid cache poisoning or excessive
+# cache misses if the phase was part of the key.
 function _eval_pawn_structure_impl(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     score = 0
 
@@ -828,14 +839,8 @@ function _eval_pawn_structure_impl(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)
             (left == 0 && right == 0) && (score += sign * n * (-20))
         end
 
-        passed_bb = BB(0)
         for s in BitIter(pawns)
-            if _is_passed(s, c, enemy_pawns)
-                # Full bonus here; the OCB halving (piece-dependent) is applied
-                # as an adjustment outside the cache in _eval_pawn_structure.
-                score += sign * _passed_bonus(s, c)
-                passed_bb |= sq_bb(s)
-            else
+            if !_is_passed(s, c, enemy_pawns)
                 # Backward pawn detection: no friendly pawns in the support zone,
                 # and the square in front is attacked by an enemy pawn.
                 support_mask = c == White ? _BACKWARD_W[s+1] : _BACKWARD_B[s+1]
@@ -847,19 +852,6 @@ function _eval_pawn_structure_impl(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)
                         end
                     end
                 end
-            end
-        end
-
-        # Connected passed pawns: adjacent passers support each other and are
-        # very difficult to stop together — a lone piece cannot handle both
-        # simultaneously.  The bonus is large enough to clearly outweigh the
-        # cost of pushing versus making defensive moves.
-        if cfg.eval_connected_passers
-            for s in BitIter(passed_bb)
-                f = file_of(s)
-                neighbor = (f > 0 ? FILE_MASK[f]   : BB(0)) |
-                           (f < 7 ? FILE_MASK[f+2] : BB(0))
-                (passed_bb & neighbor) != 0 && (score += sign * 30)
             end
         end
 
@@ -933,6 +925,7 @@ end
 
 function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     score = _eval_pawn_structure_cached(b, cfg)
+    ph    = Int(clamp(b.phase, 0, 24))
 
     # ── Piece-dependent passer terms (NOT cacheable under the pawn hash) ──────
     # These read piece bitboards / full occupancy, which change while the pawn
@@ -962,23 +955,27 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
         sign        = c == White ? 1 : -1
         pawns       = bb(b, c, Pawn)
         enemy_pawns = bb(b, other(c), Pawn)
+        passed_bb   = BB(0)
+
         for s in BitIter(pawns)
             _is_passed(s, c, enemy_pawns) || continue
-            # OCB halving: the cached score holds the full bonus; subtract the
-            # per-pawn difference so the result matches bonus ÷ 2 exactly.
+            passed_bb |= sq_bb(s)
+
+            # Tapered passed pawn bonus: less in MG, more in EG.
+            bonus_mg = _passed_bonus_mg(s, c)
+            bonus_eg = _passed_bonus_eg(s, c)
+            bonus    = (ph * bonus_mg + (24 - ph) * bonus_eg) ÷ 24
+
+            # OCB halving
             if ocb_only
-                bonus = _passed_bonus(s, c)
-                score -= sign * (bonus - bonus ÷ 2)
+                bonus ÷= 2
             end
+            score += sign * bonus
+
             # Free passer: path to promotion is clear of all pieces, AND no
             # friendly pawn sits behind on the same file (doubled pawns are
             # not truly free).
-            #
-            #   _PASSED_W[s+1] covers files f-1..f+1 with ranks > r.
-            #   Masked to the pawn's file and excluding the promo rank (rank 7
-            #   for White = RANK_MASK[8]) gives exactly the path squares.
-            #   _PASSED_B[s+1] similarly covers ranks < r; masked to file f
-            #   gives the squares behind the pawn.
+            # Tapered: +10 in MG, +20 in EG.
             pawn_file = file_of(s)
             if c == White
                 fwd_mask    = _PASSED_W[s+1] & FILE_MASK[pawn_file+1] & ~RANK_MASK[8]
@@ -988,7 +985,25 @@ function _eval_pawn_structure(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 behind_mask = _PASSED_W[s+1] & FILE_MASK[pawn_file+1]
             end
             path_clear = (occ & fwd_mask) == 0 && (pawns & behind_mask) == 0
-            path_clear && (score += sign * 15)
+            if path_clear
+                fp_bonus = (ph * 10 + (24 - ph) * 20) ÷ 24
+                score += sign * fp_bonus
+            end
+        end
+
+        # Connected passed pawns: adjacent passers support each other and are
+        # very difficult to stop together.
+        # Tapered: +15 in MG, +40 in EG (per pawn in the pair).
+        if cfg.eval_connected_passers
+            for s in BitIter(passed_bb)
+                f = file_of(s)
+                neighbor = (f > 0 ? FILE_MASK[f]   : BB(0)) |
+                           (f < 7 ? FILE_MASK[f+2] : BB(0))
+                if (passed_bb & neighbor) != 0
+                    conn_bonus = (ph * 15 + (24 - ph) * 40) ÷ 24
+                    score += sign * conn_bonus
+                end
+            end
         end
     end
     score

@@ -16,7 +16,7 @@ function extract_features(b::Board)::Vector{Float64}
     ph_eg = 1.0 - ph_mg
     _feat_pst!(φ, b, ph_mg, ph_eg)
     _feat_piece_activity!(φ, b, ph)
-    _feat_pawn_structure!(φ, b)
+    _feat_pawn_structure!(φ, b, ph_mg, ph_eg)
     _feat_king_safety!(φ, b, ph)
     _feat_space!(φ, b)
     _feat_tempo!(φ, b)
@@ -359,7 +359,7 @@ function _feat_piece_activity!(φ, b, ph::Int)
 end
 
 # ── Pawn structure ─────────────────────────────────────────────────────────────
-function _feat_pawn_structure!(φ, b)
+function _feat_pawn_structure!(φ, b, ph_mg::Float64, ph_eg::Float64)
     # Opposite-colored bishops discount: halve passed-pawn bonuses
     ocb_only = false
     no_heavy = (bb(b,White,Rook)|bb(b,Black,Rook)|bb(b,White,Queen)|bb(b,Black,Queen)|
@@ -394,20 +394,16 @@ function _feat_pawn_structure!(φ, b)
         for psq in BitIter(pawns)
             if _is_passed(psq, c, enemy_pawns)
                 r = rank_of(psq)
-                # rank_bonus_idx mirrors PASSED_BONUS_W indexing (rank_of+1 for white,
-                # 8-rank_of for black). Active bonuses are at ranks 3-7 (indices 3-7).
                 rbi = c == White ? r + 1 : 8 - r
-                feat_idx = if rbi == 3; FEAT_PASSED_R3
-                           elseif rbi == 4; FEAT_PASSED_R4
-                           elseif rbi == 5; FEAT_PASSED_R5
-                           elseif rbi == 6; FEAT_PASSED_R6
-                           elseif rbi == 7; FEAT_PASSED_R7
-                           else; 0
-                           end
-                feat_idx > 0 && (φ[feat_idx] += s * discount)
+                if 3 <= rbi <= 7
+                    idx_mg = FEAT_PASSED_MG_R3 + (rbi - 3)
+                    idx_eg = FEAT_PASSED_EG_R3 + (rbi - 3)
+                    φ[idx_mg] += s * discount * ph_mg
+                    φ[idx_eg] += s * discount * ph_eg
+                end
                 passed_bb |= sq_bb(psq)
 
-                # Free passer bonus
+                # Free passer bonus (tapered)
                 pf = file_of(psq)
                 if c == White
                     fwd_mask    = _PASSED_W[psq+1] & FILE_MASK[pf+1] & ~RANK_MASK[8]
@@ -417,7 +413,8 @@ function _feat_pawn_structure!(φ, b)
                     behind_mask = _PASSED_W[psq+1] & FILE_MASK[pf+1]
                 end
                 if (all_occ(b) & fwd_mask) == 0 && (bb(b, c, Pawn) & behind_mask) == 0
-                    φ[FEAT_FREE_PASSER] += s   # no OCB discount (mirrors eval.jl)
+                    φ[FEAT_FREE_PASSER_MG] += s * ph_mg
+                    φ[FEAT_FREE_PASSER_EG] += s * ph_eg
                 end
             else
                 # Backward pawn
@@ -431,12 +428,15 @@ function _feat_pawn_structure!(φ, b)
             end
         end
 
-        # Connected passers
+        # Connected passers (tapered)
         for psq in BitIter(passed_bb)
             f = file_of(psq)
             nb = (f > 0 ? FILE_MASK[f]   : BB(0)) |
                  (f < 7 ? FILE_MASK[f+2] : BB(0))
-            (passed_bb & nb) != 0 && (φ[FEAT_CONNECTED_PASS] += s)  # +1 per passer in pair, no OCB
+            if (passed_bb & nb) != 0
+                φ[FEAT_CONNECTED_PASS_MG] += s * ph_mg
+                φ[FEAT_CONNECTED_PASS_EG] += s * ph_eg
+            end
         end
 
         # Pawn majority (queenside / kingside)
