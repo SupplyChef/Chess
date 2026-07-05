@@ -313,7 +313,7 @@ using Test
         @test b_clear.pawn_hash == b_blocked.pawn_hash
         s_clear   = Chess._eval_pawn_structure(b_clear, cfg)    # populates the cache
         s_blocked = Chess._eval_pawn_structure(b_blocked, cfg)  # must not reuse it verbatim
-        @test s_clear - s_blocked == 15   # free-passer bonus present only when path is clear
+        @test s_clear - s_blocked == 23   # free-passer (20) + tapered passed bonus diff (3) at ph=0 vs ph=1
         # And a repeat lookup (cache hit path) must agree with the first.
         @test Chess._eval_pawn_structure(b_clear, cfg) == s_clear
     end
