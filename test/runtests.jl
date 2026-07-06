@@ -400,6 +400,33 @@ using Test
         @test r.score == 0
     end
 
+    @testset "Regression - path must not double-count the root's own occurrence" begin
+        # Bug: si.path[1] is always the root's own hash (pushed by _search_root
+        # before its first candidate move, unchanged for the whole search). That
+        # single real occurrence is already reflected in prior_counts[root] —
+        # apply_moves! counts a position as soon as it is reached, and root is the
+        # position we are at right now. Scanning si.path from i=1 counted that same
+        # occurrence a second time, so any line transposing back to the root
+        # position was declared a draw after only its 2nd real occurrence instead
+        # of its 3rd.
+        b  = board_from_fen("4k3/8/8/8/8/8/Q7/4K3 w - - 0 1")
+        si = Chess.SearchInfo()
+        si.prior_counts     = Dict{UInt64,Int}(b.hash => 1)   # root's single real occurrence
+        si.root_prior_count = 1
+        si.time_limit       = time() + 60.0
+
+        # Simulate a search line that has returned to the root position one ply in
+        # (path[1] is always root's hash, pushed before root's first candidate move).
+        Chess._path_push!(si, b.hash)
+        score = Chess._negamax(b, 2, -100_000, 100_000, 1, si, false)
+
+        # This is only the 2nd real occurrence of the root position — it must not
+        # be flagged as an already-drawn repetition, and White (queen vs lone king)
+        # must still show a clearly winning score rather than the buggy immediate 0.
+        @test !si.rep_draw_flag
+        @test score > 100
+    end
+
     @testset "apply_moves! resets prior_counts after a capture" begin
         # After a capture, board.halfmove resets to 0 and apply_moves! must clear
         # prior_counts so pre-capture positions no longer pollute repetition detection.
@@ -839,23 +866,42 @@ using Test
         @test Chess._see_ge(b, m8, 0)   == true     # c8 is undefended: SEE = 0
     end
 
-    @testset "Draw rescue — root already seen twice scores as draw" begin
-        # If the root position itself has appeared >= 2 times before, Lichess will
-        # auto-enforce the draw on the next move.  The engine must report score 0.
+    @testset "Draw rescue — root already at its 3rd occurrence scores as draw" begin
+        # root_prior_count already includes the CURRENT occurrence (apply_moves!
+        # increments a position's count as soon as it is reached, and root is the
+        # position we are at right now). So root_prior_count == 3 means this exact
+        # position has already recurred for the 3rd time, right now — a draw
+        # claimable regardless of which move is played next.
         #
         # Ka1 vs Ka8+Qb6: white king only, clearly losing (queen dominates).
         # Only legal white move is Ka2 (b1 and b2 are covered by Qb6 along the b-file).
         # After Ka2 the position is still losing (black queen wins), so best_score < 0.
-        # When root_prior_count = 2, the draw rescue must override best_score to 0.
+        # When root_prior_count = 3, the draw rescue must override best_score to 0.
         b  = board_from_fen("k7/8/1q6/8/8/8/8/K7 w - - 0 1")
         si = SearchInfo()
         # Prime the TT so the engine has established a negative best_score.
         _ = search_move(b, 200; si)
 
-        # Claim the root has been seen twice — this is the 3rd occurrence.
-        pc = Dict{UInt64,Int}(b.hash => 2)
+        # Claim the root has already occurred 3 times, counting now.
+        pc = Dict{UInt64,Int}(b.hash => 3)
         r  = search_move(b, 500; si, prior_counts = pc)
         @test r.score == 0
+    end
+
+    @testset "Regression - root seen only twice must not be scored as a draw" begin
+        # Bug: the draw-rescue fallback used to trigger on root_prior_count >= 2,
+        # but that count already includes the CURRENT occurrence, so 2 means the
+        # position has only happened twice so far (this being the 2nd time) — one
+        # more genuine recurrence is required for an actual 3-fold draw, and it is
+        # NOT guaranteed by an arbitrary losing move. Overriding to 0 here falsely
+        # reports a draw for a move that plainly loses (e.g. hangs a queen).
+        b  = board_from_fen("k7/8/1q6/8/8/8/8/K7 w - - 0 1")
+        si = SearchInfo()
+        _  = search_move(b, 200; si)
+
+        pc = Dict{UInt64,Int}(b.hash => 2)   # 2nd occurrence, not yet a draw
+        r  = search_move(b, 500; si, prior_counts = pc)
+        @test r.score < 0
     end
 
     include("syzygy_test.jl")
