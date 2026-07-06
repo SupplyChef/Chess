@@ -11,43 +11,15 @@
 # The "score_cp" column is the Stockfish centipawn evaluation from White's
 # perspective (positive = White better).
 #
-# ── Downloading the data ──────────────────────────────────────────────────────
-#   # State-value file (~36 GB):
-#   wget https://storage.googleapis.com/searchless_chess/data/train/state_value_data.bag
+# ── Converting the source .bag file → CSV ────────────────────────────────────
+# tools/bag_to_csv.py streams just the records it needs directly from Google
+# Cloud Storage via HTTP range requests (the bagz index tells it exactly
+# which byte range holds the first N records), so it never has to download
+# the full ~38.6 GB file. It decodes the (fen, win_prob) records itself
+# (varint-length-prefixed UTF-8 FEN + big-endian double), so it has no
+# dependency on apache_beam or the searchless_chess Python package.
 #
-# ── Converting .bag → CSV ─────────────────────────────────────────────────────
-# The .bag format is read via the searchless_chess Python library.
-# Clone the repo first: git clone https://github.com/google-deepmind/searchless_chess
-#
-#   pip install apache-beam zstandard
-#   python3 - <<'EOF'
-#   import sys, csv, math
-#   sys.path.insert(0, '/path/to/searchless_chess')
-#   from searchless_chess.src import bagz, constants
-#
-#   BAG   = 'state_value_data.bag'
-#   OUT   = 'chessbench.csv'
-#   CLIP  = 1500   # centipawn clip; positions beyond this are filtered later
-#
-#   coder  = constants.CODERS['state_value']
-#   reader = bagz.BagReader(BAG)
-#
-#   def win_prob_to_cp(p, active_is_white):
-#       # win_prob is from the side-to-move's perspective; convert to White's cp.
-#       p = max(1e-7, min(1 - 1e-7, p))
-#       cp = 400.0 * math.log(p / (1.0 - p))   # logit scaled to centipawns
-#       return cp if active_is_white else -cp
-#
-#   with open(OUT, 'w', newline='') as f:
-#       w = csv.writer(f)
-#       w.writerow(['fen', 'score_cp'])
-#       for i in range(len(reader)):
-#           fen, win_prob = coder.decode(reader[i])
-#           active_is_white = fen.split()[1] == 'w'
-#           cp = round(win_prob_to_cp(win_prob, active_is_white))
-#           if abs(cp) <= CLIP:
-#               w.writerow([fen, cp])
-#   EOF
+#   python3 tools/bag_to_csv.py --n 10000000 --out chessbench.csv
 #
 # Option B — EPD files (STS, WAC, custom Stockfish annotations):
 #   Use tools/epd_to_csv.jl (not yet written) to convert.
@@ -97,7 +69,7 @@ function load_positions(path::String;
         end
 
         # Skip positions in check (tactical noise dominates static eval)
-        king_in_check(b) && (skipped += 1; continue)
+        king_in_check(b, b.side) && (skipped += 1; continue)
 
         # Skip very sparse positions (endgame tablebases would be more accurate)
         count_bits(all_occ(b)) < 5 && (skipped += 1; continue)
