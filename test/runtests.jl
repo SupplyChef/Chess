@@ -216,7 +216,7 @@ using Test
         # White has an extra queen.
         b = board_from_fen("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
         e = evaluate(b)
-        @test e.material == 1000
+        @test e.material == 1241
         @test total(e) > 800
     end
 
@@ -573,8 +573,8 @@ using Test
         b = board_from_fen("1k6/8/8/3p4/4P3/8/8/1K6 w - - 0 1")
         m = move_from_uci(b, "e4d5")
         @test Chess._see_ge(b, m, 0)   == true
-        @test Chess._see_ge(b, m, 100) == true
-        @test Chess._see_ge(b, m, 101) == false
+        @test Chess._see_ge(b, m, 133) == true
+        @test Chess._see_ge(b, m, 134) == false
     end
 
     @testset "SEE - even exchange" begin
@@ -586,23 +586,23 @@ using Test
     end
 
     @testset "SEE - losing capture" begin
-        # NxP where the pawn is defended by a pawn: 100 − 320 = −220.
+        # NxP where the pawn is defended by a pawn: 133 − 349 = −216.
         b = board_from_fen("1k6/8/4p3/3p4/8/4N3/8/1K6 w - - 0 1")
         m = move_from_uci(b, "e3d5")
         @test Chess._see_ge(b, m, 0)    == false
-        @test Chess._see_ge(b, m, -220) == true
-        @test Chess._see_ge(b, m, -219) == false
+        @test Chess._see_ge(b, m, -216) == true
+        @test Chess._see_ge(b, m, -215) == false
     end
 
     @testset "SEE - x-ray battery" begin
         # Doubled rooks on the d-file vs rook d5 defended by knight f6:
-        # Rxd5 Nxd5 Rxd5 nets 500 − 500 + 320 = +320.  The second rook only
+        # Rxd5 Nxd5 Rxd5 nets 633 − 633 + 349 = +349.  The second rook only
         # joins the exchange through the square the first rook vacated.
         b = board_from_fen("1k6/8/5n2/3r4/8/8/3R4/1K1R4 w - - 0 1")
         m = move_from_uci(b, "d2d5")
         @test Chess._see_ge(b, m, 0)   == true
-        @test Chess._see_ge(b, m, 320) == true
-        @test Chess._see_ge(b, m, 321) == false
+        @test Chess._see_ge(b, m, 349) == true
+        @test Chess._see_ge(b, m, 350) == false
     end
 
     @testset "SEE - king recapture legality" begin
@@ -610,7 +610,7 @@ using Test
         # the capture up: Kxd5 would be illegal, so we win the pawn cleanly.
         b = board_from_fen("1r6/8/3k4/3p4/8/4N3/8/3R2K1 w - - 0 1")
         m = move_from_uci(b, "e3d5")
-        @test Chess._see_ge(b, m, 100) == true
+        @test Chess._see_ge(b, m, 133) == true
         # Same capture without the backup rook: the king legally recaptures
         # and we lose knight for pawn.
         b2 = board_from_fen("1r6/8/3k4/3p4/8/4N3/8/6K1 w - - 0 1")
@@ -835,7 +835,7 @@ using Test
         m7 = move_from_uci(b, "c4c7")
         m8 = move_from_uci(b, "c4c8")
         @test Chess._see_ge(b, m7, 0)   == false   # rook hangs to Qf7xRc7
-        @test Chess._see_ge(b, m7, -500) == true    # threshold at full rook loss
+        @test Chess._see_ge(b, m7, -633) == true    # threshold at full rook loss
         @test Chess._see_ge(b, m8, 0)   == true     # c8 is undefended: SEE = 0
     end
 

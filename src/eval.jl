@@ -1,10 +1,15 @@
 # Static evaluation. Positive = White is better (centipawns).
 
 # ── Piece values ───────────────────────────────────────────────────────────────
-# Indexed by Int(kind)+1: NoPiece=0 Pawn=100 Knight=320 Bishop=335 Rook=500 Queen=1000 King=20000
-# Bishop-knight gap (15 cp) exceeds the doubled-pawn penalty (12 cp), so trading
+# Indexed by Int(kind)+1: NoPiece=0 Pawn=133 Knight=349 Bishop=372 Rook=633 Queen=1241 King=20000
+# Tuned by L-BFGS sigmoid-loss regression against ~2M Stockfish-16 win-probability
+# labels from ChessBench (see src/tune.jl); held-out loss improved ~25%, confirming
+# the fit isn't just memorizing the training set. PST tables and scalar bonuses
+# below are still the hand-tuned defaults — see src/tune_eval.jl for the full
+# tunable feature vector if a future pass wants to retune those too.
+# Bishop-knight gap (23 cp) exceeds the doubled-pawn penalty (12 cp), so trading
 # a bishop for a knight purely to create doubled pawns is not considered worthwhile.
-const PIECE_VALUE = (0, 100, 320, 335, 500, 1000, 20_000)
+const PIECE_VALUE = (0, 133, 349, 372, 633, 1241, 20_000)
 
 # ── Piece-square tables ────────────────────────────────────────────────────────
 # 64 entries written rank-8 → rank-1, file-a → file-h (visual board order).
