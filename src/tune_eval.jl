@@ -29,6 +29,23 @@ end
     dot(φ, θ)
 end
 
+"""
+    evaluate_tuned(b, θ) -> Int
+
+Score a position with an arbitrary full weight vector θ (material + PST +
+the 74 scalar bonuses), from White's perspective in centipawns — a complete,
+ready-to-use alternative to `evaluate(b)` for any θ produced by `tune_weights`
+/ `run_tuning`, without hand-translating scalar bonuses back into eval.jl.
+
+This calls `extract_features` on every invocation, so — like `extract_features`
+itself — it skips the pawn-structure cache and lazy-eval shortcut `evaluate(b)`
+uses for search speed. Fine for analysis, self-play A/B comparisons, or
+validating a tuning run; not a drop-in replacement inside the search hot path.
+"""
+function evaluate_tuned(b::Board, θ::Vector{Float64})::Int
+    round(Int, score_from_weights(extract_features(b), θ))
+end
+
 # ── Material ───────────────────────────────────────────────────────────────────
 function _feat_material!(φ, b)
     for c in (White, Black)

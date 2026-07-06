@@ -74,7 +74,7 @@ export
     EvalBreakdown, evaluate, total, explain, PIECE_VALUE,
     # tuning
     N_WEIGHTS, default_weights, weights_to_source,
-    extract_features, score_from_weights,
+    extract_features, score_from_weights, evaluate_tuned,
     load_positions, build_feature_matrix, save_dataset, load_dataset,
     tune_weights, run_tuning, sigmoid_loss,
     # config
