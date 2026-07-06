@@ -704,8 +704,17 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # repeatable positions are counted.
     # isempty fast-path: prior_counts is empty (or nearly so) in analysis/EPD/
     # bench runs, and the Dict lookup is measurable at every node.
+    #
+    # si.path[1] is always the root's own hash (pushed by _search_root before its
+    # first candidate move, and unchanged thereafter for the whole search). That
+    # occurrence is already included in prior_counts[root] — apply_moves! counts a
+    # position as soon as it is reached, and root is the position the game is
+    # currently at. Scanning from i=1 would therefore count the root's single real
+    # occurrence twice (once via prior_counts, once via path[1]) for any line that
+    # transposes back to the root position, declaring a draw one repetition too
+    # early. Starting the scan at i=2 counts each real occurrence exactly once.
     let reps = isempty(si.prior_counts) ? 0 : get(si.prior_counts, b.hash, 0)
-        @inbounds for i in 1:si.path_ptr
+        @inbounds for i in 2:si.path_ptr
             si.path[i] == b.hash && (reps += 1)
             reps >= 2 && break
         end
@@ -1629,13 +1638,20 @@ function search_move(b::Board, time_ms::Int;
     # contains a position that we can reach in one move (prior_counts >= 2 means
     # it has appeared twice before — playing to it now creates the 3rd occurrence
     # and Lichess auto-enforces the draw), prefer that drawing move.
-    # Also check if we are already IN a repeated position (prior_counts[root] >= 2)
-    # and don't have a BETTER score elsewhere; in that case any move is fine but
-    # we log it so the caller can claim the draw if needed.
+    # Also check if we are already IN a repeated position and don't have a BETTER
+    # score elsewhere; in that case any move is fine but we log it so the caller
+    # can claim the draw if needed.
     if best_score < 0
-        # If the root position itself has appeared >= 2 times before, this IS the
-        # 3rd occurrence and Lichess will auto-enforce the draw.  Score it as 0.
-        if si.root_prior_count >= 2
+        # root_prior_count, unlike the prior_counts lookups below for not-yet-played
+        # positions, already includes the CURRENT occurrence: apply_moves! increments
+        # a position's count as soon as it is reached, and root is the position we
+        # are reaching right now. So root_prior_count == 3 (not 2) is what means "this
+        # position has already recurred for the 3rd time" — a draw claimable this very
+        # instant, regardless of which move we play next. root_prior_count == 2 only
+        # means the position has happened twice so far (this being the 2nd time); one
+        # more genuine recurrence is still needed and is NOT guaranteed by an arbitrary
+        # move, so it must not be short-circuited here.
+        if si.root_prior_count >= 3
             best_score = 0
             pv         = isempty(pv) ? [best_move] : pv
         else
