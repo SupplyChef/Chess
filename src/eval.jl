@@ -462,7 +462,8 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
             for s in BitIter(bb(b, c, Rook))
                 atk  = rook_attacks(s, occ) & ~our_occ
                 safe = count_bits(atk & ~their_atk)
-                score += sign * (safe ÷ 2)            # 1 cp per 2 safe moves (was 1 each)
+                # Tapered mobility: rooks are more valuable when active in endgames.
+                score += sign * (safe * (24 + (24 - ph)) ÷ 48)
                 # Restriction penalty — rooks need open files/ranks
                 safe == 0 && (score -= sign * 100)
                 safe == 1 && (score -= sign * 18)
@@ -557,12 +558,12 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     # PSTs already reward (king centralisation), four additional incentives apply:
     #
     #   (a) Own king → own passed pawns: escort them to promotion.
-    #       Bonus = (7 − dist) × eg_weight × 2 ÷ 12
-    #       At bare-king endgame (eg_weight=24): up to +28 cp per pawn.
+    #       Bonus = (7 − dist) × eg_weight × 3 ÷ 12
+    #       At bare-king endgame (eg_weight=24): up to +42 cp per pawn.
     #
     #   (b) Own king → enemy passed pawns: blockade or capture them.
-    #       Bonus = (7 − dist) × eg_weight × 3 ÷ 12
-    #       At bare-king endgame: up to +42 cp per pawn.
+    #       Bonus = (7 − dist) × eg_weight × 4 ÷ 12
+    #       At bare-king endgame: up to +56 cp per pawn.
     #
     #   (c) Enemy king near the edge/corner: mating patterns require the losing
     #       king to be confined.  corner_dist = min(file, 7−file, rank, 7−rank).
@@ -615,11 +616,11 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
 
             for s in BitIter(our_pawns)
                 _is_passed(s, c, their_pawns) || continue
-                score += sign * (7 - _chebyshev(our_k, s)) * eg_weight * 2 ÷ 12
+                score += sign * (7 - _chebyshev(our_k, s)) * eg_weight * 3 ÷ 12
             end
             for s in BitIter(their_pawns)
                 _is_passed(s, other(c), our_pawns) || continue
-                score += sign * (7 - _chebyshev(our_k, s)) * eg_weight * 3 ÷ 12
+                score += sign * (7 - _chebyshev(our_k, s)) * eg_weight * 4 ÷ 12
             end
 
             their_kf    = file_of(their_k)
@@ -645,13 +646,19 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                 # Our rook behind our passed pawn — the classic battery.
                 for rs in BitIter(my_rooks & FILE_MASK[f+1])
                     behind = c == White ? rank_of(rs) < r : rank_of(rs) > r
-                    if behind; score += sign * 25; break; end
+                    if behind; score += sign * 40; break; end
+                    # Our rook in front of our passed pawn — bad, blocks the pawn.
+                    in_front = c == White ? rank_of(rs) > r : rank_of(rs) < r
+                    if in_front; score -= sign * 20; break; end
                 end
                 # Enemy rook in front of our passed pawn — blockading it.
                 # We reward the rook's OWNER (the blocking side) via sign flip.
                 for rs in BitIter(enemy_rooks & FILE_MASK[f+1])
                     blocking = c == White ? rank_of(rs) > r : rank_of(rs) < r
-                    if blocking; score -= sign * 20; break; end
+                    if blocking; score -= sign * 30; break; end
+                    # Enemy rook behind our passed pawn — also good for the defender.
+                    behind = c == White ? rank_of(rs) < r : rank_of(rs) > r
+                    if behind; score -= sign * 15; break; end
                 end
                 # Rook rank cut-off: our rook sits on a rank that separates the
                 # enemy king from the pawn's promotion side.  The king cannot
@@ -664,7 +671,7 @@ function _eval_piece_activity(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                         # Black pawn runs toward rank 0; cut off king above rook rank.
                         cut_off = c == White ? (rr > enemy_kr && rr <= r) :
                                                (rr < enemy_kr && rr >= r)
-                        if cut_off; score += sign * 30; break; end
+                        if cut_off; score += sign * 45; break; end
                     end
                 end
             end
@@ -856,6 +863,23 @@ function _eval_pawn_structure_impl(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)
                             score += sign * (-15)
                         end
                     end
+                end
+            end
+        end
+
+        # Connected passed pawns: adjacent passers support each other and are
+        # very difficult to stop together — a lone piece cannot handle both
+        # simultaneously.  The bonus is large enough to clearly outweigh the
+        # cost of pushing versus making defensive moves.
+        # Scales with rank to reward advanced connected passers.
+        if cfg.eval_connected_passers
+            for s in BitIter(passed_bb)
+                f = file_of(s); r = rank_of(s)
+                neighbor = (f > 0 ? FILE_MASK[f]   : BB(0)) |
+                           (f < 7 ? FILE_MASK[f+2] : BB(0))
+                if (passed_bb & neighbor) != 0
+                    rank_bonus = c == White ? r : 7 - r
+                    score += sign * (20 + rank_bonus * 5)
                 end
             end
         end
