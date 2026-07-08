@@ -428,7 +428,15 @@ recaptures, where we are restoring material balance rather than gaining it).
 """
 function explain_move(result::SearchResult, b::Board, my_color::Color;
                       last_opp_move::Union{Move,Nothing} = nothing)::String
-    our_san  = _approx_san(result.move, b)
+    # Check suffix: standard "+" notation covers every branch below without
+    # each of them having to mention the check separately.
+    gives_check = begin
+        undo_c = make_move!(b, result.move)
+        chk    = king_in_check(b, other(my_color))
+        unmake_move!(b, result.move, undo_c)
+        chk
+    end
+    our_san  = _approx_san(result.move, b) * (gives_check ? "+" : "")
     scorestr = result.score >= 0 ? "+$(result.score)" : "$(result.score)"
     note     = "($(scorestr)cp, depth $(result.depth))"
 
@@ -482,6 +490,20 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
     genuinely_winning = swing >= 95 && !is_recap && result.score >= 50
     genuinely_losing  = !is_recap && result.score <= -60 &&
                         (swing <= -95 || result.score <= -300)
+
+    # ── 2a. Sacrifice ──────────────────────────────────────────────────────────
+    # The move deliberately sheds material (SEE loses >100 cp and the PV does
+    # not win it back) yet the engine still likes the position — compensation
+    # in attack or initiative.  Combinations that regain material fall through
+    # to the material-gain branch instead.
+    if !is_recap && !is_castle(result.move) && !is_ep(result.move) &&
+       result.score >= 50 && swing < 95 &&
+       !_see_ge(b, result.move, -100)
+        comp = result.score >= 200 ? "for a winning attack" :
+               gives_check         ? "to expose your king"  :
+                                     "for the attack and initiative"
+        return "I played $our_san — sacrificing my $(_piece_name(our_k)) $comp. $note"
+    end
 
     # ── 2. Immediate material gain ─────────────────────────────────────────────
     # Triggers for captures or promotions. Future wins are handled in positional.
@@ -552,6 +574,40 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
 
     if moving_piece_safe && _is_trapping(b, result.move)
         return "I played $our_san — trapping your piece. $note"
+    end
+
+    # ── 3b. Threats made ───────────────────────────────────────────────────────
+    # The moved piece now attacks an enemy piece that is either undefended or
+    # clearly outvalues the attacker — a concrete threat the opponent must
+    # answer.  Requires the mover itself to be safe (otherwise the "threat"
+    # evaporates with a capture) and a non-losing score (accuracy guard).
+    if moving_piece_safe && result.score >= -30
+        undo_t = make_move!(b, result.move)
+        dst_t  = to_sq(result.move)
+        k_t    = b.piece_on[dst_t+1].kind      # after promotion this differs from our_k
+        occ_t  = all_occ(b)
+        atk_t  = k_t == Pawn   ? pawn_attacks(dst_t, my_color)  :
+                 k_t == Knight ? knight_attacks(dst_t)          :
+                 k_t == Bishop ? bishop_attacks(dst_t, occ_t)   :
+                 k_t == Rook   ? rook_attacks(dst_t, occ_t)     :
+                 k_t == Queen  ? queen_attacks(dst_t, occ_t)    : BB(0)
+        my_val_t = PIECE_VALUE[Int(k_t)+1]
+        best_sq  = -1; best_val = 0; best_kind = NoPiece
+        for s in BitIter(atk_t & b.occ[Int(other(my_color))+1])
+            tk = b.piece_on[s+1].kind
+            tk == King && continue
+            tval = PIECE_VALUE[Int(tk)+1]
+            # Threat is real when the target hangs or outvalues the attacker.
+            if (!_is_defended(b, s, other(my_color)) || tval > my_val_t + 100) &&
+               tval > best_val
+                best_sq = s; best_val = tval; best_kind = tk
+            end
+        end
+        unmake_move!(b, result.move, undo_t)
+        if best_sq >= 0
+            return "I played $our_san — threatening your " *
+                   "$(_piece_name(best_kind)) on $(sq_name(best_sq)). $note"
+        end
     end
 
     # ── 4. Defense / Material Loss ──────────────────────────────────────────────
@@ -795,16 +851,86 @@ function explain_move(result::SearchResult, b::Board, my_color::Color;
     "I played $our_san — $full_concept. $note"
 end
 
+# ── Chat message splitting ─────────────────────────────────────────────────────
+
+# Lichess hard-caps chat messages at 140 characters; anything longer is
+# silently dropped by the API (post_chat truncates as a last resort, losing
+# content).  Split a long explanation into up to `max_msgs` messages at
+# sentence boundaries, falling back to clause boundaries, so nothing is lost.
+function _split_chat(msg::String; limit::Int = 140, max_msgs::Int = 2)::Vector{String}
+    length(msg) <= limit && return [msg]
+
+    # Greedily pack sentence fragments into chunks of at most `limit` chars.
+    parts  = split(msg, r"(?<=\.) "; keepempty = false)
+    chunks = String[]
+    cur    = ""
+    for p0 in parts
+        p    = String(p0)
+        cand = isempty(cur) ? p : cur * " " * p
+        if length(cand) <= limit
+            cur = cand
+            continue
+        end
+        isempty(cur) || push!(chunks, cur)
+        cur = p
+        # A single overlong sentence: break at the last ", " that fits, else
+        # hard-truncate.  `first(cur, limit)` shares its leading bytes with
+        # `cur`, so a byte range found in the prefix is valid in `cur` too
+        # (the comma and space are ASCII, keeping the slice on char bounds).
+        while length(cur) > limit
+            prefix = first(cur, limit)
+            r = findlast(", ", prefix)
+            if r !== nothing
+                push!(chunks, prefix[1:r.start])
+                cur = String(strip(cur[(r.stop+1):end]))
+            else
+                push!(chunks, first(cur, limit - 1) * "…")
+                cur = ""
+            end
+        end
+    end
+    isempty(cur) || push!(chunks, cur)
+
+    # Cap the message count; mark truncation on the last kept chunk.
+    if length(chunks) > max_msgs
+        chunks = chunks[1:max_msgs]
+        if length(chunks[end]) <= limit - 1
+            chunks[end] *= "…"
+        end
+    end
+    chunks
+end
+
+"""
+    explain_move_messages(result, b, my_color; last_opp_move=nothing) → Vector{String}
+
+Like `explain_move`, but returns the explanation as 1-2 chat-ready messages,
+each guaranteed to fit the 140-character Lichess limit, instead of a single
+string that the transport layer might truncate mid-sentence.
+"""
+function explain_move_messages(result::SearchResult, b::Board, my_color::Color;
+                               last_opp_move::Union{Move,Nothing} = nothing)::Vector{String}
+    _split_chat(explain_move(result, b, my_color; last_opp_move = last_opp_move))
+end
+
 # ── explain_opponent_move ──────────────────────────────────────────────────────
 
 """
-    explain_opponent_move(b_before, opp_move, engine_result) → String
+    explain_opponent_move(b_before, opp_move, engine_result; after=nothing) → String
 
 Coaching mode: compare the opponent's actual move to what the engine would play.
 `b_before` is the position *before* the opponent moved.
+
+`after`, when provided, is a `SearchResult` for the position AFTER `opp_move`
+(scored from OUR side).  It enables two richer messages:
+- severity labels (inaccuracy / mistake / blunder) from the centipawns the
+  opponent gave up relative to the engine's preferred move, and
+- concrete refutations of losing captures ("Taking on e5 loses material —
+  Nxe5 refutes it").
 """
 function explain_opponent_move(b_before::Board, opp_move::Move,
-                               engine_result::SearchResult)::String
+                               engine_result::SearchResult;
+                               after::Union{SearchResult,Nothing} = nothing)::String
     engine_result.move == NULL_MOVE && return ""
     opp_san    = _approx_san(opp_move, b_before)
     engine_san = _approx_san(engine_result.move, b_before)
@@ -814,6 +940,39 @@ function explain_opponent_move(b_before::Board, opp_move::Move,
     reply_str = length(engine_result.pv) >= 2 ?
                 ", after which I'd play $(_approx_san(engine_result.pv[2], b_before))" : ""
     unmake_move!(b_before, engine_result.move, undo)
+
+    if after !== nothing && after.move != NULL_MOVE
+        # engine_result.score: best the opponent could get (their POV).
+        # after.score: our score once opp_move is on the board, so the
+        # opponent's resulting score is -after.score.  The difference is the
+        # centipawns the move gave up against the engine's preference.
+        loss = engine_result.score + after.score
+        severity = loss >= 300 ? "That's a blunder" :
+                   loss >= 150 ? "That's a mistake" :
+                   loss >=  50 ? "A slight inaccuracy" : ""
+
+        # Refutation of a losing capture: the opponent grabbed something, but
+        # our reply wins material over the PV.
+        if (is_capture(opp_move) || is_ep(opp_move)) && loss >= 150 &&
+           after.score >= 100
+            undo_a = make_move!(b_before, opp_move)
+            refute_san = _approx_san(after.move, b_before)
+            swing      = _pv_material_swing(after.pv, b_before)
+            unmake_move!(b_before, opp_move, undo_a)
+            if swing >= 95
+                lead = isempty(severity) ? "Taking on $(sq_name(to_sq(opp_move)))" :
+                       "$severity — taking on $(sq_name(to_sq(opp_move)))"
+                return "$lead loses material: $refute_san refutes it. " *
+                       "I'd have played $engine_san. [depth $(engine_result.depth)]"
+            end
+        end
+
+        if !isempty(severity)
+            return "$severity — I'd have played $engine_san there$reply_str. " *
+                   "[depth $(engine_result.depth)]"
+        end
+    end
+
     "As your coach: I'd have played $engine_san there$reply_str. " *
     "Let's see how $opp_san works out. [depth $(engine_result.depth)]"
 end
@@ -1114,28 +1273,98 @@ end
 Return the most specific recognised opening name for the given UCI move list,
 or "" if none matches.
 """
+# Longest-prefix opening book, UCI move sequences → names.  Sorted once at
+# load time so the most specific (longest) prefix always wins the lookup.
+const _OPENING_BOOK = sort([
+    # ── 1.e4 e5 ────────────────────────────────────────────────────────────────
+    (["e2e4","e7e5","g1f3","b8c6","f1b5","a7a6","b5a4","g8f6","e1g1","f8e7"], "Ruy López, Closed"),
+    (["e2e4","e7e5","g1f3","b8c6","f1b5","a7a6","b5c6"],  "Ruy López, Exchange"),
+    (["e2e4","e7e5","g1f3","b8c6","f1b5","a7a6"],         "Ruy López, Morphy Defense"),
+    (["e2e4","e7e5","g1f3","b8c6","f1b5","g8f6"],         "Ruy López, Berlin Defense"),
+    (["e2e4","e7e5","g1f3","b8c6","f1b5"],                "Ruy López"),
+    (["e2e4","e7e5","g1f3","b8c6","f1c4","f8c5","b2b4"],  "Evans Gambit"),
+    (["e2e4","e7e5","g1f3","b8c6","f1c4","f8c5"],         "Italian, Giuoco Piano"),
+    (["e2e4","e7e5","g1f3","b8c6","f1c4","g8f6"],         "Two Knights Defense"),
+    (["e2e4","e7e5","g1f3","b8c6","f1c4"],                "Italian Game"),
+    (["e2e4","e7e5","g1f3","b8c6","d2d4"],                "Scotch Game"),
+    (["e2e4","e7e5","g1f3","b8c6","b1c3","g8f6"],         "Four Knights Game"),
+    (["e2e4","e7e5","g1f3","b8c6"],                       "King's Knight Opening"),
+    (["e2e4","e7e5","g1f3","g8f6"],                       "Petrov Defense"),
+    (["e2e4","e7e5","g1f3","d7d6"],                       "Philidor Defense"),
+    (["e2e4","e7e5","f2f4"],                              "King's Gambit"),
+    (["e2e4","e7e5","b1c3"],                              "Vienna Game"),
+    (["e2e4","e7e5","f1c4"],                              "Bishop's Opening"),
+    (["e2e4","e7e5"],                                     "King's Pawn Game"),
+    # ── Sicilian ───────────────────────────────────────────────────────────────
+    (["e2e4","c7c5","g1f3","d7d6","d2d4","c5d4","f3d4","g8f6","b1c3","a7a6"], "Sicilian, Najdorf"),
+    (["e2e4","c7c5","g1f3","d7d6","d2d4","c5d4","f3d4","g8f6","b1c3","g7g6"], "Sicilian, Dragon"),
+    (["e2e4","c7c5","g1f3","d7d6","d2d4","c5d4","f3d4","g8f6","b1c3","b8c6"], "Sicilian, Classical"),
+    (["e2e4","c7c5","g1f3","b8c6","d2d4","c5d4","f3d4","g7g6"],               "Sicilian, Accelerated Dragon"),
+    (["e2e4","c7c5","g1f3","b8c6","d2d4","c5d4","f3d4","g8f6"],               "Sicilian, Sveshnikov"),
+    (["e2e4","c7c5","g1f3","e7e6","d2d4","c5d4","f3d4","b8c6"],               "Sicilian, Taimanov"),
+    (["e2e4","c7c5","g1f3","e7e6","d2d4","c5d4","f3d4","a7a6"],               "Sicilian, Kan"),
+    (["e2e4","c7c5","g1f3","b8c6","f1b5"],                "Sicilian, Rossolimo"),
+    (["e2e4","c7c5","g1f3","d7d6","f1b5"],                "Sicilian, Moscow"),
+    (["e2e4","c7c5","g1f3","d7d6","d2d4"],                "Sicilian, Open"),
+    (["e2e4","c7c5","b1c3"],                              "Sicilian, Closed"),
+    (["e2e4","c7c5","c2c3"],                              "Sicilian, Alapin"),
+    (["e2e4","c7c5"],                                     "Sicilian Defense"),
+    # ── French ─────────────────────────────────────────────────────────────────
+    (["e2e4","e7e6","d2d4","d7d5","b1c3","f8b4"],         "French, Winawer"),
+    (["e2e4","e7e6","d2d4","d7d5","b1c3","g8f6"],         "French, Classical"),
+    (["e2e4","e7e6","d2d4","d7d5","e4e5"],                "French, Advance"),
+    (["e2e4","e7e6","d2d4","d7d5","e4d5"],                "French, Exchange"),
+    (["e2e4","e7e6","d2d4","d7d5","b1d2"],                "French, Tarrasch"),
+    (["e2e4","e7e6"],                                     "French Defense"),
+    # ── Caro-Kann ──────────────────────────────────────────────────────────────
+    (["e2e4","c7c6","d2d4","d7d5","b1c3","d5e4","c3e4","c8f5"], "Caro-Kann, Classical"),
+    (["e2e4","c7c6","d2d4","d7d5","e4e5","c8f5"],         "Caro-Kann, Advance"),
+    (["e2e4","c7c6","d2d4","d7d5","e4d5","c6d5","c2c4"],  "Caro-Kann, Panov Attack"),
+    (["e2e4","c7c6","d2d4","d7d5","e4d5"],                "Caro-Kann, Exchange"),
+    (["e2e4","c7c6"],                                     "Caro-Kann Defense"),
+    # ── Other 1.e4 ─────────────────────────────────────────────────────────────
+    (["e2e4","d7d5"],                                     "Scandinavian Defense"),
+    (["e2e4","g8f6"],                                     "Alekhine Defense"),
+    (["e2e4","d7d6","d2d4","g8f6"],                       "Pirc Defense"),
+    (["e2e4","d7d6"],                                     "Pirc Defense"),
+    (["e2e4","g7g6"],                                     "Modern Defense"),
+    (["e2e4","b8c6"],                                     "Nimzowitsch Defense"),
+    # ── 1.d4 ───────────────────────────────────────────────────────────────────
+    (["d2d4","d7d5","c2c4","e7e6","b1c3","g8f6","c1g5"],  "QGD, Classical"),
+    (["d2d4","d7d5","c2c4","e7e6"],                       "Queen's Gambit Declined"),
+    (["d2d4","d7d5","c2c4","c7c6"],                       "Slav Defense"),
+    (["d2d4","d7d5","c2c4","d5c4"],                       "Queen's Gambit Accepted"),
+    (["d2d4","d7d5","c2c4","e7e5"],                       "Albin Countergambit"),
+    (["d2d4","d7d5","c2c4"],                              "Queen's Gambit"),
+    (["d2d4","d7d5","g1f3","g8f6","c1f4"],                "London System"),
+    (["d2d4","d7d5","c1f4"],                              "London System"),
+    (["d2d4","g8f6","c1g5"],                              "Trompowsky Attack"),
+    (["d2d4","g8f6","c2c4","e7e6","b1c3","f8b4"],         "Nimzo-Indian Defense"),
+    (["d2d4","g8f6","c2c4","e7e6","g1f3","b7b6"],         "Queen's Indian Defense"),
+    (["d2d4","g8f6","c2c4","e7e6","g2g3"],                "Catalan Opening"),
+    (["d2d4","g8f6","c2c4","g7g6","b1c3","d7d5"],         "Grünfeld Defense"),
+    (["d2d4","g8f6","c2c4","g7g6"],                       "King's Indian Defense"),
+    (["d2d4","g8f6","c2c4","c7c5","d4d5","b7b5"],         "Benko Gambit"),
+    (["d2d4","g8f6","c2c4","c7c5","d4d5","e7e6"],         "Modern Benoni"),
+    (["d2d4","g8f6","c2c4","e7e5"],                       "Budapest Gambit"),
+    (["d2d4","f7f5"],                                     "Dutch Defense"),
+    (["d2d4","d7d5"],                                     "Queen's Pawn Game"),
+    (["d2d4","g8f6"],                                     "Indian Game"),
+    # ── Flank openings ─────────────────────────────────────────────────────────
+    (["c2c4","e7e5"],                                     "English, Reversed Sicilian"),
+    (["c2c4","c7c5"],                                     "English, Symmetric"),
+    (["c2c4"],                                            "English Opening"),
+    (["g1f3","d7d5","c2c4"],                              "Réti Opening"),
+    (["g1f3","d7d5","g2g3"],                              "Réti Opening"),
+    (["g1f3"],                                            "Zukertort Opening"),
+    (["b2b3"],                                            "Nimzo-Larsen Attack"),
+    (["f2f4"],                                            "Bird's Opening"),
+    (["g2g3"],                                            "King's Fianchetto Opening"),
+    (["b2b4"],                                            "Polish Opening"),
+]; by = p -> -length(p[1]))
+
 function _opening_name(moves::Vector{String})::String
-    openings = [
-        (["d2d4","d7d5","c2c4","e7e6","b1c3","g8f6","c1g5"], "Queen's Gambit Declined"),
-        (["e2e4","e7e5","g1f3","b8c6","f1c4","g8f6"],         "Two Knights Defense"),
-        (["e2e4","c7c5","g1f3","d7d6","d2d4"],                "Sicilian, Open"),
-        (["e2e4","e7e5","g1f3","b8c6","f1b5"],                "Ruy López"),
-        (["e2e4","e7e5","g1f3","b8c6","f1c4"],                "Italian Game"),
-        (["d2d4","d7d5","c2c4","c7c6"],                       "Slav Defense"),
-        (["d2d4","g8f6","c2c4","g7g6"],                       "King's Indian Defense"),
-        (["d2d4","g8f6","c2c4","e7e6","g2g3"],                "Catalan Opening"),
-        (["g1f3","d7d5","g2g3"],                              "Réti Opening"),
-        (["d2d4","d7d5","c2c4"],                              "Queen's Gambit"),
-        (["d2d4","d7d5"],                                     "Queen's Pawn Game"),
-        (["e2e4","e7e5","g1f3","b8c6"],                       "King's Pawn, Four Knights"),
-        (["e2e4","e7e5"],                                     "King's Pawn Game"),
-        (["e2e4","c7c5"],                                     "Sicilian Defense"),
-        (["e2e4","e7e6"],                                     "French Defense"),
-        (["e2e4","c7c6"],                                     "Caro-Kann Defense"),
-        (["e2e4","d7d5"],                                     "Scandinavian Defense"),
-        (["c2c4"],                                            "English Opening"),
-    ]
-    for (prefix, name) in openings
+    for (prefix, name) in _OPENING_BOOK
         n = length(prefix)
         length(moves) >= n && moves[1:n] == prefix && return name
     end

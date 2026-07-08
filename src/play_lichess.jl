@@ -202,7 +202,18 @@ function _coaching_async(game_id::String, moves_played::Vector{Move}, remaining_
             # the CPU and delays our next main search if the opponent plays fast.
             coaching_ms = clamp(remaining_ms ÷ 10, 50, 500)
             r_coach  = search_move(b_coach, coaching_ms; si = _coach_si(), verbose = false)
-            msg = explain_opponent_move(b_coach, opp_move, r_coach)
+            # Second quick search AFTER the opponent's move (from our side):
+            # enables severity labels and capture refutations in the message.
+            r_after = if r_coach.move != NULL_MOVE && opp_move != r_coach.move
+                undo_after = make_move!(b_coach, opp_move)
+                ra = search_move(b_coach, max(coaching_ms ÷ 2, 50);
+                                 si = _coach_si(), verbose = false)
+                unmake_move!(b_coach, opp_move, undo_after)
+                ra
+            else
+                nothing
+            end
+            msg = explain_opponent_move(b_coach, opp_move, r_coach; after = r_after)
             # Critical moment detection: flag when opponent's move shifted the
             # position significantly in their favour.
             if prev_score !== nothing && r_coach.move != NULL_MOVE
@@ -217,7 +228,11 @@ function _coaching_async(game_id::String, moves_played::Vector{Move}, remaining_
                     msg = isempty(msg) ? prefix : prefix * msg
                 end
             end
-            isempty(msg) || post_chat(game_id, msg; room = "player")
+            if !isempty(msg)
+                for mm in Chess._split_chat(msg)
+                    post_chat(game_id, mm; room = "player")
+                end
+            end
         catch e
             @warn "Coaching error: $e"
         end
@@ -267,16 +282,18 @@ function make_bot_move(game_id::String, moves_played::Vector{Move}, remaining_ms
     # Post move explanation to both chat rooms.
     # Pass the opponent's last move so explain_move can distinguish a recapture
     # (restoring balance) from a genuine material gain.
-    # Append the PV in UCI so the explanation can be cross-checked against the line.
+    # explain_move_messages splits long explanations into ≤140-char messages at
+    # sentence boundaries so nothing is truncated mid-thought.
     last_opp = isempty(moves_played) ? nothing : moves_played[end]
-    msg = explain_move(result, board, color; last_opp_move = last_opp)
-    # Fit PV tag within the 140-char Lichess limit: include it only if it fits.
+    msgs = explain_move_messages(result, board, color; last_opp_move = last_opp)
+    # Append the PV in UCI to the last message, but only if it still fits.
     pv_tag = isempty(result.pv) ? "" : " [PV: $pv_str]"
-    msg_with_pv = length(msg) + length(pv_tag) <= 140 ? msg * pv_tag :
-                  length(msg) <= 140 ? msg :
-                  msg[1:prevind(msg, 137)] * "…"
-    @async post_chat(game_id, msg_with_pv; room = "player")
-    @async post_chat(game_id, msg_with_pv; room = "spectator")
+    if !isempty(msgs) && length(msgs[end]) + length(pv_tag) <= 140
+        msgs[end] *= pv_tag
+    end
+    # One task per room, posting sequentially, so messages arrive in order.
+    @async for m in msgs; post_chat(game_id, m; room = "player");    end
+    @async for m in msgs; post_chat(game_id, m; room = "spectator"); end
 
     # Opening name: post once per game when we reach move 4–8.
     n_moves = length(moves_played)

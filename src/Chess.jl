@@ -86,7 +86,7 @@ export
     # epd
     EPDEntry, EPDResult, run_epd_suite, epd_failures,
     # explain
-    explain_move, explain_opponent_move, explain_pv_outcome,
+    explain_move, explain_move_messages, explain_opponent_move, explain_pv_outcome,
     # syzygy
     syzygy_init!, syzygy_probe_wdl,
     WDL_LOSS, WDL_BLESSED_LOSS, WDL_DRAW, WDL_CURSED_WIN, WDL_WIN, TB_LARGEST,

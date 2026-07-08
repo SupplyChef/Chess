@@ -578,6 +578,80 @@ using Test
         @test board_to_fen(b) == fen
     end
 
+    @testset "Commentary - sacrifice with check suffix" begin
+        # Bxh7+!? — the bishop takes a pawn defended only by the king: SEE loses
+        # a bishop for a pawn, but the engine's score says the attack is worth it.
+        b   = board_from_fen("6k1/5ppp/8/8/8/3B4/8/6K1 w - - 0 1")
+        fen = board_to_fen(b)
+        m   = move_from_uci(b, "d3h7")
+        undo = make_move!(b, m)
+        kxh7 = move_from_uci(b, "g8h7")
+        unmake_move!(b, m, undo)
+        res = SearchResult(m, 120, 8, 100, evaluate(b), Move[m, kxh7])
+        exp = explain_move(res, b, White)
+        @test occursin("sacrificing my bishop", exp)
+        @test occursin("Bxh7+", exp)          # check suffix on the SAN
+        @test board_to_fen(b) == fen
+    end
+
+    @testset "Commentary - threat announcement" begin
+        # Ne5 attacks the undefended bishop on d7 — a concrete threat.
+        b   = board_from_fen("6k1/3b4/8/8/8/5N2/8/6K1 w - - 0 1")
+        m   = move_from_uci(b, "f3e5")
+        res = SearchResult(m, 20, 8, 100, evaluate(b), Move[m])
+        exp = explain_move(res, b, White)
+        @test occursin("threatening your bishop on d7", exp)
+    end
+
+    @testset "Commentary - coaching severity and capture refutation" begin
+        # Black plays Qxd4?? into cxd4 — queen for a pawn.
+        b        = board_from_fen("3q2k1/8/8/8/3P4/2P5/8/6K1 b - - 0 1")
+        best     = move_from_uci(b, "d8d5")
+        engine_r = SearchResult(best, 0, 8, 100, evaluate(b), Move[best])
+        opp      = move_from_uci(b, "d8d4")
+        undo     = make_move!(b, opp)
+        reply    = move_from_uci(b, "c3d4")
+        after_r  = SearchResult(reply, 900, 8, 100, evaluate(b), Move[reply])
+        unmake_move!(b, opp, undo)
+        msg = explain_opponent_move(b, opp, engine_r; after = after_r)
+        @test occursin("blunder", msg)
+        @test occursin("refutes", msg)
+        # Without `after` the message falls back to the plain coaching form.
+        msg2 = explain_opponent_move(b, opp, engine_r)
+        @test occursin("As your coach", msg2)
+    end
+
+    @testset "Commentary - chat splitting stays within the Lichess limit" begin
+        # Short messages pass through untouched.
+        @test Chess._split_chat("I played e4.") == ["I played e4."]
+        # Two long sentences split at the sentence boundary.
+        s1 = "I played Nf3 — " * join(fill("improving my piece activity", 4), " and ") * "."
+        s2 = "After Nf6 I'll Rxe5, then Kd7 — aiming for a passed pawn on the a-file."
+        msgs = Chess._split_chat(s1 * " " * s2)
+        @test length(msgs) == 2
+        @test all(m -> length(m) <= 140, msgs)
+        # A single overlong sentence is still delivered within the limit.
+        long = "I played Qh5 — " * join(fill("pressure on the kingside", 12), ", ") * "."
+        @test all(m -> length(m) <= 140, Chess._split_chat(long))
+        # explain_move_messages output always fits.
+        b   = board_from_fen(STARTPOS)
+        m   = move_from_uci(b, "e2e4")
+        res = SearchResult(m, 30, 8, 100, evaluate(b), Move[m])
+        @test all(mm -> length(mm) <= 140, explain_move_messages(res, b, White))
+    end
+
+    @testset "Commentary - opening names (longest prefix wins)" begin
+        @test Chess._opening_name(["e2e4","c7c5","g1f3","d7d6","d2d4","c5d4",
+                                   "f3d4","g8f6","b1c3","a7a6"]) == "Sicilian, Najdorf"
+        @test Chess._opening_name(["e2e4","c7c5","c2c3"]) == "Sicilian, Alapin"
+        @test Chess._opening_name(["e2e4","c7c5"])        == "Sicilian Defense"
+        @test Chess._opening_name(["d2d4","f7f5"])        == "Dutch Defense"
+        @test Chess._opening_name(["e2e4","e7e5","f2f4"]) == "King's Gambit"
+        @test Chess._opening_name(["d2d4","g8f6","c2c4","g7g6","b1c3","d7d5"]) ==
+              "Grünfeld Defense"
+        @test Chess._opening_name(["h2h4"]) == ""
+    end
+
     @testset "_is_defended with ignore_sq" begin
         # After e2-e4 in the position above, d5 is defended by the e4 pawn and
         # by nothing else: ignoring e4 must flip the answer.
@@ -780,6 +854,40 @@ using Test
         @test e.score == Int32(45)
         @test e.flag  == Chess.TT_EXACT
         @test e.move  == m2
+    end
+
+    @testset "TT — entry stays within 24 bytes after eval/gen fields" begin
+        # key(8) + score(4) + depth(2) + flag(1) + move(4) + eval(2) + gen(1)
+        # fits the pre-existing 24-byte padded footprint, so the 8M-entry table
+        # size is unchanged.
+        @test sizeof(Chess.TTEntry) == 24
+    end
+
+    @testset "TT — static eval survives an overwrite that has no eval" begin
+        si = SearchInfo()
+        h  = UInt64(0x1122334455667788)
+        b  = board_from_fen(STARTPOS)
+        m1 = move_from_uci(b, "e2e4")
+        Chess._tt_put!(si.tt, h, 3, 40, Chess.TT_EXACT, m1, 123, UInt8(1))
+        @test Int(Chess._tt_get(si.tt, h).eval) == 123
+        # Deeper write for the same position without a known eval must keep
+        # the cached eval — it is position-exact and never goes stale.
+        Chess._tt_put!(si.tt, h, 5, 60, Chess.TT_EXACT, m1, Int(Chess.TT_EVAL_NONE), UInt8(1))
+        e = Chess._tt_get(si.tt, h)
+        @test Int(e.depth) == 5 && Int(e.eval) == 123
+    end
+
+    @testset "TT — stale generation is replaced regardless of depth" begin
+        si = SearchInfo()
+        h  = UInt64(0x8877665544332211)
+        b  = board_from_fen(STARTPOS)
+        m1 = move_from_uci(b, "e2e4")
+        m2 = move_from_uci(b, "d2d4")
+        Chess._tt_put!(si.tt, h, 12, 50, Chess.TT_EXACT, m1, Int(Chess.TT_EVAL_NONE), UInt8(1))
+        # A shallower entry from a NEWER generation replaces the deep stale one.
+        Chess._tt_put!(si.tt, h, 2, -10, Chess.TT_UPPER, m2, Int(Chess.TT_EVAL_NONE), UInt8(2))
+        e = Chess._tt_get(si.tt, h)
+        @test Int(e.depth) == 2 && e.move == m2 && e.gen == UInt8(2)
     end
 
     @testset "TT — mate score ply normalization is consistent across searches" begin
