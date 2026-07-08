@@ -23,13 +23,36 @@ function Base.show(io::IO, r::MatchResult)
     @printf(io, "W:%d D:%d L:%d  (score %.1f)", r.wins, r.draws, r.losses, score)
 end
 
+# Short, balanced opening lines (UCI) used to vary self-play starting positions.
+# Without these every game starts from STARTPOS and only timing noise makes games
+# differ, so a 40-game match can be a handful of distinct games repeated — far too
+# little diversity to measure a small strength delta.  Each line is played twice
+# in a row (once with each engine as White) so opening bias cancels out.
+const SELFPLAY_OPENINGS = [
+    "",                                                          # startpos
+    "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5",                             # Italian
+    "e2e4 c7c5 g1f3 d7d6 d2d4 c5d4 f3d4 g8f6",                   # Sicilian
+    "e2e4 e7e6 d2d4 d7d5",                                       # French
+    "e2e4 c7c6 d2d4 d7d5",                                       # Caro-Kann
+    "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6",                   # Ruy Lopez
+    "d2d4 d7d5 c2c4 e7e6 b1c3 g8f6",                             # QGD
+    "d2d4 d7d5 c2c4 c7c6",                                       # Slav
+    "d2d4 g8f6 c2c4 g7g6 b1c3 f8g7",                             # King's Indian
+    "d2d4 g8f6 c2c4 e7e6 b1c3 f8b4",                             # Nimzo-Indian
+    "d2d4 d7d5 c1f4 g8f6 e2e3 c7c5",                             # London
+    "c2c4 c7c5 g1f3 g8f6",                                       # Symmetric English
+]
+
 """
-    selfplay(cfg_a, cfg_b; games=10, time_ms=100, max_ply=400, verbose=true) → MatchResult
+    selfplay(cfg_a, cfg_b; games=10, time_ms=100, max_ply=400, verbose=true,
+             openings=SELFPLAY_OPENINGS) → MatchResult
 
 Play `games` games (alternating colours) between cfg_a and cfg_b.
 - `time_ms`: milliseconds per move per engine.
 - `max_ply`: game is adjudicated as a draw after this many half-moves.
 - `verbose`: print game-by-game results.
+- `openings`: UCI opening lines cycled in colour-swapped pairs (games 1-2 use
+  the first line, games 3-4 the second, …).  Pass `[""]` for STARTPOS only.
 
 Returns a `MatchResult` from cfg_a's perspective.
 """
@@ -37,7 +60,8 @@ function selfplay(cfg_a::EngineConfig, cfg_b::EngineConfig;
                   games::Int    = 10,
                   time_ms::Int  = 100,
                   max_ply::Int  = 400,
-                  verbose::Bool = true)::MatchResult
+                  verbose::Bool = true,
+                  openings::Vector{String} = SELFPLAY_OPENINGS)::MatchResult
 
     wins = draws = losses = 0
 
@@ -51,6 +75,8 @@ function selfplay(cfg_a::EngineConfig, cfg_b::EngineConfig;
 
         b = board_from_fen(STARTPOS)
         prior_counts = Dict{UInt64,Int}()
+        opening = openings[((g - 1) ÷ 2) % length(openings) + 1]
+        apply_moves!(b, opening, prior_counts)
         ply = 0
         outcome = :draw   # default if max_ply reached
 
