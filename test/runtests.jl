@@ -652,6 +652,21 @@ using Test
         @test Chess._opening_name(["h2h4"]) == ""
     end
 
+    @testset "Threat eval — pawn attacks, hanging, and lesser attackers" begin
+        # White knight on e5 attacked by the d6 pawn: threat against White.
+        b1 = board_from_fen("4k3/8/3p4/4N3/8/8/8/4K3 w - - 0 1")
+        @test Chess._eval_threats(b1) < 0
+        # Black rook on a8 hit by the g2 bishop: hanging (king can't reach a8)
+        # scores a bigger threat than the same rook defended by its king.
+        b_hang = board_from_fen("r3k3/8/8/8/8/8/6B1/4K3 w - - 0 1")
+        b_def  = board_from_fen("rk6/8/8/8/8/8/6B1/4K3 w - - 0 1")
+        @test Chess._eval_threats(b_hang) > Chess._eval_threats(b_def) > 0
+        # The config flag removes the term from evaluate().
+        e_on  = total(evaluate(b_hang))
+        e_off = total(evaluate(b_hang, EngineConfig(eval_threats = false)))
+        @test e_on != e_off
+    end
+
     @testset "_is_defended with ignore_sq" begin
         # After e2-e4 in the position above, d5 is defended by the e4 pawn and
         # by nothing else: ignoring e4 must flip the answer.

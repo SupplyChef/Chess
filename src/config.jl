@@ -204,6 +204,12 @@ Base.@kwdef struct EngineConfig
     # (all other moves fail below tt_score−2*depth in a reduced search), extend
     # it by 1 ply to explore the forced line more deeply.
 
+    eval_threats     ::Bool = true
+    # Threat evaluation: penalties for pieces attacked by enemy pawns (30/45/60
+    # cp for minor/rook/queen), hanging pieces (30/40/55), and heavy pieces
+    # attacked by lesser ones while defended (20/25).  Folded into the
+    # piece_activity component of EvalBreakdown.
+
     eval_kbnk        ::Bool = true
     # K+B+N vs lone K endgame evaluation: add a mating bonus that guides the
     # winning king to the bishop-coloured corner and penalises the losing king

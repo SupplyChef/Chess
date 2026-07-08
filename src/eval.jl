@@ -1248,6 +1248,51 @@ end
 #   White right attacks: (pawns << 9) & ~FILE_MASK[1]   (h-file would wrap → exclude a)
 #   Black left attacks:  (pawns >> 9) & ~FILE_MASK[8]
 #   Black right attacks: (pawns >> 7) & ~FILE_MASK[1]
+# ── Threats ────────────────────────────────────────────────────────────────────
+# Concrete tactical pressure the search horizon may not resolve: pieces
+# attacked by enemy pawns, hanging pieces (attacked and undefended), and
+# heavy pieces harassed by lesser attackers.  White-positive.  Penalties are
+# deliberately below true exchange values — the term flags pressure, the
+# search resolves it.
+function _eval_threats(b::Board)::Int
+    score = 0
+    occ   = all_occ(b)
+    for c in (White, Black)
+        sign = c == White ? -1 : 1      # threats against c reduce c's score
+        them = other(c)
+        ep   = bb(b, them, Pawn)
+        pawn_atk = them == White ?
+            (((ep << 7) & ~FILE_MASK[8]) | ((ep << 9) & ~FILE_MASK[1])) :
+            (((ep >> 9) & ~FILE_MASK[8]) | ((ep >> 7) & ~FILE_MASK[1]))
+        their_occ = @inbounds b.occ[Int(them)+1]
+        our_occ   = @inbounds b.occ[Int(c)+1]
+        for k in (Knight, Bishop, Rook, Queen)
+            for s in BitIter(bb(b, c, k))
+                if (pawn_atk & sq_bb(s)) != 0
+                    # Attacked by a pawn: nearly always a real loss of tempo
+                    # or material for the piece's owner.
+                    score += sign * (k == Queen ? 60 : k == Rook ? 45 : 30)
+                    continue
+                end
+                atks = attackers_to(b, s, occ)
+                (atks & their_occ) == 0 && continue
+                if (atks & our_occ & ~sq_bb(s)) == 0
+                    # Hanging: attacked with no defender at all.
+                    score += sign * (k == Queen ? 55 : k == Rook ? 40 : 30)
+                elseif k == Rook || k == Queen
+                    # Defended, but a lesser piece attacks a heavier one — the
+                    # exchange still favours the attacker.
+                    lesser = k == Queen ?
+                        (bb(b, them, Knight) | bb(b, them, Bishop) | bb(b, them, Rook)) :
+                        (bb(b, them, Knight) | bb(b, them, Bishop))
+                    (atks & lesser) != 0 && (score += sign * (k == Queen ? 25 : 20))
+                end
+            end
+        end
+    end
+    score
+end
+
 function _eval_space(b::Board)::Int
     score = 0
     space_zone = (RANK_MASK[4] | RANK_MASK[5] | RANK_MASK[6]) &
@@ -1336,7 +1381,10 @@ function evaluate(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::EvalBreakdown
 
     EvalBreakdown(
         Int(material),
-        _eval_piece_activity(b, cfg),
+        # Threats fold into the piece-activity component: they describe how
+        # actively placed (or how loose) the pieces are, and reusing the slot
+        # keeps EvalBreakdown stable for explain/tuning consumers.
+        _eval_piece_activity(b, cfg) + (cfg.eval_threats ? _eval_threats(b) : 0),
         _eval_pawn_structure(b, cfg),
         _eval_king_safety(b, cfg),
         (cfg.eval_space ? _eval_space(b) : 0) + complexity,
