@@ -166,6 +166,12 @@ Base.@kwdef struct EngineConfig
 
     # ── New evaluation terms ───────────────────────────────────────────────────
 
+    improving        ::Bool = true
+    # "Improving" heuristic: compare the static eval at this node with the one
+    # two plies earlier on the same path.  When the eval is NOT improving the
+    # position is likely deteriorating, so prune harder: smaller RFP margin,
+    # halved LMP limits, one extra ply of LMR on late quiet moves.
+
     conthist         ::Bool = true
     # Continuation history (1-ply): score quiet moves by how often the
     # (previous piece/square, current piece/square) pair produced a beta

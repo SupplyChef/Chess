@@ -396,6 +396,11 @@ mutable struct SearchInfo
     # Capture history: cutoff statistics for captures, indexed
     # [aggressor kind 1-6, to+1, victim kind 1-6].  Refines MVV-LVA.
     capthist    ::Array{Int32,3}
+    # Static eval at each ply of the current search path (sentinel
+    # -(MATE_SCORE+1) when in check or not computed).  Written by _negamax
+    # before it recurses, so [ply-2] always holds the same-side ancestor's
+    # eval — the basis of the "improving" heuristic.
+    eval_stack  ::Vector{Int}
     move_stack  ::Vector{MoveList}        # pre-allocated, one per ply
     root_moves  ::Vector{Tuple{Int,Move}} # (score, move) from last complete iteration
     nodes       ::Int64
@@ -453,6 +458,7 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
         fill(NULL_MOVE, 64, 64),
         zeros(Int32, 12, 64, 12, 64),
         zeros(Int32, 6, 64, 6),
+        fill(-(MATE_SCORE + 1), MOVE_STACK_SIZE),
         [MoveList() for _ in 1:MOVE_STACK_SIZE],
         Tuple{Int,Move}[],
         Int64(0),
@@ -952,6 +958,19 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             ev_full && (node_ev = static_eval)
         end
     end
+    @inbounds si.eval_stack[ply] = static_eval
+
+    # "Improving": our static eval rose versus two plies ago on this path.
+    # When either eval is unavailable (check, deep node) default to true —
+    # unknown trend must not trigger the harsher pruning below.
+    is_improving = true
+    if cfg.improving && ply >= 3
+        e_now  = static_eval
+        e_prev = @inbounds si.eval_stack[ply-2]
+        if e_now > -MATE_SCORE && e_prev > -MATE_SCORE
+            is_improving = e_now > e_prev
+        end
+    end
 
     # ── Reverse futility pruning (static null move) ───────────────────────────
     # If our position is already so good that even after subtracting a generous
@@ -962,7 +981,11 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
        static_eval != -(MATE_SCORE + 1) &&
        (bb(b, b.side, Knight) | bb(b, b.side, Bishop) |
         bb(b, b.side, Rook)   | bb(b, b.side, Queen)) != BB(0)
-        rfp_score = static_eval - RFP_MARGIN * depth
+        # A deteriorating eval trend makes the "already winning" verdict more
+        # trustworthy — the opponent's last move didn't help them — so a 25%
+        # smaller margin suffices when not improving.
+        rfp_margin = is_improving ? RFP_MARGIN * depth : RFP_MARGIN * depth * 3 ÷ 4
+        rfp_score  = static_eval - rfp_margin
         rfp_score >= beta && return rfp_score
     end
 
@@ -1210,12 +1233,14 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         end
 
         # Late move pruning: at shallow depths, stop searching quiet moves once
-        # we've already tried enough of them without raising alpha.
+        # we've already tried enough of them without raising alpha.  A falling
+        # eval trend halves the budget — late quiets rescue such nodes rarely.
         if !is_capture && !is_promo
             quiet_count += 1
-            if cfg.lmp && !in_check && 1 <= depth <= 3 &&
-               quiet_count > LMP_QUIET_LIMIT[depth]
-                continue
+            if cfg.lmp && !in_check && 1 <= depth <= 3
+                lmp_limit = LMP_QUIET_LIMIT[depth]
+                is_improving || (lmp_limit = max(2, lmp_limit ÷ 2))
+                quiet_count > lmp_limit && continue
             end
         end
         _path_push!(si, b.hash)
@@ -1251,6 +1276,10 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             # is likely important here too — reduce it one ply less.
             cfg.conthist && @inbounds(ml.scores[i]) >= 20_000 &&
                 (reduction = max(0, reduction - 1))
+            # Falling eval trend: late quiet moves get one extra ply of
+            # reduction (still capped so the child search keeps depth ≥ 1).
+            !is_improving && i > 4 &&
+                (reduction = min(reduction + 1, depth - 2))
         end
 
         # ── Principal variation search ───────────────────────────────────────
@@ -1461,6 +1490,10 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
         return (king_in_check(b, b.side) ? -(MATE_SCORE - 1) : 0, NULL_MOVE)
     end
 
+    # Root static eval anchors the "improving" comparison for ply-3 nodes.
+    @inbounds si.eval_stack[1] = king_in_check(b, b.side) ? -(MATE_SCORE + 1) :
+        (b.side == White ? 1 : -1) * total(evaluate(b, si.config))
+
     empty!(si.root_moves)
     _score_moves!(ml, b, hash_move, si.killers, si.history, si.countermoves,
                   NULL_MOVE, 1, si.config, si.conthist, si.capthist, 1)
@@ -1470,14 +1503,16 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
         undo  = make_move!(b, m)
         # PVS at the root: first move full window, later moves scouted with a
         # null window and re-searched only when the scout beats alpha.
+        # The root move is passed as prev_move so ply-2 nodes have the usual
+        # countermove / continuation-history context.
         si.rep_draw_flag = false
         if i == 1 || !si.config.pvs
-            score = -_negamax(b, depth - 1, -beta, -alpha, 2, si, false)
+            score = -_negamax(b, depth - 1, -beta, -alpha, 2, si, false, m)
         else
-            score = -_negamax(b, depth - 1, -(alpha + 1), -alpha, 2, si, false)
+            score = -_negamax(b, depth - 1, -(alpha + 1), -alpha, 2, si, false, m)
             if score > alpha && score < beta && !si.stop
                 si.rep_draw_flag = false
-                score = -_negamax(b, depth - 1, -beta, -alpha, 2, si, false)
+                score = -_negamax(b, depth - 1, -beta, -alpha, 2, si, false, m)
             end
         end
         child_rep = si.rep_draw_flag
