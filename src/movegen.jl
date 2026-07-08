@@ -274,9 +274,21 @@ function _filter_legal_precalculated!(ml::MoveList, b::Board, pin_mask::BB, chec
         moving_kind = b.piece_on[fr+1].kind
 
         if moving_kind == King
-            undo = make_move!(b, m)
-            legal = !king_in_check(b, us)
-            unmake_move!(b, m, undo)
+            # Castling was fully validated at generation time (rights, empty
+            # squares, and from/transit/destination attack tests), so it needs
+            # no further check here.  A regular king move is legal iff the
+            # destination is not attacked with the king REMOVED from the
+            # occupancy — removing it lets a slider ray extend through the
+            # vacated square, catching the "king steps along the check ray"
+            # case that a plain attack test on the current occupancy misses.
+            # The captured piece (if any) stays on `to`; a piece never blocks
+            # attacks to its own square, so it cannot mask an attacker.
+            if fl == MF_KS_CAST || fl == MF_QS_CAST
+                legal = true
+            else
+                them  = other(us)
+                legal = !sq_attacked_by(b, to, them, all_occ(b) ⊻ sq_bb(fr))
+            end
             if legal
                 write_idx += 1; ml.moves[write_idx] = m
             end
