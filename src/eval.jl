@@ -1030,6 +1030,10 @@ end
 # The whole block is skipped when the king is in the centre (files c–e), because
 # a centralised king in the middlegame is already penalised by PST_KING_MG and
 # the shield geometry doesn't apply.
+# Attacker-count multipliers (×8) for the king-zone penalty, indexed by
+# min(count, 5).  Bounded — see the comment at the use site.
+const KS_COUNT_NUM = (8, 8, 10, 12, 13)
+
 function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
     # Game phase: 24 = full material, 0 = king+pawns only.
     # b.phase is maintained incrementally by _add_piece!/_remove_piece!.
@@ -1144,6 +1148,16 @@ function _eval_king_safety(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::Int
                         sus_den *= 5
                     end
                     penalty = (enemy_atk_weight * ph * sus_num) ÷ (24 * sus_den)
+                    # Attacker-count scaling: more attackers make the same
+                    # total weight more dangerous (they cover more squares and
+                    # enable sacrifices).  A bounded per-count multiplier
+                    # (1.0/1.0/1.25/1.5/1.625 for 1-5+ attackers) plus a hard
+                    # 120 cp cap deliberately avoids the quadratic
+                    # weight×count form that was tried before and reverted for
+                    # making piece sacrifices against the king look free.
+                    if cfg.eval_ks_scaling
+                        penalty = min(penalty * KS_COUNT_NUM[min(enemy_atk_count, 5)] ÷ 8, 120)
+                    end
                     score -= sign * penalty
                 end
             end

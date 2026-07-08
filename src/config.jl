@@ -204,6 +204,12 @@ Base.@kwdef struct EngineConfig
     # (all other moves fail below tt_score−2*depth in a reduced search), extend
     # it by 1 ply to explore the forced line more deeply.
 
+    eval_ks_scaling  ::Bool = true
+    # King-zone attacker-count scaling: multiply the attack-weight penalty by
+    # a bounded per-count factor (up to ×1.625 at 5+ attackers) with a hard
+    # 120 cp cap.  Bounded on purpose — a quadratic weight×count version was
+    # tried before and reverted for making sacrifices look free.
+
     eval_threats     ::Bool = true
     # Threat evaluation: penalties for pieces attacked by enemy pawns (30/45/60
     # cp for minor/rook/queen), hanging pieces (30/40/55), and heavy pieces
