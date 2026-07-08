@@ -166,6 +166,12 @@ Base.@kwdef struct EngineConfig
 
     # ── New evaluation terms ───────────────────────────────────────────────────
 
+    tt_static_eval   ::Bool = true
+    # Reuse the exact static eval cached in the transposition table instead of
+    # recomputing it at every node.  Only full (non-lazy) evals are cached, so
+    # the reused value is always position-exact.  TT generation aging is
+    # independent of this flag and always active.
+
     countermove      ::Bool = true
     # Countermove heuristic: record the quiet move that caused a beta cutoff in
     # response to each opponent move.  Score it at 65,000 in move ordering so it

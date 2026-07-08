@@ -31,9 +31,16 @@ struct TTEntry
     depth::Int16
     flag::UInt8
     move::Move
+    eval::Int16    # exact static eval of the position, or TT_EVAL_NONE
+    gen::UInt8     # search generation the entry was written in (for aging)
 end
 
-const TT_EMPTY = TTEntry(UInt64(0), Int32(0), Int16(-1), TT_EXACT, NULL_MOVE)
+# Sentinel for "no static eval stored".  Real evals are clamped to ±30000 on
+# store, so the sentinel can never collide with a stored value.
+const TT_EVAL_NONE = typemin(Int16)
+
+const TT_EMPTY = TTEntry(UInt64(0), Int32(0), Int16(-1), TT_EXACT, NULL_MOVE,
+                         TT_EVAL_NONE, 0x00)
 
 @inline function _tt_get(tt::Vector{TTEntry}, hash::UInt64)::TTEntry
     @inbounds tt[(hash & (TT_SIZE - 1)) + 1]
@@ -46,16 +53,28 @@ end
 # guard, shallow endgame searches corrupt the deep mating lines in the TT and
 # cause the engine to cycle instead of converting a won position.
 @inline function _tt_put!(tt::Vector{TTEntry}, hash::UInt64,
-                           depth::Int, score::Int, flag::UInt8, move::Move)
+                           depth::Int, score::Int, flag::UInt8, move::Move,
+                           ev::Int = Int(TT_EVAL_NONE), gen::UInt8 = 0x00)
     idx = (hash & (TT_SIZE - 1)) + 1
     @inbounds e = tt[idx]
-    # Replace if: empty slot, different position (hash collision), or same/shallower
-    # depth.  Same-depth replacement is required so aspiration window re-searches
-    # (which revisit the same depth with a wider window) can overwrite stale
-    # TT_UPPER/LOWER entries from the earlier narrow-window pass.  Only strictly
-    # deeper entries (depth > current search depth) are preserved.
-    if e.key == 0 || e.key != hash || e.depth <= depth
-        @inbounds tt[idx] = TTEntry(hash, Int32(score), Int16(depth), flag, move)
+    # Replace if: empty slot, different position (hash collision), stale
+    # generation (the entry survives from an earlier search_move call, so its
+    # depth no longer justifies protecting it over fresh results), or
+    # same/shallower depth.  Same-depth replacement is required so aspiration
+    # window re-searches (which revisit the same depth with a wider window) can
+    # overwrite stale TT_UPPER/LOWER entries from the earlier narrow-window
+    # pass.  Only strictly deeper entries of the CURRENT generation are kept.
+    if e.key == 0 || e.key != hash || e.gen != gen || e.depth <= depth
+        # Keep a known static eval when the new write has none for the same
+        # position — the eval is position-exact and never goes stale.
+        stored_ev = ev
+        if ev == Int(TT_EVAL_NONE) && e.key == hash && e.eval != TT_EVAL_NONE
+            stored_ev = Int(e.eval)
+        end
+        ev16 = stored_ev == Int(TT_EVAL_NONE) ? TT_EVAL_NONE :
+               Int16(clamp(stored_ev, -30_000, 30_000))
+        @inbounds tt[idx] = TTEntry(hash, Int32(score), Int16(depth), flag, move,
+                                    ev16, gen)
     end
 end
 
@@ -361,6 +380,11 @@ mutable struct SearchInfo
     # different path to the same position would not have the same repetition context,
     # turning a legitimate draw-by-rep score into a false 0 for a winning/losing node.
     rep_draw_flag::Bool
+    # TT generation counter: bumped once per search_move call and stamped on
+    # every entry written during that search.  The replacement policy treats
+    # entries from older generations as freely replaceable, so leftovers from
+    # long-past moves cannot indefinitely squat on slots by depth alone.
+    tt_gen::UInt8
 end
 
 function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
@@ -382,6 +406,7 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
         0,
         Int64(0), Int64(0), Int64(0), Int64(0), Int64(0), Int64(0),
         false,
+        0x00,
     )
 end
 
@@ -561,9 +586,27 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     in_check = king_in_check(b, b.side)
 
     orig_alpha = alpha
+    ev_store   = Int(TT_EVAL_NONE)   # exact eval available for the TT write below
     if !in_check
-        stand_pat = evaluate_lazy(b, si.config, alpha, beta)
-        stand_pat >= beta && return stand_pat
+        # Reuse the exact static eval cached in the TT when present; otherwise
+        # evaluate, remembering whether the result is full (cacheable) or a
+        # window-relative lazy core (not cacheable).
+        if si.config.tt_static_eval && tte.key == b.hash && tte.eval != TT_EVAL_NONE
+            stand_pat = Int(tte.eval)
+            ev_store  = stand_pat
+        else
+            stand_pat, ev_full = evaluate_lazy_flagged(b, si.config, alpha, beta)
+            ev_full && (ev_store = stand_pat)
+        end
+        if stand_pat >= beta
+            # Cache the eval for future visits, but never clobber an existing
+            # entry for this position — it may hold a useful move and bound.
+            if ev_store != Int(TT_EVAL_NONE) && tte.key != b.hash
+                _tt_put!(si.tt, b.hash, 0, stand_pat, TT_LOWER, NULL_MOVE,
+                         ev_store, si.tt_gen)
+            end
+            return stand_pat
+        end
         alpha = max(alpha, stand_pat)
     end
 
@@ -625,7 +668,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
         end
         flag = best >= beta      ? TT_LOWER :
                best > orig_alpha ? TT_EXACT : TT_UPPER
-        _tt_put!(si.tt, b.hash, 0, store_score, flag, best_move)
+        _tt_put!(si.tt, b.hash, 0, store_score, flag, best_move, ev_store, si.tt_gen)
     end
 
     best
@@ -765,7 +808,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                                wdl == WDL_BLESSED_LOSS ? -1 : 0
                     flag = tb_score >= beta  ? TT_LOWER :
                            tb_score <= alpha ? TT_UPPER : TT_EXACT
-                    _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
+                    _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE,
+                             Int(TT_EVAL_NONE), si.tt_gen)
                     return tb_score
                 end
             end
@@ -831,10 +875,22 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     cfg = si.config
 
     # ── Static evaluation (shared by RFP, futility, and IIR) ─────────────────
-    # Compute once and reuse across all pruning tests that follow.  The lazy
-    # shortcut means this is cheap whenever the score is far outside the window.
-    static_eval = !in_check && depth <= 12 ?
-        evaluate_lazy(b, cfg, alpha, beta) : -(MATE_SCORE + 1)
+    # Compute once and reuse across all pruning tests that follow.  A TT hit
+    # with a cached exact eval skips the computation entirely; otherwise the
+    # lazy shortcut keeps it cheap when the score is far outside the window.
+    # `node_ev` carries the exact (full) eval — when known — to the TT stores
+    # below so future visits can reuse it; lazy cores are never cached.
+    static_eval = -(MATE_SCORE + 1)
+    node_ev     = Int(TT_EVAL_NONE)
+    if !in_check && depth <= 12
+        if cfg.tt_static_eval && tte.key == b.hash && tte.eval != TT_EVAL_NONE
+            static_eval = Int(tte.eval)
+            node_ev     = static_eval
+        else
+            static_eval, ev_full = evaluate_lazy_flagged(b, cfg, alpha, beta)
+            ev_full && (node_ev = static_eval)
+        end
+    end
 
     # ── Reverse futility pruning (static null move) ───────────────────────────
     # If our position is already so good that even after subtracting a generous
@@ -1058,7 +1114,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                                     elseif best_score < -(MATE_SCORE - 2000)
                                         store_score = best_score - ply
                                     end
-                                    _tt_put!(si.tt, b.hash, depth, store_score, TT_LOWER, best_move)
+                                    _tt_put!(si.tt, b.hash, depth, store_score, TT_LOWER, best_move,
+                                             node_ev, si.tt_gen)
                                 end
                                 si.rep_draw_flag = best_is_rep
                                 return best_score
@@ -1202,7 +1259,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                         elseif best_score < -(MATE_SCORE - 2000)
                             store_score = best_score - ply
                         end
-                        _tt_put!(si.tt, b.hash, depth, store_score, TT_LOWER, best_move)
+                        _tt_put!(si.tt, b.hash, depth, store_score, TT_LOWER, best_move,
+                                 node_ev, si.tt_gen)
                     end
                     si.rep_draw_flag = best_is_rep
                     return best_score
@@ -1229,7 +1287,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         elseif best_score < -(MATE_SCORE - 2000)
             store_score = best_score - ply
         end
-        _tt_put!(si.tt, b.hash, depth, store_score, flag, best_move)
+        _tt_put!(si.tt, b.hash, depth, store_score, flag, best_move,
+                 node_ev, si.tt_gen)
     end
 
     # Propagate rep-draw taint to our caller so it can decide whether to cache
@@ -1364,7 +1423,8 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
         # Root score normalization: root is ply 0, so best_score is already node-relative.
         flag = best_score >= beta      ? TT_LOWER :
                best_score > orig_alpha ? TT_EXACT : TT_UPPER
-        _tt_put!(si.tt, b.hash, depth, best_score, flag, best_move)
+        _tt_put!(si.tt, b.hash, depth, best_score, flag, best_move,
+                 Int(TT_EVAL_NONE), si.tt_gen)
     end
     (best_score, best_move)
 end
@@ -1406,6 +1466,9 @@ function search_move(b::Board, time_ms::Int;
     si.prior_counts      = prior_counts
     si.root_prior_count  = get(prior_counts, b.hash, 0)
     si.path_ptr = 0
+    # New TT generation: entries written by earlier search_move calls become
+    # freely replaceable, so stale deep entries can't squat on slots forever.
+    si.tt_gen += 0x01
     fill!(si.killers, NULL_MOVE)
     # Age history at move start (÷2 only — ÷8 was too aggressive and discarded
     # useful ordering signal built up during the engine's own search).
@@ -1426,7 +1489,8 @@ function search_move(b::Board, time_ms::Int;
                            root_wdl == WDL_BLESSED_LOSS ? -1 : 0
                 # Use depth 0 so it's easily overridden by actual search, but
                 # provides a floor/ceiling immediately.
-                _tt_put!(si.tt, b.hash, 0, tb_score, TT_EXACT, NULL_MOVE)
+                _tt_put!(si.tt, b.hash, 0, tb_score, TT_EXACT, NULL_MOVE,
+                         Int(TT_EVAL_NONE), si.tt_gen)
             end
         end
     end

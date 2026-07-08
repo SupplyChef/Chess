@@ -1299,6 +1299,26 @@ unaffected.  Otherwise falls through to the full `evaluate`.
     (b.side == White ? 1 : -1) * total(evaluate(b, cfg))
 end
 
+"""
+    evaluate_lazy_flagged(b, cfg, alpha, beta) → (score, full)
+
+Same as `evaluate_lazy`, but also reports whether the returned score is the
+exact full evaluation (`full = true`) or the window-relative lazy core
+(`full = false`).  Only full scores may be cached in the transposition table:
+a lazy core is valid solely for bound decisions against the window it was
+computed under, and can be ~`LAZY_EVAL_MARGIN` away from the true eval.
+"""
+@inline function evaluate_lazy_flagged(b::Board, cfg::EngineConfig,
+                                       alpha::Int, beta::Int)::Tuple{Int,Bool}
+    if cfg.lazy_eval
+        ph   = Int(clamp(b.phase, 0, 24))
+        core = Int(b.material) + (ph * Int(b.mg_score) + (24 - ph) * Int(b.eg_score)) ÷ 24
+        sc   = (b.side == White ? core : -core) + 10
+        (sc - LAZY_EVAL_MARGIN >= beta || sc + LAZY_EVAL_MARGIN <= alpha) && return (sc, false)
+    end
+    ((b.side == White ? 1 : -1) * total(evaluate(b, cfg)), true)
+end
+
 function evaluate(b::Board, cfg::EngineConfig = DEFAULT_CONFIG)::EvalBreakdown
     ph = Int(clamp(b.phase, 0, 24))
     material = b.material
