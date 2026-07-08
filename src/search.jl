@@ -180,16 +180,23 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
 @inline function _move_score(m::Move, b::Board, hash_move::Move,
                               killers::Matrix{Move}, history::Matrix{Int32},
                               countermoves::Matrix{Move}, prev_move::Move,
-                              ply::Int, cfg::EngineConfig)::Int
+                              ply::Int, cfg::EngineConfig,
+                              conthist::Array{Int32,4}, capthist::Array{Int32,3},
+                              prev_pidx::Int, prev_to1::Int)::Int
     m == hash_move && return 1_000_000
 
     fl = flags(m)
     if (fl & MF_CAPTURE) != 0 || fl == MF_EP
         victim  = fl == MF_EP ? Pawn : @inbounds b.piece_on[to_sq(m)+1].kind
         aggr    = @inbounds b.piece_on[from_sq(m)+1].kind
-        # Victim weight dominates (×10) so any more-valuable capture outranks
-        # any less-valuable capture regardless of the aggressor.
-        mvv_lva = _MVV[Int(victim)+1] * 10 - _MVV[Int(aggr)+1]
+        # Victim weight dominates so any more-valuable capture outranks any
+        # less-valuable capture regardless of aggressor or history.  Tiers are
+        # 3000 apart; the aggressor term spans ≤800 and capture history ≤±1250,
+        # so their sum (≤2050) can reorder captures WITHIN a victim tier but
+        # never across tiers.
+        mvv_lva = _MVV[Int(victim)+1] * 3000 - _MVV[Int(aggr)+1] * 100
+        ch = cfg.capthist ?
+             Int(@inbounds capthist[Int(aggr), to_sq(m)+1, Int(victim)]) ÷ 8 : 0
         # SEE gate: captures of a more valuable piece can never lose material,
         # so the exchange is only resolved when the aggressor outvalues the
         # victim (promo-captures are exempt: the aggressor is always a pawn).
@@ -198,9 +205,9 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
         if cfg.see && (fl & MF_PROMO) == 0 &&
            PIECE_VALUE[Int(aggr)+1] > PIECE_VALUE[Int(victim)+1] &&
            !_see_ge(b, m, 0)
-            return -100_000 + mvv_lva
+            return -200_000 + mvv_lva + ch
         end
-        return 100_000 + mvv_lva
+        return 100_000 + mvv_lva + ch
     end
 
     (fl & MF_PROMO) != 0 && return 90_000
@@ -221,10 +228,15 @@ const _MVV = (0, 1, 2, 2, 4, 8, 0)  # NoPiece P N B R Q K
         @inbounds countermoves[fs_p+1, ts_p+1] == m && return 65_000
     end
 
-    # History heuristic: quiet moves that previously caused cutoffs score
-    # between 1 and 60_000 — above generic quiet moves but below killers.
+    # History heuristic: butterfly history plus double-weighted continuation
+    # history.  Quiet moves with a positive record score between 1 and 60_000 —
+    # above generic quiet moves but below killers.
     fs = from_sq(m); ts = to_sq(m)
     @inbounds h = Int(history[fs+1, ts+1])
+    if prev_pidx != 0
+        pidx = _pidx(@inbounds b.piece_on[fs+1])
+        h += 2 * Int(@inbounds conthist[prev_pidx, prev_to1, pidx, ts+1])
+    end
     h > 0 && return min(h, 60_000)
 
     0
@@ -234,10 +246,14 @@ end
 @inline function _score_moves!(ml::MoveList, b::Board, hash_move::Move,
                                killers::Matrix{Move}, history::Matrix{Int32},
                                countermoves::Matrix{Move}, prev_move::Move,
-                               ply::Int, cfg::EngineConfig, start_idx::Int=1)
+                               ply::Int, cfg::EngineConfig,
+                               conthist::Array{Int32,4}, capthist::Array{Int32,3},
+                               start_idx::Int=1)
+    prev_pidx, prev_to1 = cfg.conthist ? _conthist_ctx(b, prev_move) : (0, 0)
     @inbounds for i in start_idx:length(ml)
         ml.scores[i] = _move_score(ml[i], b, hash_move, killers, history,
-                                   countermoves, prev_move, ply, cfg)
+                                   countermoves, prev_move, ply, cfg,
+                                   conthist, capthist, prev_pidx, prev_to1)
     end
 end
 
@@ -296,6 +312,41 @@ end
     @inbounds cm[fs+1, ts+1] = m
 end
 
+# Piece index for continuation history: 1-12 across both colors.
+@inline _pidx(p::Piece) = 6 * Int(p.color) + Int(p.kind)
+
+# Continuation-history context of the move that led to the current node: the
+# mover now sits on prev_move's destination square.  Returns (pidx, to+1), or
+# (0, 0) when there is no usable previous move (root or null-move child).
+@inline function _conthist_ctx(b::Board, prev_move::Move)::Tuple{Int,Int}
+    prev_move == NULL_MOVE && return (0, 0)
+    ts = to_sq(prev_move)
+    p  = @inbounds b.piece_on[ts+1]
+    p.kind == NoPiece && return (0, 0)
+    (_pidx(p), ts + 1)
+end
+
+# Update continuation history by ±depth², capped like butterfly history.
+@inline function _update_conthist!(ch::Array{Int32,4}, prev_pidx::Int, prev_to1::Int,
+                                   b::Board, m::Move, delta::Int)
+    prev_pidx == 0 && return
+    pidx = _pidx(@inbounds b.piece_on[from_sq(m)+1])
+    t1   = to_sq(m) + 1
+    @inbounds v = ch[prev_pidx, prev_to1, pidx, t1]
+    @inbounds ch[prev_pidx, prev_to1, pidx, t1] =
+        clamp(v + Int32(delta), Int32(-10_000), Int32(10_000))
+end
+
+# Update capture history by ±depth², capped.  Victim of en-passant is a pawn.
+@inline function _update_capthist!(ch::Array{Int32,3}, b::Board, m::Move, delta::Int)
+    aggr = Int(@inbounds(b.piece_on[from_sq(m)+1]).kind)
+    vict = flags(m) == MF_EP ? Int(Pawn) : Int(@inbounds(b.piece_on[to_sq(m)+1]).kind)
+    (aggr == 0 || vict == 0) && return
+    t1 = to_sq(m) + 1
+    @inbounds v = ch[aggr, t1, vict]
+    @inbounds ch[aggr, t1, vict] = clamp(v + Int32(delta), Int32(-10_000), Int32(10_000))
+end
+
 # ── Search state ──────────────────────────────────────────────────────────────
 const MOVE_STACK_SIZE   = MAX_PLY + 64   # regular depth + qsearch budget
 const TRICKINESS_WEIGHT = 0.05           # conservative weight; tune up if play feels too timid
@@ -338,6 +389,13 @@ mutable struct SearchInfo
     # move, indexed by [from_sq+1, to_sq+1] of that opponent move.  Provides a
     # third ordering tier between killers and history.
     countermoves::Matrix{Move}
+    # Continuation history (1-ply): cutoff statistics for a quiet move given
+    # the move it answers.  Indexed [prev piece 1-12, prev to+1, piece 1-12,
+    # to+1] where piece = 6*color + kind (see _pidx).  ~2.4 MB of Int32.
+    conthist    ::Array{Int32,4}
+    # Capture history: cutoff statistics for captures, indexed
+    # [aggressor kind 1-6, to+1, victim kind 1-6].  Refines MVV-LVA.
+    capthist    ::Array{Int32,3}
     move_stack  ::Vector{MoveList}        # pre-allocated, one per ply
     root_moves  ::Vector{Tuple{Int,Move}} # (score, move) from last complete iteration
     nodes       ::Int64
@@ -393,6 +451,8 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
         fill(NULL_MOVE, 2, MAX_PLY),
         zeros(Int32, 64, 64),
         fill(NULL_MOVE, 64, 64),
+        zeros(Int32, 12, 64, 12, 64),
+        zeros(Int32, 6, 64, 6),
         [MoveList() for _ in 1:MOVE_STACK_SIZE],
         Tuple{Int,Move}[],
         Int64(0),
@@ -617,7 +677,8 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
     # return alpha (= stand_pat).  In check with no evasions: checkmate.
     length(ml) == 0 && return in_check ? -(MATE_SCORE - ply) : alpha
 
-    _score_moves!(ml, b, NULL_MOVE, si.killers, si.history, si.countermoves, NULL_MOVE, ply, si.config, 1)
+    _score_moves!(ml, b, NULL_MOVE, si.killers, si.history, si.countermoves,
+                  NULL_MOVE, ply, si.config, si.conthist, si.capthist, 1)
 
     best      = in_check ? -(MATE_SCORE - ply) : alpha
     best_move = NULL_MOVE
@@ -1130,7 +1191,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
 
     # 2. Score remaining moves
     _score_moves!(ml, b, hash_move, si.killers, si.history,
-                  si.countermoves, prev_move, ply, cfg, tried_hash ? 2 : 1)
+                  si.countermoves, prev_move, ply, cfg,
+                  si.conthist, si.capthist, tried_hash ? 2 : 1)
 
     # 3. Search remaining moves
     quiet_count = 0   # number of quiet moves searched so far (for LMP)
@@ -1184,6 +1246,11 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
             # (e.g. discovered attacks) are likely ordered late and would otherwise
             # be reduced too much, causing large evaluation swings.
             static_eval < alpha - 200 && (reduction = max(0, reduction - 1))
+            # History-informed LMR: a quiet move with a strong cutoff record
+            # (ordering score ≥ 20k: high combined history, or killer/counter)
+            # is likely important here too — reduce it one ply less.
+            cfg.conthist && @inbounds(ml.scores[i]) >= 20_000 &&
+                (reduction = max(0, reduction - 1))
         end
 
         # ── Principal variation search ───────────────────────────────────────
@@ -1240,6 +1307,8 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                         _update_killers!(si.killers, ply, m)
                         _update_history!(si.history, m, depth)
                         cfg.countermove && _update_countermove!(si.countermoves, prev_move, m)
+                        cp, ct1 = cfg.conthist ? _conthist_ctx(b, prev_move) : (0, 0)
+                        cp != 0 && _update_conthist!(si.conthist, cp, ct1, b, m, depth * depth)
                         # Apply malus to quiet moves searched before this cutoff.
                         if cfg.history_malus
                             for j in loop_start:i-1
@@ -1247,7 +1316,20 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                                 flj = flags(mj)
                                 if (flj & MF_CAPTURE) == 0 && flj != MF_EP && (flj & MF_PROMO) == 0
                                     _update_history_malus!(si.history, mj, depth)
+                                    cp != 0 && _update_conthist!(si.conthist, cp, ct1, b, mj,
+                                                                 -(depth * depth))
                                 end
+                            end
+                        end
+                    elseif is_capture && cfg.capthist
+                        # Capture caused the cutoff: reward it, penalise the
+                        # captures searched before it that failed to cut.
+                        _update_capthist!(si.capthist, b, m, depth * depth)
+                        for j in loop_start:i-1
+                            mj  = ml.moves[j]
+                            flj = flags(mj)
+                            if (flj & MF_CAPTURE) != 0 || flj == MF_EP
+                                _update_capthist!(si.capthist, b, mj, -(depth * depth))
                             end
                         end
                     end
@@ -1330,7 +1412,8 @@ function _trickiness_score(b::Board, m::Move, si::SearchInfo)::Int
 
     tte       = _tt_get(si.tt, b.hash)
     hash_move = tte.key == b.hash ? tte.move : NULL_MOVE
-    _score_moves!(ml, b, hash_move, si.killers, si.history, si.countermoves, NULL_MOVE, 2, si.config)
+    _score_moves!(ml, b, hash_move, si.killers, si.history, si.countermoves,
+                  NULL_MOVE, 2, si.config, si.conthist, si.capthist)
 
     best_score  = -(MATE_SCORE + 1)
     second_best = -(MATE_SCORE + 1)
@@ -1379,7 +1462,8 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
     end
 
     empty!(si.root_moves)
-    _score_moves!(ml, b, hash_move, si.killers, si.history, si.countermoves, NULL_MOVE, 1, si.config, 1)
+    _score_moves!(ml, b, hash_move, si.killers, si.history, si.countermoves,
+                  NULL_MOVE, 1, si.config, si.conthist, si.capthist, 1)
     for i in 1:length(ml)
         m = _pick_move!(ml, i)
         _path_push!(si, b.hash)
@@ -1473,6 +1557,10 @@ function search_move(b::Board, time_ms::Int;
     # Age history at move start (÷2 only — ÷8 was too aggressive and discarded
     # useful ordering signal built up during the engine's own search).
     si.history .÷= 2
+    # Continuation/capture history age once per search only: the arrays are
+    # large (~2.4 MB), so per-iteration aging would cost real time each move.
+    si.conthist .÷= 2
+    si.capthist .÷= 2
     fill!(si.countermoves, NULL_MOVE)
 
     # Root TB probe: if the current position is in the tablebases, we should

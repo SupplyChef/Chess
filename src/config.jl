@@ -166,6 +166,17 @@ Base.@kwdef struct EngineConfig
 
     # ── New evaluation terms ───────────────────────────────────────────────────
 
+    conthist         ::Bool = true
+    # Continuation history (1-ply): score quiet moves by how often the
+    # (previous piece/square, current piece/square) pair produced a beta
+    # cutoff.  Sharper than butterfly history because the reply is scored in
+    # the context of the move it answers.
+
+    capthist         ::Bool = true
+    # Capture history [aggressor kind, target square, victim kind]: refines
+    # MVV-LVA ordering with observed cutoff results, e.g. learning that QxP on
+    # a defended square keeps failing while the same capture elsewhere works.
+
     tt_static_eval   ::Bool = true
     # Reuse the exact static eval cached in the transposition table instead of
     # recomputing it at every node.  Only full (non-lazy) evals are cached, so
