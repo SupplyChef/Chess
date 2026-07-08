@@ -1186,6 +1186,20 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                             if alpha >= beta
                                 si.beta_cutoffs += 1
                                 si.first_move_cutoffs += 1  # hash move is always first tried
+                                # Credit the cutoff in the ordering heuristics just
+                                # like a cutoff from the main loop — a hash move
+                                # that refutes here likely refutes siblings too.
+                                if !is_capture && !is_promo
+                                    _update_killers!(si.killers, ply, m)
+                                    _update_history!(si.history, m, depth)
+                                    cfg.countermove && _update_countermove!(si.countermoves, prev_move, m)
+                                    if cfg.conthist
+                                        cp, ct1 = _conthist_ctx(b, prev_move)
+                                        cp != 0 && _update_conthist!(si.conthist, cp, ct1, b, m, depth * depth)
+                                    end
+                                elseif is_capture && cfg.capthist
+                                    _update_capthist!(si.capthist, b, m, depth * depth)
+                                end
                                 # Write to TT before returning so _extract_pv can
                                 # follow the PV through this cut node.
                                 # Skip the write when the score is rep-tainted: the
