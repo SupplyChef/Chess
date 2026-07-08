@@ -30,10 +30,11 @@ struct TTEntry
     score::Int32
     depth::Int16
     flag::UInt8
+    gen::UInt8    # search generation that wrote the entry (search_move counter)
     move::Move
 end
 
-const TT_EMPTY = TTEntry(UInt64(0), Int32(0), Int16(-1), TT_EXACT, NULL_MOVE)
+const TT_EMPTY = TTEntry(UInt64(0), Int32(0), Int16(-1), TT_EXACT, 0x00, NULL_MOVE)
 
 @inline function _tt_get(tt::Vector{TTEntry}, hash::UInt64)::TTEntry
     @inbounds tt[(hash & (TT_SIZE - 1)) + 1]
@@ -46,16 +47,23 @@ end
 # guard, shallow endgame searches corrupt the deep mating lines in the TT and
 # cause the engine to cycle instead of converting a won position.
 @inline function _tt_put!(tt::Vector{TTEntry}, hash::UInt64,
-                           depth::Int, score::Int, flag::UInt8, move::Move)
+                           depth::Int, score::Int, flag::UInt8, move::Move,
+                           gen::UInt8 = 0x00)
     idx = (hash & (TT_SIZE - 1)) + 1
     @inbounds e = tt[idx]
-    # Replace if: empty slot, different position (hash collision), or same/shallower
-    # depth.  Same-depth replacement is required so aspiration window re-searches
-    # (which revisit the same depth with a wider window) can overwrite stale
-    # TT_UPPER/LOWER entries from the earlier narrow-window pass.  Only strictly
-    # deeper entries (depth > current search depth) are preserved.
-    if e.key == 0 || e.key != hash || e.depth <= depth
-        @inbounds tt[idx] = TTEntry(hash, Int32(score), Int16(depth), flag, move)
+    # Replace if: empty slot, different position (hash collision), older search
+    # generation, or same/shallower depth.  Same-depth replacement is required so
+    # aspiration window re-searches (which revisit the same depth with a wider
+    # window) can overwrite stale TT_UPPER/LOWER entries from the earlier
+    # narrow-window pass.  Within one search, only strictly deeper entries
+    # (depth > current search depth) are preserved.  Entries from PREVIOUS
+    # searches (older gen) are always replaceable regardless of depth: their
+    # scores were computed under a different game history (repetition counts,
+    # halfmove clock), and letting them survive on depth alone made a single
+    # stale deep entry immortal for the rest of the game.  They remain readable
+    # (and thus keep the TT warm across moves) until actually overwritten.
+    if e.key == 0 || e.key != hash || e.gen != gen || e.depth <= depth
+        @inbounds tt[idx] = TTEntry(hash, Int32(score), Int16(depth), flag, gen, move)
     end
 end
 
@@ -361,6 +369,11 @@ mutable struct SearchInfo
     # different path to the same position would not have the same repetition context,
     # turning a legitimate draw-by-rep score into a false 0 for a winning/losing node.
     rep_draw_flag::Bool
+    # TT generation: incremented at the start of every search_move call and
+    # stamped into each entry written.  The replacement policy treats entries
+    # from older generations as always replaceable (see _tt_put!), so a stale
+    # deep entry from a previous move's search cannot become immortal.
+    tt_gen::UInt8
 end
 
 function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
@@ -382,6 +395,7 @@ function SearchInfo(cfg::EngineConfig = DEFAULT_CONFIG)
         0,
         Int64(0), Int64(0), Int64(0), Int64(0), Int64(0), Int64(0),
         false,
+        0x00,
     )
 end
 
@@ -625,7 +639,7 @@ function _quiesce(b::Board, alpha::Int, beta::Int, ply::Int, si::SearchInfo)::In
         end
         flag = best >= beta      ? TT_LOWER :
                best > orig_alpha ? TT_EXACT : TT_UPPER
-        _tt_put!(si.tt, b.hash, 0, store_score, flag, best_move)
+        _tt_put!(si.tt, b.hash, 0, store_score, flag, best_move, si.tt_gen)
     end
 
     best
@@ -765,7 +779,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                                wdl == WDL_BLESSED_LOSS ? -1 : 0
                     flag = tb_score >= beta  ? TT_LOWER :
                            tb_score <= alpha ? TT_UPPER : TT_EXACT
-                    _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE)
+                    _tt_put!(si.tt, b.hash, depth, tb_score, flag, NULL_MOVE, si.tt_gen)
                     return tb_score
                 end
             end
@@ -987,6 +1001,17 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     # because a transposition to the same position via a different path would not
     # have the same repetition context.
     best_is_rep = false
+    # Track whether ANY child returned a rep-tainted score, even one that did not
+    # end up as best.  Such a child's true path-independent value is unknown (the
+    # repetition rule capped it at 0), so this node's computed best_score is only
+    # a LOWER bound on its path-independent value: the tainted move might be worth
+    # far more in a context where the repetition doesn't apply.  Storing EXACT or
+    # UPPER here would launder a path-dependent score into the TT — that was the
+    # bug where a queen-winning capture (whose child position happened to be
+    # repeated in the game history) scored a tainted 0, a quiet move won the max
+    # with a small clean score, and the node was stored EXACT ~0 at high depth,
+    # masking the win from every later search that transposed here.
+    any_rep_child = false
 
     # PVS state: true once one move has been searched with the full window.
     # All later moves get a null-window scout search first (see loop below).
@@ -1036,6 +1061,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
 
                     if si.stop; return 0; end
 
+                    child_rep && (any_rep_child = true)
                     this_is_rep = child_rep && score == 0
                     if score > best_score || (score == best_score && best_is_rep && !this_is_rep)
                         best_score  = score
@@ -1058,7 +1084,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                                     elseif best_score < -(MATE_SCORE - 2000)
                                         store_score = best_score - ply
                                     end
-                                    _tt_put!(si.tt, b.hash, depth, store_score, TT_LOWER, best_move)
+                                    _tt_put!(si.tt, b.hash, depth, store_score, TT_LOWER, best_move, si.tt_gen)
                                 end
                                 si.rep_draw_flag = best_is_rep
                                 return best_score
@@ -1140,8 +1166,9 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
         #   3. if it still beats α inside an open window (α+1 < β), re-search
         #      with the full window to obtain the exact score.  When β = α+1
         #      already (we are inside someone else's scout), step 3 is a no-op.
-        # Reset rep flag before each search leg; take the OR so a rep in any
-        # re-search leg is noticed.
+        # Reset rep flag before each search leg; only the flag left by the LAST
+        # executed leg matters, because that leg's score is the one we keep
+        # (earlier legs' scores are discarded by the re-search).
         si.rep_draw_flag = false
         if !cfg.pvs || !pv_searched
             score = -_negamax(b, depth - 1 + extension - reduction, -beta, -alpha, ply + 1, si, false, m)
@@ -1169,6 +1196,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
 
         si.stop && break
 
+        child_rep && (any_rep_child = true)
         this_is_rep = child_rep && score == 0
         if score > best_score || (score == best_score && best_is_rep && !this_is_rep)
             best_score  = score
@@ -1202,7 +1230,7 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
                         elseif best_score < -(MATE_SCORE - 2000)
                             store_score = best_score - ply
                         end
-                        _tt_put!(si.tt, b.hash, depth, store_score, TT_LOWER, best_move)
+                        _tt_put!(si.tt, b.hash, depth, store_score, TT_LOWER, best_move, si.tt_gen)
                     end
                     si.rep_draw_flag = best_is_rep
                     return best_score
@@ -1220,16 +1248,32 @@ function _negamax(b::Board, depth::Int, alpha::Int, beta::Int,
     if !si.stop && !best_is_rep
         flag = best_score >= beta      ? TT_LOWER :
                best_score > orig_alpha ? TT_EXACT : TT_UPPER
-        # Ply-normalize mate scores before storing so the value is node-relative
-        # rather than root-relative.  Retrieving at any ply then gives the correct
-        # mate distance by applying the inverse adjustment.
-        store_score = best_score
-        if best_score > MATE_SCORE - 2000
-            store_score = best_score + ply
-        elseif best_score < -(MATE_SCORE - 2000)
-            store_score = best_score - ply
+        # If any child was rep-tainted, best_score is only a lower bound on this
+        # node's path-independent value (the tainted move's true worth is unknown
+        # and may exceed best_score in a repetition-free context).  Demote EXACT
+        # to LOWER, and skip UPPER stores entirely ("true ≤ best_score" is not a
+        # claim we can make).  LOWER stores stay valid: the clean best move really
+        # achieves best_score.
+        store_ok = true
+        if any_rep_child
+            if flag == TT_UPPER
+                store_ok = false
+            else
+                flag = TT_LOWER
+            end
         end
-        _tt_put!(si.tt, b.hash, depth, store_score, flag, best_move)
+        if store_ok
+            # Ply-normalize mate scores before storing so the value is node-relative
+            # rather than root-relative.  Retrieving at any ply then gives the correct
+            # mate distance by applying the inverse adjustment.
+            store_score = best_score
+            if best_score > MATE_SCORE - 2000
+                store_score = best_score + ply
+            elseif best_score < -(MATE_SCORE - 2000)
+                store_score = best_score - ply
+            end
+            _tt_put!(si.tt, b.hash, depth, store_score, flag, best_move, si.tt_gen)
+        end
     end
 
     # Propagate rep-draw taint to our caller so it can decide whether to cache
@@ -1308,6 +1352,7 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
     best_score  = -(MATE_SCORE + 1)
     best_move   = NULL_MOVE
     best_is_rep = false
+    any_rep_child = false   # any root move returned a rep-tainted score (see _negamax)
     orig_alpha  = alpha   # needed to distinguish exact from upper-bound results
 
     tte       = _tt_get(si.tt, b.hash)
@@ -1343,10 +1388,18 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
 
         si.stop && break
 
+        child_rep && (any_rep_child = true)
         this_is_rep = child_rep && score == 0
-        # Prefer a non-rep-tainted result even at equal score, so a genuine draw
-        # is chosen over a move whose 0 score comes from a repetition in the subtree.
-        if score > best_score || (score == best_score && best_is_rep && !this_is_rep)
+        # At an equal score of 0, prefer the move whose 0 comes from a repetition
+        # on the search path over a "clean" 0.  At the root the search path IS the
+        # actual game continuation, so a repetition-backed 0 is a draw the engine
+        # can genuinely steer into against best play.  A clean 0, by contrast, may
+        # be a laundered path-dependent score that leaked into the TT (see the
+        # any_rep_child comment in _negamax) — the old preference for the clean 0
+        # made the engine abandon a certain draw for a phantom equal position and
+        # blunder.
+        if score > best_score ||
+           (score == best_score && score == 0 && this_is_rep && !best_is_rep)
             best_score  = score
             best_move   = m
             best_is_rep = this_is_rep
@@ -1364,7 +1417,17 @@ function _search_root(b::Board, depth::Int, alpha::Int, beta::Int,
         # Root score normalization: root is ply 0, so best_score is already node-relative.
         flag = best_score >= beta      ? TT_LOWER :
                best_score > orig_alpha ? TT_EXACT : TT_UPPER
-        _tt_put!(si.tt, b.hash, depth, best_score, flag, best_move)
+        # Same demotion as _negamax: a rep-tainted sibling means best_score is
+        # only a lower bound on the position's path-independent value.
+        store_ok = true
+        if any_rep_child
+            if flag == TT_UPPER
+                store_ok = false
+            else
+                flag = TT_LOWER
+            end
+        end
+        store_ok && _tt_put!(si.tt, b.hash, depth, best_score, flag, best_move, si.tt_gen)
     end
     (best_score, best_move)
 end
@@ -1394,6 +1457,9 @@ function search_move(b::Board, time_ms::Int;
     end
 
     si.stop                = false
+    # New search generation: entries written by previous search_move calls become
+    # replaceable (but stay readable) — see _tt_put!.  UInt8 wraps naturally.
+    si.tt_gen             += 0x01
     si.nodes               = 0
     si.beta_cutoffs        = 0
     si.first_move_cutoffs  = 0
@@ -1426,7 +1492,7 @@ function search_move(b::Board, time_ms::Int;
                            root_wdl == WDL_BLESSED_LOSS ? -1 : 0
                 # Use depth 0 so it's easily overridden by actual search, but
                 # provides a floor/ceiling immediately.
-                _tt_put!(si.tt, b.hash, 0, tb_score, TT_EXACT, NULL_MOVE)
+                _tt_put!(si.tt, b.hash, 0, tb_score, TT_EXACT, NULL_MOVE, si.tt_gen)
             end
         end
     end

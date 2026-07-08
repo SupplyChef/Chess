@@ -427,6 +427,58 @@ using Test
         @test score > 100
     end
 
+    @testset "Regression - rep-tainted sibling must not launder an EXACT TT entry" begin
+        # Bug: a repetition-scored 0 is path-dependent, but the taint flag only
+        # blocked the TT store when the tainted child WAS the node's best.  When a
+        # tainted child merely participated in the max and a clean move won it,
+        # the node was stored EXACT — even though the tainted move's true
+        # path-independent value is unknown and can be far higher.
+        #
+        # Repro: white to move can win the black queen with Qd1xd5 (true value
+        # ≈ +900).  We fabricate a game history in which the position AFTER Qxd5
+        # has already occurred twice, so the capture scores a tainted repetition-0
+        # in-context.  The node's value was then stored EXACT ~0 at high depth,
+        # masking the queen win from every later search that transposed here.
+        # The fix stores at most a LOWER bound when any child was rep-tainted.
+        fen_x = "7k/5ppp/8/3q4/8/8/5PPP/3Q2K1 w - - 0 40"
+        bx    = board_from_fen(fen_x)
+        qxd5  = move_from_uci(bx, "d1d5")
+        undo  = make_move!(bx, qxd5)
+        hash_c = bx.hash
+        unmake_move!(bx, qxd5, undo)
+        hash_x = bx.hash
+
+        si = SearchInfo()
+        pc = Dict{UInt64,Int}(hash_c => 2, hash_x => 1)
+        r  = search_move(bx, 400; si, prior_counts = pc, verbose = false)
+
+        tte = Chess._tt_get(si.tt, hash_x)
+        @test tte.key == hash_x            # the root position was stored
+        # The entry must never claim "exactly ~0" or "at most ~0": the position is
+        # worth ≈ +900 whenever the fabricated repetition context doesn't apply.
+        # A LOWER bound (or a large score) is the only sound thing to record.
+        @test tte.flag == Chess.TT_LOWER || Int(tte.score) > 300
+    end
+
+    @testset "TT generation - entries from an older search are replaceable" begin
+        # Entries persist across search_move calls (warm TT), but their scores
+        # were computed under a different game history.  A deep entry from a
+        # previous search must not be immortal: a store from a NEWER generation
+        # replaces it regardless of depth, while within one generation the
+        # deeper-entry-wins rule still applies.
+        si = SearchInfo()
+        h  = UInt64(0x0123456789abcdef)
+        Chess._tt_put!(si.tt, h, 17, 500, Chess.TT_EXACT, NULL_MOVE, 0x01)
+        # Same generation, shallower: preserved (deeper entry wins within a search).
+        Chess._tt_put!(si.tt, h, 3, 42, Chess.TT_EXACT, NULL_MOVE, 0x01)
+        @test Chess._tt_get(si.tt, h).depth == 17
+        @test Chess._tt_get(si.tt, h).score == 500
+        # Newer generation, shallower: replaces the stale deep entry.
+        Chess._tt_put!(si.tt, h, 3, 42, Chess.TT_EXACT, NULL_MOVE, 0x02)
+        @test Chess._tt_get(si.tt, h).depth == 3
+        @test Chess._tt_get(si.tt, h).score == 42
+    end
+
     @testset "apply_moves! resets prior_counts after a capture" begin
         # After a capture, board.halfmove resets to 0 and apply_moves! must clear
         # prior_counts so pre-capture positions no longer pollute repetition detection.
