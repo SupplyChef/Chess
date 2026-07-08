@@ -204,11 +204,15 @@ Base.@kwdef struct EngineConfig
     # (all other moves fail below tt_score−2*depth in a reduced search), extend
     # it by 1 ply to explore the forced line more deeply.
 
-    eval_ks_scaling  ::Bool = true
+    eval_ks_scaling  ::Bool = false
     # King-zone attacker-count scaling: multiply the attack-weight penalty by
     # a bounded per-count factor (up to ×1.625 at 5+ attackers) with a hard
     # 120 cp cap.  Bounded on purpose — a quadratic weight×count version was
     # tried before and reverted for making sacrifices look free.
+    # Defaults OFF: a 40-game self-play gate at time_ms=200 scored -4.5
+    # (~-61 Elo) against DEFAULT with this on, failing the "strict gate,
+    # revert if negative" bar set for this item.  Left in place, off by
+    # default, for anyone who wants to re-tune the multiplier/cap.
 
     eval_threats     ::Bool = true
     # Threat evaluation: penalties for pieces attacked by enemy pawns (30/45/60
